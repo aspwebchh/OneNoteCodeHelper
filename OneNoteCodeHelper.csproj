@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>Library</OutputType>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>OneNoteCodeHelper</RootNamespace>
+    <AssemblyName>OneNoteCodeHelper</AssemblyName>
+    <!-- COM 外接程序：程序集本身不可见，只在 AddIn 类上单独标 ComVisible -->
+    <ComVisible>false</ComVisible>
+    <!-- 注册由 Tools/register.ps1 写 HKLM/HKCU 完成，不走 regasm -->
+    <RegisterForComInterop>false</RegisterForComInterop>
+    <!--
+      必须强名称签名。Fusion 的规则是：codeBase 指向应用程序目录之外时只对强名称程序集生效，
+      简单名称程序集的 codeBase 会被直接忽略。本外接程序的 DLL 在自己的目录里，而宿主
+      ONENOTE.EXE 的探测路径是 Office 的目录，不签名的话注册表里的 CodeBase 不起作用，
+      COM 激活会以 FileNotFoundException (0x80070002) 失败，OneNote 随即把 LoadBehavior 降为 2。
+    -->
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>OneNoteCodeHelper.snk</AssemblyOriginatorKeyFile>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      必须早绑定。本机 OneNote 的类型库未注册到 CLR 能找到的位置，导致 Type.InvokeMember
+      抛 TYPE_E_LIBNOTREGISTERED、dynamic 抛 E_FAIL（两者实测均失败，而 PowerShell 原生
+      绑定在同一线程上可用）。早绑定直接拿接口 IID 做 QI，不依赖类型库注册。
+      PIA 取自 GAC（随 Office 安装），随仓库携带一份以便 dotnet build 解析——SDK 版 MSBuild
+      不探测 GAC。不能用 EmbedInteropTypes：该 PIA 的 IApplication 不带 ComImport，无法嵌入。
+      运行时优先从 GAC 解析；万一目标机没有，AddIn 的 AssemblyResolve 会从本目录兜底加载。
+    -->
+    <Reference Include="Microsoft.Office.Interop.OneNote">
+      <HintPath>lib\Microsoft.Office.Interop.OneNote.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Ribbon.xml" />
+  </ItemGroup>
+
+</Project>

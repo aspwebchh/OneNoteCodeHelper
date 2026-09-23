@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<!--
+  功能区定义。挂在「开始」选项卡（idMso="TabHome"）上加一个自己的组。
+  图标一律用 Office 内置的 imageMso，省掉自带图片和 loadImage 回调。
+-->
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="OnRibbonLoad">
+  <ribbon>
+    <tabs>
+      <tab idMso="TabHome">
+        <!--
+          不写 insertAfterMso：那个属性要求引用一个确实存在的内置组 id，
+          引错了整份功能区 XML 都会加载失败。不写就自动排在「开始」选项卡末尾。
+        -->
+        <group id="OneNoteCodeHelperGroup" label="代码高亮">
+
+          <button id="OncHighlightSelection"
+                  label="高亮选中"
+                  size="large"
+                  imageMso="HighlightColorPicker"
+                  screentip="把选中的代码变成高亮代码框"
+                  supertip="先在页面上选中代码文字，再点这里。会按下面选定的语言着色，并替换成带底色的代码框。"
+                  onAction="OnHighlightSelection" />
+
+          <button id="OncInsertCode"
+                  label="插入代码"
+                  size="large"
+                  imageMso="PasteTextOnly"
+                  screentip="粘贴代码并插入到当前页"
+                  supertip="打开一个窗口，把代码粘进去、看好预览效果，再插入到当前页面。"
+                  onAction="OnShowInsertWindow" />
+
+          <dropDown id="OncLanguage"
+                    label="语言"
+                    sizeString="自动识别xxx"
+                    screentip="高亮时使用的语言"
+                    getItemCount="GetLanguageCount"
+                    getItemID="GetLanguageId"
+                    getItemLabel="GetLanguageLabel"
+                    getSelectedItemIndex="GetSelectedLanguageIndex"
+                    onAction="OnLanguageChanged" />
+
+          <toggleButton id="OncDarkTheme"
+                        label="深色主题"
+                        imageMso="ThemeColorsGallery"
+                        screentip="在浅色与深色配色之间切换"
+                        supertip="浅色接近 IntelliJ，适合白底页面也适合打印；深色接近 VS Code Dark+。"
+                        getPressed="GetDarkThemePressed"
+                        onAction="OnDarkThemeToggled" />
+
+          <button id="OncOpenLog"
+                  label="诊断日志"
+                  imageMso="FileViewProperties"
+                  screentip="打开插件日志文件"
+                  supertip="出问题时先看这里。日志在 %LOCALAPPDATA%\OneNoteCodeHelper\log.txt。"
+                  onAction="OnOpenLog" />
+
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

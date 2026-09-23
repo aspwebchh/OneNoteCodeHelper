@@ -1,0 +1,14 @@
+# 构建中间文件；bin/ 中的 exe、dll 等产物保留为可跟踪文件
+obj/
+
+# Visual Studio 本地文件
+.vs/
+*.user
+*.suo
+*.userprefs
+# WPF 设计器临时项目，构建时会自动生成
+*_wpftmp.csproj
+
+# 其它临时文件
+*.log
+Thumbs.db
