@@ -314,6 +314,22 @@ namespace OneNoteCodeHelper
             });
         }
 
+        public bool GetShowBordersPressed(object control)
+        {
+            var settings = _settings ?? (_settings = SettingsStore.Load());
+            return settings.ShowBorders;
+        }
+
+        public void OnShowBordersToggled(object control, bool pressed)
+        {
+            Guard("切换边框", () =>
+            {
+                _settings.ShowBorders = pressed;
+                SettingsStore.Save(_settings);
+                AddInLog.Info("代码框边框" + (pressed ? "开启" : "关闭"));
+            });
+        }
+
         public void OnOpenLog(object control)
         {
             Guard("打开日志", () =>

@@ -47,6 +47,14 @@
                         getPressed="GetDarkThemePressed"
                         onAction="OnDarkThemeToggled" />
 
+          <toggleButton id="OncShowBorders"
+                        label="显示边框"
+                        imageMso="BordersAll"
+                        screentip="代码框是否带边框"
+                        supertip="按下时代码框四周有一圈边框；松开则只有底色，没有边框。"
+                        getPressed="GetShowBordersPressed"
+                        onAction="OnShowBordersToggled" />
+
           <button id="OncOpenLog"
                   label="诊断日志"
                   imageMso="FileViewProperties"

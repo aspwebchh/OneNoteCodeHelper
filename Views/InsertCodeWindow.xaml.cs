@@ -57,6 +57,10 @@ namespace OneNoteCodeHelper.Views
             _editor = editor;
             Settings = settings.Clone();
 
+            // 必须最先设：下面给各个下拉赋初值会触发 OnOptionChanged，那时复选框若还是默认的
+            // 未勾选，就会把设置里的 ShowBorders 误改成 false。
+            BorderBox.IsChecked = Settings.ShowBorders;
+
             // 认 OneNote 主窗口做属主，免得窗口跑到 OneNote 后面去。
             if (ownerHandle != IntPtr.Zero)
             {
@@ -87,7 +91,7 @@ namespace OneNoteCodeHelper.Views
         /// <summary>窗口里改过的设置。关闭后由调用方决定要不要持久化。</summary>
         internal AddInSettings Settings { get; }
 
-        /// <summary>用户是否改过语言或主题。</summary>
+        /// <summary>用户是否改过语言、主题、字体或边框。</summary>
         internal bool SettingsChanged { get; private set; }
 
         private static List<LanguageChoice> BuildLanguageChoices()
@@ -121,6 +125,13 @@ namespace OneNoteCodeHelper.Views
             if (!string.IsNullOrEmpty(font) && font != Settings.FontFamily)
             {
                 Settings.FontFamily = font;
+                SettingsChanged = true;
+            }
+
+            var showBorders = BorderBox.IsChecked == true;
+            if (showBorders != Settings.ShowBorders)
+            {
+                Settings.ShowBorders = showBorders;
                 SettingsChanged = true;
             }
 
@@ -167,7 +178,7 @@ namespace OneNoteCodeHelper.Views
                 CodePreviewRenderer.ApplyTheme(document, theme);
                 Preview.Document = document;
 
-                SetStatus($"{document.Blocks.Count} 行，将按 {language.DisplayName} 高亮。");
+                SetStatus($"{CodePreviewRenderer.LineCount(document)} 行，将按 {language.DisplayName} 高亮。");
                 InsertButton.IsEnabled = true;
             }
             catch (Exception ex)

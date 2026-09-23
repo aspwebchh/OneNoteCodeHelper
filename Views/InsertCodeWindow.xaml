@@ -102,6 +102,14 @@
                       SelectionChanged="OnOptionChanged"
                       LostFocus="OnOptionChanged" />
 
+            <CheckBox x:Name="BorderBox"
+                      Content="显示边框"
+                      Margin="20,0,0,0"
+                      VerticalAlignment="Center"
+                      Foreground="{StaticResource Text}"
+                      Checked="OnOptionChanged"
+                      Unchecked="OnOptionChanged" />
+
             <TextBlock x:Name="DetectHint" Foreground="{StaticResource Muted}" Margin="20,0,0,0" />
         </StackPanel>
 
