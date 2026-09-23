@@ -7,16 +7,13 @@ using System.Xml.Linq;
 
 namespace OneNoteCodeHelper.Services
 {
-    /// <summary>功能区「模型」下拉里的一项：显示名 + 发给接口的模型 id。</summary>
+    /// <summary>功能区「模型」下拉里的一项。下拉里直接显示模型 id，也就是发给接口的 model 参数。</summary>
     internal sealed class AiModel
     {
-        internal AiModel(string name, string id)
+        internal AiModel(string id)
         {
-            Name = name;
             Id = id;
         }
-
-        internal string Name { get; }
 
         internal string Id { get; }
     }
@@ -36,17 +33,16 @@ namespace OneNoteCodeHelper.Services
     }
 
     /// <summary>
-    /// 思考强度的三档。接口实测接受 none/minimal/low/medium/high/xhigh/ultra/max，
-    /// 但 low、medium、high 的思考量几乎一样，分那么细没有意义，所以只给三档。
-    /// none 是真的不思考：返回里没有 reasoning_content。
+    /// 思考强度（变体），功能区下拉里直接显示这些名字。取值和请求参数照搬 opencode 配置里 deepseek 模型的 variants：
+    /// none 关掉思考（thinking.type = disabled，不传 reasoning_effort），其余打开思考并把名字作为 reasoning_effort 传过去。
     /// </summary>
     internal static class AiEfforts
     {
         internal const string DefaultId = "high";
 
-        internal static readonly string[] Ids = { "none", "high", "max" };
+        internal const string NoneId = "none";
 
-        internal static readonly string[] Labels = { "不思考", "标准", "深度" };
+        internal static readonly string[] Ids = { NoneId, "low", "medium", "high", "max" };
 
         internal static string Normalize(string id)
         {
@@ -54,9 +50,19 @@ namespace OneNoteCodeHelper.Services
                    ?? DefaultId;
         }
 
-        internal static string LabelOf(string id)
+        /// <summary>把这个变体对应的参数写进请求体。</summary>
+        internal static void ApplyTo(IDictionary<string, object> body, string id)
         {
-            return Labels[Array.IndexOf(Ids, Normalize(id))];
+            id = Normalize(id);
+
+            if (id == NoneId)
+            {
+                body["thinking"] = new Dictionary<string, object> { ["type"] = "disabled" };
+                return;
+            }
+
+            body["thinking"] = new Dictionary<string, object> { ["type"] = "enabled" };
+            body["reasoning_effort"] = id;
         }
     }
 
@@ -92,10 +98,10 @@ namespace OneNoteCodeHelper.Services
 
         internal IReadOnlyList<AiFunction> Functions { get; }
 
-        /// <summary>按名字找模型，找不到（比如配置里删掉了）就用第一个。</summary>
-        internal AiModel FindModel(string name)
+        /// <summary>按 id 找模型，找不到（比如配置里删掉了）就用第一个。</summary>
+        internal AiModel FindModel(string id)
         {
-            return Models.FirstOrDefault(m => string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase))
+            return Models.FirstOrDefault(m => string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase))
                    ?? Models[0];
         }
 
@@ -105,7 +111,7 @@ namespace OneNoteCodeHelper.Services
                    ?? Functions[0];
         }
 
-        internal int IndexOfModel(string name) => Math.Max(0, Models.ToList().IndexOf(FindModel(name)));
+        internal int IndexOfModel(string id) => Math.Max(0, Models.ToList().IndexOf(FindModel(id)));
 
         internal int IndexOfFunction(string name) => Math.Max(0, Functions.ToList().IndexOf(FindFunction(name)));
 
@@ -113,7 +119,7 @@ namespace OneNoteCodeHelper.Services
         internal bool HasSameChoices(AiConfig other)
         {
             return other != null
-                   && Models.Select(m => m.Name).SequenceEqual(other.Models.Select(m => m.Name))
+                   && Models.Select(m => m.Id).SequenceEqual(other.Models.Select(m => m.Id))
                    && Functions.Select(f => f.Name).SequenceEqual(other.Functions.Select(f => f.Name));
         }
     }
@@ -137,7 +143,7 @@ namespace OneNoteCodeHelper.Services
 
         internal const string TypoFunctionName = "错别字修复";
 
-        internal const string DefaultModelName = "Flash";
+        internal const string DefaultModelId = "deepseek-v4-flash";
 
         private const string TypoPrompt =
             "你是一名严谨的中文校对编辑，负责修正笔记里的文字错误：\n" +
@@ -166,8 +172,8 @@ namespace OneNoteCodeHelper.Services
             DefaultMaxTokens,
             new[]
             {
-                new AiModel("Pro", "deepseek-v4-pro"),
-                new AiModel(DefaultModelName, "deepseek-v4-flash")
+                new AiModel(DefaultModelId),
+                new AiModel("deepseek-v4-pro")
             },
             new[]
             {
@@ -192,8 +198,8 @@ namespace OneNoteCodeHelper.Services
                 }
 
                 var models = root.Element("Models")?.Elements("Model")
-                    .Select(e => new AiModel(Trim((string)e.Attribute("name")), Trim((string)e.Attribute("id"))))
-                    .Where(m => m.Name.Length > 0 && m.Id.Length > 0)
+                    .Select(e => new AiModel(Trim((string)e.Attribute("id"))))
+                    .Where(m => m.Id.Length > 0)
                     .ToList();
 
                 var functions = root.Element("Functions")?.Elements("Function")
@@ -253,13 +259,10 @@ namespace OneNoteCodeHelper.Services
                     new XElement("TimeoutSeconds", config.TimeoutSeconds),
                     new XComment(" 单次请求最多输出多少 token（含思考过程）。0 表示用接口的默认值 "),
                     new XElement("MaxTokens", config.MaxTokens),
-                    new XComment(" 功能区「模型」下拉里的选项：name 是显示名，id 是接口的模型名 "),
+                    new XComment(" 功能区「模型」下拉里的选项：id 是接口的模型名，下拉里直接显示它 "),
                     new XElement(
                         "Models",
-                        config.Models.Select(m => new XElement(
-                            "Model",
-                            new XAttribute("name", m.Name),
-                            new XAttribute("id", m.Id)))),
+                        config.Models.Select(m => new XElement("Model", new XAttribute("id", m.Id)))),
                     new XComment(
                         " 功能区「功能」下拉里的选项，可以自己加。Prompt 只需写清楚要做什么；\n" +
                         "       输入输出的 JSON 格式、只返回改动的段落、不要合并拆分段落等约定由插件自动附加，不用写。 "),

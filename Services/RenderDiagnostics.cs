@@ -143,22 +143,61 @@ namespace OneNoteCodeHelper.Services
             return AiOptimizer.CleanReplyText(original, text);
         }
 
+        /// <summary>按默认配置生成的请求体 JSON（不含提示词正文），用来核对思考强度映射成了哪些参数。</summary>
+        internal static string DescribeRequestBody(string effort)
+        {
+            var config = AiConfigStore.Default;
+            var body = AiClient.BuildRequestBody(config, config.Models[0].Id, effort, "system", "user");
+            body.Remove("messages");
+            return AiClient.CreateSerializer().Serialize(body);
+        }
+
+        /// <summary>
+        /// 把一段流式返回（SSE）逐行交给解析，返回 "正文|finish_reason|思考字数|complete 或 incomplete"；
+        /// 流里报错时返回 "ERROR: 消息"。
+        /// </summary>
+        internal static string ParseAiStream(string sse)
+        {
+            var reply = new AiReply();
+            var serializer = AiClient.CreateSerializer();
+
+            try
+            {
+                foreach (var line in sse.Split('\n'))
+                {
+                    AiClient.AbsorbStreamLine(line.TrimEnd('\r'), serializer, reply);
+                }
+            }
+            catch (AiException ex)
+            {
+                return "ERROR: " + ex.Message;
+            }
+
+            return $"{reply.Content}|{reply.FinishReason}|{reply.ReasoningChars}|" +
+                   (reply.IsComplete ? "complete" : "incomplete");
+        }
+
+        internal static string DescribeAiLive(int reasoningChars, int contentChars)
+        {
+            return AiOptimizer.DescribeLive(reasoningChars, contentChars);
+        }
+
         /// <summary>
         /// 用本机 ai-settings.xml 真调一次接口：按「AI 优化」完全一样的提示词和格式问，返回解析后的结果。
         /// paragraphs 用 \n 分隔。
         /// </summary>
-        internal static string RunAiSample(string functionName, string modelName, string effort, string paragraphs)
+        internal static string RunAiSample(string functionName, string modelId, string effort, string paragraphs)
         {
             var config = AiConfigStore.Load();
             var function = config.FindFunction(functionName);
-            var model = config.FindModel(modelName);
+            var model = config.FindModel(modelId);
             var texts = paragraphs.Split('\n');
 
             var content = AiClient.CompleteAsync(
                     config, model.Id, AiEfforts.Normalize(effort),
                     AiOptimizer.BuildSystemPrompt(function.Prompt),
                     AiOptimizer.BuildUserMessage(texts.Select((text, i) => (i + 1, text))),
-                    System.Threading.CancellationToken.None)
+                    null, System.Threading.CancellationToken.None)
                 .GetAwaiter().GetResult();
 
             return $"[{function.Name} · {model.Id} · {AiEfforts.Normalize(effort)}]\n" + ParseAiReply(content);

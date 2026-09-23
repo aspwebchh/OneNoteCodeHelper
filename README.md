@@ -21,8 +21,8 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 |---|---|
 | AI 优化 | 选中文字后点它，按「功能」里选的方式修改并**直接写回**；什么都不选则处理整页（含标题）。弹一个进度小窗，可以取消 |
 | 功能 | 默认有「错别字修复」「排版优化」两项，选项和提示词都来自配置文件，可以自己加 |
-| 模型 | 默认 Pro（`deepseek-v4-pro`）/ Flash（`deepseek-v4-flash`），来自配置文件 |
-| 思考 | 思考强度：不思考（`none`）/ 标准（`high`）/ 深度（`max`） |
+| 模型 | 直接显示发给接口的模型名，默认 `deepseek-v4-flash` / `deepseek-v4-pro`，来自配置文件 |
+| 思考 | 思考强度 `none` / `low` / `medium` / `high` / `max`，参数和 opencode 配置里 deepseek 的 variants 一致：`none` 传 `"thinking":{"type":"disabled"}`；其余传 `"thinking":{"type":"enabled"}` 加 `"reasoning_effort":"<变体名>"` |
 | AI 配置 | 用记事本打开配置文件，保存并关闭记事本后生效 |
 
 几点行为：
@@ -32,6 +32,8 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 - 代码框（段落字体是 Consolas、新宋体等等宽字体）不会交给 AI。
 - AI 处理期间你还可以继续编辑。写回前会重新读页面，处理期间被你改过的段落直接跳过，不会覆盖。
 - 和原文差别太大（相似度低于 0.6）的改动不会写回，防止模型把整段改写掉。
+- 请求走流式，进度窗实时显示「已思考 / 已输出多少字」和已用时间。连续 60 秒一点数据都没收到
+  （接口或网络卡住）会直接报错，不会干等到 `TimeoutSeconds`。
 
 ### AI 配置文件
 
@@ -41,9 +43,9 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 |---|---|
 | `ApiUrl` | OpenAI 兼容接口的地址，写到 `/v1` 为止 |
 | `ApiKey` | 接口的 Key。**默认是空的**，不填点「AI 优化」会提示 |
-| `TimeoutSeconds` | 单次请求超时，默认 300 秒 |
+| `TimeoutSeconds` | 单次请求从发出到收完的总时限，默认 300 秒。另有固定的 60 秒「无数据」判定，不在这里配 |
 | `MaxTokens` | 单次请求最多输出多少 token（含思考过程），默认 16384，0 表示用接口默认值 |
-| `Models/Model` | 「模型」下拉的选项，`name` 显示名、`id` 接口模型名 |
+| `Models/Model` | 「模型」下拉的选项，`id` 是接口的模型名，下拉里直接显示它 |
 | `Functions/Function` | 「功能」下拉的选项，`name` 显示名、`Prompt` 提示词 |
 
 提示词只需写清楚要做什么。输入输出的 JSON 格式、只返回改动的段落、不许合并拆分段落、代码网址保持原样
@@ -122,8 +124,8 @@ Services/
   AddInSettings.cs          设置与持久化
   AddInLog.cs               文件日志
   RenderDiagnostics.cs      不碰 OneNote 就能跑通渲染链路的诊断入口（AI 助手的测试也走这里）
-  AiConfig.cs               ai-settings.xml 的模型与读写，思考强度的三档
-  AiClient.cs               Chat Completions 接口（HttpClient + JavaScriptSerializer）
+  AiConfig.cs               ai-settings.xml 的模型与读写，思考强度的五档及其请求参数
+  AiClient.cs               Chat Completions 接口（HttpClient + JavaScriptSerializer，流式 SSE）
   AiOptimizer.cs            AI 优化的编排：读段落 → 分批并发问 AI → 写回；固定的输入输出约定
   RichParagraph.cs          把 AI 改过的纯文本按字符合并回带格式的 one:T
   TextDiff.cs               逐字符 diff（公共前后缀 + LCS）
@@ -221,6 +223,10 @@ Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出�
 - **在 dllhost 里发 HTTPS 要显式开 TLS1.2**。插件的 AppDomain 由原生的 dllhost 创建，拿不到目标框架信息，
   `ServicePointManager` 会按老默认值只开 SSL3/TLS1.0，现在的 HTTPS 服务一律握手失败。
   `AiClient` 的静态构造里给 `SecurityProtocol` 加上了 `Tls12`。
+- **AI 请求要走流式**。不走流式时整个结果生成完才有第一个字节：思考得久一点进度窗就一动不动，
+  接口卡住时只能干等到总超时。而网关（One API）的日志要等请求结束才记，那段时间在后台也查不到这个请求，
+  看起来就像「插件根本没发请求」。排查时看 `log.txt` 里每次请求的「首包」时间，
+  以及 Clash 之类代理的连接日志里有没有 `dllhost.exe → 接口域名` 的记录。
 - **引用 `System.Web.Extensions` 要连 `System.Web` 一起引**。前者引用了后者，SDK 版的 XAML 编译器
   （`MarkupCompilePass1`）解析不到就报 `MC1000: Could not find assembly 'System.Web'`，看起来像 XAML 写错了。
 - **`-replace` 的第一个参数是正则**。`$path -replace '\', '/'` 里的单个反斜杠是非法模式，

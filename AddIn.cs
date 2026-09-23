@@ -479,7 +479,7 @@ namespace OneNoteCodeHelper
                 var function = config.FindFunction(_settings.AiFunction);
                 var model = config.FindModel(_settings.AiModel);
                 var effort = AiEfforts.Normalize(_settings.AiEffort);
-                var caption = $"{function.Name} · {model.Name} · {AiEfforts.LabelOf(effort)}";
+                var caption = $"{function.Name} · {model.Id} · {effort}";
 
                 // 进度窗和插入窗口一样要 STA 线程；真正的活在窗口里交给线程池（MTA）去跑。
                 RunInBackground("AI 优化", ApartmentState.STA, owner, () =>
@@ -556,7 +556,7 @@ namespace OneNoteCodeHelper
         public string GetAiModelLabel(object control, int index)
         {
             var models = CurrentAiConfig().Models;
-            return index >= 0 && index < models.Count ? models[index].Name : string.Empty;
+            return index >= 0 && index < models.Count ? models[index].Id : string.Empty;
         }
 
         public int GetAiModelIndex(object control)
@@ -572,7 +572,7 @@ namespace OneNoteCodeHelper
                 var models = CurrentAiConfig().Models;
                 if (selectedIndex >= 0 && selectedIndex < models.Count)
                 {
-                    _settings.AiModel = models[selectedIndex].Name;
+                    _settings.AiModel = models[selectedIndex].Id;
                     SettingsStore.Save(_settings);
                     AddInLog.Info("AI 模型切换为 " + _settings.AiModel);
                 }
@@ -591,7 +591,7 @@ namespace OneNoteCodeHelper
 
         public string GetAiEffortLabel(object control, int index)
         {
-            return index >= 0 && index < AiEfforts.Labels.Length ? AiEfforts.Labels[index] : string.Empty;
+            return index >= 0 && index < AiEfforts.Ids.Length ? AiEfforts.Ids[index] : string.Empty;
         }
 
         public int GetAiEffortIndex(object control)

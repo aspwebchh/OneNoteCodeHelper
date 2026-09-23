@@ -5,7 +5,7 @@
 .DESCRIPTION
     不碰 OneNote，只通过反射调用构建出来的 DLL 里 RenderDiagnostics 的入口，普通权限即可运行。
     重点验证 RichParagraph：改动落在加粗、链接、多个 one:T 里时格式不丢，实体写法不变，
-    插入的空格不会跟进加粗，拼不回原样的段落会被认出来。
+    插入的空格不会跟进加粗，拼不回原样的段落会被认出来。另外覆盖思考强度参数和流式返回（SSE）的解析。
 
     加 -Live 会用本机 %APPDATA%\OneNoteCodeHelper\ai-settings.xml 真调一次接口，打印模型的修改结果。
 
@@ -13,7 +13,7 @@
     powershell -ExecutionPolicy Bypass -File Tools\ai-merge-test.ps1
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File Tools\ai-merge-test.ps1 -Live -Model Pro -Effort high
+    powershell -ExecutionPolicy Bypass -File Tools\ai-merge-test.ps1 -Live -Model deepseek-v4-pro -Effort high
 #>
 [CmdletBinding()]
 param(
@@ -26,9 +26,10 @@ param(
     # 真调一次 AI 接口
     [switch]$Live,
 
-    [string]$Model = 'Flash',
+    # 模型 id，要在 ai-settings.xml 的 Models 里
+    [string]$Model = 'deepseek-v4-flash',
 
-    [ValidateSet('none', 'high', 'max')]
+    [ValidateSet('none', 'low', 'medium', 'high', 'max')]
     [string]$Effort = 'none'
 )
 
@@ -149,6 +150,63 @@ Assert-Equal '解析：空结果' (Invoke-Diag 'ParseAiReply' @('{"paragraphs":[
 Assert-Equal '去换行：英文之间补空格' (Invoke-Diag 'CleanAiReplyText' @('abc', "hello`nworld")) 'hello world'
 Assert-Equal '去换行：中文直接接上' (Invoke-Diag 'CleanAiReplyText' @('中文', "第一`r`n第二")) '第一第二'
 Assert-Equal '去换行：原文本来就有换行时保留' (Invoke-Diag 'CleanAiReplyText' @("a`nb", "a`nc")) "a`nc"
+
+Write-Host ''
+Write-Host '思考强度参数（参照 opencode 的 deepseek variants）：'
+
+$none = Invoke-Diag 'DescribeRequestBody' @('none')
+Assert-Equal 'none：thinking 关闭' $none.Contains('"thinking":{"type":"disabled"}') $true
+Assert-Equal 'none：不传 reasoning_effort' $none.Contains('reasoning_effort') $false
+
+foreach ($level in @('low', 'medium', 'high', 'max')) {
+    $body = Invoke-Diag 'DescribeRequestBody' @($level)
+    Assert-Equal "${level}：thinking 打开，reasoning_effort=$level" `
+        ($body.Contains('"thinking":{"type":"enabled"}') -and $body.Contains("`"reasoning_effort`":`"$level`"")) $true
+}
+
+Assert-Equal '不认识的值归到 high' ((Invoke-Diag 'DescribeRequestBody' @('ultra')).Contains('"reasoning_effort":"high"')) $true
+Assert-Equal '模型参数是 id' ((Invoke-Diag 'DescribeRequestBody' @('high')).Contains('"model":"deepseek-v4-flash"')) $true
+
+Write-Host ''
+Write-Host '流式返回：'
+
+$body = Invoke-Diag 'DescribeRequestBody' @('high')
+Assert-Equal '请求走流式，并要求带上用量' `
+    ($body.Contains('"stream":true') -and $body.Contains('"stream_options":{"include_usage":true}')) $true
+
+# 仿照网关实际返回的格式：先是角色，中间夹一行保活注释，思考、正文各分几段，最后一段带 finish_reason 和用量
+function New-Chunk([string]$delta, [string]$finish = 'null', [string]$usage = 'null') {
+    "data: {`"choices`":[{`"index`":0,`"delta`":$delta,`"finish_reason`":$finish}],`"usage`":$usage}"
+}
+$stream = @(
+    (New-Chunk '{"role":"assistant","content":null,"reasoning_content":""}'),
+    '',
+    ': keep-alive',
+    '',
+    (New-Chunk '{"content":null,"reasoning_content":"先看"}'),
+    (New-Chunk '{"content":null,"reasoning_content":"一下"}'),
+    (New-Chunk '{"content":"{\"paragraphs\":","reasoning_content":null}'),
+    (New-Chunk '{"content":"[]}","reasoning_content":null}'),
+    (New-Chunk '{"content":""}' '"stop"' '{"prompt_tokens":9,"completion_tokens":5}'),
+    '',
+    'data: [DONE]'
+) -join "`r`n"
+Assert-Equal '拼出正文，数出思考字数，保活行忽略' (Invoke-Diag 'ParseAiStream' @($stream)) '{"paragraphs":[]}|stop|4|complete'
+
+$cut = @(
+    (New-Chunk '{"content":"{\"paragraphs\":","reasoning_content":null}'),
+    (New-Chunk '{"content":"[{\"id\":1","reasoning_content":null}')
+) -join "`n"
+Assert-Equal '没有结束标记：认出是断在半路' (Invoke-Diag 'ParseAiStream' @($cut)) '{"paragraphs":[{"id":1||0|incomplete'
+
+Assert-Equal '只有 [DONE] 也算完整' (Invoke-Diag 'ParseAiStream' @("data: {`"choices`":[{`"delta`":{`"content`":`"x`"}}]}`ndata: [DONE]")) 'x||0|complete'
+
+Assert-Equal '流里报错' (Invoke-Diag 'ParseAiStream' @('data: {"error":{"message":"upstream timeout","type":"new_api_error"}}')) `
+    'ERROR: AI 接口返回错误：upstream timeout'
+
+Assert-Equal '进度：还没收到东西' (Invoke-Diag 'DescribeAiLive' @(0, 0)) '等待 AI 响应'
+Assert-Equal '进度：思考中' (Invoke-Diag 'DescribeAiLive' @(120, 0)) 'AI 正在处理：已思考 120 字'
+Assert-Equal '进度：开始输出' (Invoke-Diag 'DescribeAiLive' @(120, 35)) 'AI 正在处理：已思考 120 字，已输出 35 字'
 
 if ($Live) {
     Write-Host ''

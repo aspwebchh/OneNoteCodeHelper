@@ -42,10 +42,10 @@ namespace OneNoteCodeHelper.Services
         /// <summary>「AI 优化」用哪个功能，存 ai-settings.xml 里 Function 的 name。</summary>
         public string AiFunction { get; set; } = AiConfigStore.TypoFunctionName;
 
-        /// <summary>「AI 优化」用哪个模型，存 ai-settings.xml 里 Model 的 name。</summary>
-        public string AiModel { get; set; } = AiConfigStore.DefaultModelName;
+        /// <summary>「AI 优化」用哪个模型，存模型 id（ai-settings.xml 里 Model 的 id）。</summary>
+        public string AiModel { get; set; } = AiConfigStore.DefaultModelId;
 
-        /// <summary>思考强度，见 <see cref="AiEfforts"/>。</summary>
+        /// <summary>思考强度（none/low/medium/high/max），见 <see cref="AiEfforts"/>。</summary>
         public string AiEffort { get; set; } = AiEfforts.DefaultId;
 
         internal CodeTheme Theme => CodeThemes.Find(ThemeId);

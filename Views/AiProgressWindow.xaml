@@ -61,6 +61,14 @@
                    TextWrapping="Wrap"
                    Text="准备中…" />
 
+        <!-- 等 AI 时的实时情况和已用时间，每秒刷新，让人看得出没卡住 -->
+        <TextBlock x:Name="DetailText"
+                   Margin="0,2,0,0"
+                   FontSize="12"
+                   Foreground="{StaticResource Muted}"
+                   TextTrimming="CharacterEllipsis"
+                   Visibility="Collapsed" />
+
         <ProgressBar x:Name="ProgressMeter"
                      Height="6"
                      Margin="0,10,0,0"

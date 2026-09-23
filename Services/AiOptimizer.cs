@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.ExceptionServices;
@@ -10,14 +11,18 @@ using System.Threading.Tasks;
 
 namespace OneNoteCodeHelper.Services
 {
-    /// <summary>进度：一句话说明 + 已完成 / 总批数。Total 为 0 表示眼下没法给出比例。</summary>
+    /// <summary>
+    /// 进度：一句话说明 + 已完成 / 总批数，Total 为 0 表示眼下没法给出比例。
+    /// Detail 是等 AI 时的实时情况（已思考、已输出多少字），不在等 AI 时为 null。
+    /// </summary>
     internal sealed class AiProgress
     {
-        internal AiProgress(string message, int done = 0, int total = 0)
+        internal AiProgress(string message, int done = 0, int total = 0, string detail = null)
         {
             Message = message;
             Done = done;
             Total = total;
+            Detail = detail;
         }
 
         internal string Message { get; }
@@ -25,6 +30,8 @@ namespace OneNoteCodeHelper.Services
         internal int Done { get; }
 
         internal int Total { get; }
+
+        internal string Detail { get; }
     }
 
     /// <summary>
@@ -38,6 +45,9 @@ namespace OneNoteCodeHelper.Services
 
         /// <summary>同时在飞的请求数。</summary>
         private const int MaxConcurrency = 3;
+
+        /// <summary>流式返回时，进度最多每隔这么久（毫秒）刷新一次。</summary>
+        private const int ReportIntervalMs = 200;
 
         /// <summary>
         /// 新旧文本相似度低于这个值的段落不写回。结果是直接替换、没有人工把关，
@@ -159,9 +169,43 @@ namespace OneNoteCodeHelper.Services
         {
             var systemPrompt = BuildSystemPrompt(_function.Prompt);
             var results = new Dictionary<int, string>();
+            var sync = new object();
             var done = 0;
+            var reasoningChars = 0;
+            var contentChars = 0;
+            var sinceReport = Stopwatch.StartNew();
 
-            progress.Report(new AiProgress($"正在请 AI {_function.Name}：{scope} {paragraphs.Count} 段…", 0, batches.Count));
+            // 流式返回的每一段都会调到这里（几批同时在跑时来自不同线程）。段很碎，
+            // 除了一批做完，其余的限一下频率，免得把界面线程的消息队列塞满。
+            void Update(int reasoning, int content, bool batchDone)
+            {
+                AiProgress snapshot;
+                lock (sync)
+                {
+                    reasoningChars += reasoning;
+                    contentChars += content;
+                    if (batchDone)
+                    {
+                        done++;
+                    }
+                    else if (sinceReport.ElapsedMilliseconds < ReportIntervalMs)
+                    {
+                        return;
+                    }
+
+                    sinceReport.Restart();
+                    snapshot = new AiProgress(
+                        done == 0
+                            ? $"正在请 AI {_function.Name}：{scope} {paragraphs.Count} 段…"
+                            : $"正在请 AI {_function.Name}：已完成 {done} / {batches.Count} 批…",
+                        done, batches.Count, DescribeLive(reasoningChars, contentChars));
+                }
+
+                progress.Report(snapshot);
+            }
+
+            progress.Report(new AiProgress($"正在请 AI {_function.Name}：{scope} {paragraphs.Count} 段…",
+                0, batches.Count, DescribeLive(0, 0)));
 
             using (var gate = new SemaphoreSlim(MaxConcurrency))
             using (var failFast = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
@@ -175,6 +219,7 @@ namespace OneNoteCodeHelper.Services
                         var content = await AiClient.CompleteAsync(
                             _config, _model.Id, _effort, systemPrompt,
                             BuildUserMessage(batch.Select((index, n) => (n + 1, paragraphs[index].Text))),
+                            (reasoning, text) => Update(reasoning, text, false),
                             failFast.Token).ConfigureAwait(false);
 
                         var reply = ParseReply(content);
@@ -186,9 +231,7 @@ namespace OneNoteCodeHelper.Services
                             }
                         }
 
-                        var finished = Interlocked.Increment(ref done);
-                        progress.Report(new AiProgress(
-                            $"正在请 AI {_function.Name}：已完成 {finished} / {batches.Count} 批…", finished, batches.Count));
+                        Update(0, 0, true);
                     }
                     catch
                     {
@@ -252,6 +295,28 @@ namespace OneNoteCodeHelper.Services
             }
 
             return batches;
+        }
+
+        /// <summary>等 AI 时显示的实时情况：思考、输出各收到了多少字。</summary>
+        internal static string DescribeLive(int reasoningChars, int contentChars)
+        {
+            if (reasoningChars == 0 && contentChars == 0)
+            {
+                return "等待 AI 响应";
+            }
+
+            var parts = new List<string>();
+            if (reasoningChars > 0)
+            {
+                parts.Add($"已思考 {reasoningChars} 字");
+            }
+
+            if (contentChars > 0)
+            {
+                parts.Add($"已输出 {contentChars} 字");
+            }
+
+            return "AI 正在处理：" + string.Join("，", parts);
         }
 
         internal static string BuildSystemPrompt(string taskPrompt)

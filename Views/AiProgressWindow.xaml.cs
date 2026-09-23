@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -27,6 +28,14 @@ namespace OneNoteCodeHelper.Views
         private Task<EditResult> _jobTask;
 
         private DispatcherTimer _autoCloseTimer;
+
+        /// <summary>等 AI 期间每秒刷新一次「已用时」。</summary>
+        private DispatcherTimer _ticker;
+
+        private readonly Stopwatch _elapsed = new Stopwatch();
+
+        /// <summary>最近一次进度里的实时情况，为 null 时不显示那一行。</summary>
+        private string _detail;
 
         /// <summary>任务已经有了结果（成功、失败或取消），关窗不再算取消。</summary>
         private bool _finished;
@@ -63,6 +72,7 @@ namespace OneNoteCodeHelper.Views
             {
                 _closed = true;
                 _autoCloseTimer?.Stop();
+                _ticker?.Stop();
             };
         }
 
@@ -86,6 +96,10 @@ namespace OneNoteCodeHelper.Views
         {
             // Progress 记下的是当前（界面线程）的同步上下文，后台报的进度会自动回到界面线程。
             var progress = new Progress<AiProgress>(ShowProgress);
+            _elapsed.Start();
+            _ticker = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _ticker.Tick += (_, __) => ShowDetail();
+            _ticker.Start();
             _jobTask = Task.Run(() => _job(progress, _cancellation.Token));
 
             EditResult result = null;
@@ -139,8 +153,12 @@ namespace OneNoteCodeHelper.Views
             }
 
             StatusText.Text = progress.Message;
+            _detail = progress.Detail;
+            ShowDetail();
 
-            if (progress.Total > 0)
+            // 定量的进度条只在分了好几批、而且已经做完一些时才有意义。只有一批时是 0/1 一步跳到 1/1，
+            // 等 AI 的整段时间里进度条都是空的、一动不动，看着就像卡死了。
+            if (progress.Total > 1 && progress.Done > 0)
             {
                 ProgressMeter.IsIndeterminate = false;
                 ProgressMeter.Maximum = progress.Total;
@@ -152,8 +170,29 @@ namespace OneNoteCodeHelper.Views
             }
         }
 
+        private void ShowDetail()
+        {
+            if (_detail == null)
+            {
+                DetailText.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            DetailText.Text = $"{_detail} · 已用时 {(int)_elapsed.Elapsed.TotalSeconds} 秒";
+            DetailText.Visibility = Visibility.Visible;
+        }
+
+        /// <summary>有结果了（或正在取消），不再显示实时情况。</summary>
+        private void StopDetail()
+        {
+            _ticker?.Stop();
+            _detail = null;
+            ShowDetail();
+        }
+
         private void ShowSuccess(string message)
         {
+            StopDetail();
             _finished = true;
             StatusText.Text = message;
             ProgressMeter.IsIndeterminate = false;
@@ -177,6 +216,7 @@ namespace OneNoteCodeHelper.Views
 
         private void ShowFailure(string message)
         {
+            StopDetail();
             _finished = true;
             StatusText.Text = message;
             StatusText.Foreground = (System.Windows.Media.Brush)FindResource("Danger");
@@ -197,6 +237,7 @@ namespace OneNoteCodeHelper.Views
 
             // 先不关窗：要是已经在写回，取消不了，等它做完把结果显示出来，免得用户以为页面没动。
             _cancellation.Cancel();
+            StopDetail();
             StatusText.Text = "正在取消…";
             ActionButton.IsEnabled = false;
         }
