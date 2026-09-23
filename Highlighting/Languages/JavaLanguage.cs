@@ -255,11 +255,11 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         public int ScoreLikelihood(string source)
         {
             var score = 0;
-            score += 4 * Count(source, @"^\s*import\s+[\w.]+\s*;");
-            score += 4 * Count(source, @"^\s*package\s+[\w.]+\s*;");
+            score += 4 * Count(source, @"^[^\S\r\n]*import\s+[\w.]+\s*;");
+            score += 4 * Count(source, @"^[^\S\r\n]*package\s+[\w.]+\s*;");
             score += 3 * Count(source, @"\b(public|private|protected)\s+");
             score += 3 * Count(source, @"\b(class|interface|enum|record)\s+[A-Z]\w*");
-            score += 2 * Count(source, @"^\s*@[A-Z]\w*");
+            score += 2 * Count(source, @"^[^\S\r\n]*@[A-Z]\w*");
             score += 2 * Count(source, @"\bnew\s+[A-Z]\w*\s*\(");
             score += 4 * Count(source, @"\bSystem\.out\.print");
             score += Count(source, @";\s*$");
@@ -274,7 +274,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline);
         }
     }
 }

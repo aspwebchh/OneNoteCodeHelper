@@ -521,27 +521,27 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         public int ScoreLikelihood(string source)
         {
             // 带闭合标签的是 XML/HTML：一行一个的 name="value" 属性不能被当成 shell 赋值
-            if (Regex.IsMatch(source, @"</[A-Za-z][\w:.-]*\s*>|<\?xml\b"))
+            if (LikelihoodPatterns.IsMatch(source, @"</[A-Za-z][\w:.-]*\s*>|<\?xml\b"))
             {
                 return 0;
             }
 
             var score = 0;
             score += 10 * Count(source, @"\A#!.*\b(ba|z|k|da)?sh\b");
-            score += 4 * Count(source, @"^\s*(fi|done|esac)\s*(;.*)?$");
+            score += 4 * Count(source, @"^[^\S\r\n]*(fi|done|esac)\s*(;.*)?$");
             score += 3 * Count(source, @"\$\{[\w#!]");
             score += 3 * Count(source, @"\[\[?\s+!?\s*-[a-zA-Z]\s");
             score += 2 * Count(source, @"\$[0-9@#?]");
-            score += 3 * Count(source, @"^\s*(export|readonly|declare|local)\s+\w+=");
+            score += 3 * Count(source, @"^[^\S\r\n]*(export|readonly|declare|local)\s+\w+=");
             score += 2 * Count(source, @"\|\s*(grep|awk|sed|xargs|sort|uniq|head|tail|wc|cut|tr)\b");
             score += 2 * Count(source, @";\s*(then|do)\s*$");
-            score += 2 * Count(source, @"^\s*\w+=\S");
+            score += 2 * Count(source, @"^[^\S\r\n]*\w+=\S");
             return score;
         }
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline);
         }
     }
 }

@@ -91,10 +91,14 @@ namespace OneNoteCodeHelper.Services
             var column = 0;
             var atLineStart = true;
 
-            // 先算出每段的 CSS 与 HTML，再把相邻的同款样式合并。
+            // 相邻的同款样式合并进同一个 span。
             // 不合并的话每个 token 都要包一层 span，一行几十个字符能膨胀到一两 KB，
             // 几百行代码就会把页面 XML 撑得 OneNote 都处理不动。
-            var parts = new List<KeyValuePair<string, string>>();
+            // 当前这一段攒在 pending 里，样式变了才整段写出。不能用字符串相加去合并：
+            // 压缩过的 JS 这种超长单行会一直合并下去，每次都复制整段，30 万字符的一行要十几秒。
+            var builder = new StringBuilder();
+            var pending = new StringBuilder();
+            string pendingCss = null;
 
             foreach (var segment in segments)
             {
@@ -111,33 +115,38 @@ namespace OneNoteCodeHelper.Services
                     ? null
                     : BuildCss(theme.StyleFor(segment.Kind));
 
-                if (parts.Count > 0 && parts[parts.Count - 1].Key == css)
+                if (pending.Length > 0 && css != pendingCss)
                 {
-                    parts[parts.Count - 1] = new KeyValuePair<string, string>(
-                        css, parts[parts.Count - 1].Value + html);
+                    AppendPart(builder, pendingCss, pending);
+                    pending.Clear();
                 }
-                else
-                {
-                    parts.Add(new KeyValuePair<string, string>(css, html));
-                }
+
+                pendingCss = css;
+                pending.Append(html);
             }
 
-            var builder = new StringBuilder();
-            foreach (var part in parts)
-            {
-                if (part.Key == null)
-                {
-                    builder.Append(part.Value);
-                }
-                else
-                {
-                    builder.Append("<span style='").Append(part.Key).Append("'>")
-                           .Append(part.Value).Append("</span>");
-                }
-            }
+            AppendPart(builder, pendingCss, pending);
 
             // 空行必须给个硬空格占位，否则 OneNote 会把这一段直接塌掉，代码的空行就没了。
             return builder.Length == 0 ? "&nbsp;" : builder.ToString();
+        }
+
+        private static void AppendPart(StringBuilder builder, string css, StringBuilder html)
+        {
+            if (html.Length == 0)
+            {
+                return;
+            }
+
+            if (css == null)
+            {
+                builder.Append(html.ToString());
+            }
+            else
+            {
+                builder.Append("<span style='").Append(css).Append("'>")
+                       .Append(html.ToString()).Append("</span>");
+            }
         }
 
         /// <summary>判断一段已编码的 HTML 是不是只有空白（普通空格与硬空格）。</summary>

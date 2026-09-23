@@ -305,8 +305,8 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             score += 2 * Count(source, @"\bnew\s+[A-Z]\w*\s*\(");
             score += Count(source, @";\s*$");
 
-            score += 4 * Count(source, @"^\s*using\s+(static\s+)?[\w.]+\s*;");
-            score += 4 * Count(source, @"^\s*namespace\s+[A-Z][\w.]*\s*[;{]?\s*$");
+            score += 4 * Count(source, @"^[^\S\r\n]*using\s+(static\s+)?[\w.]+\s*;");
+            score += 4 * Count(source, @"^[^\S\r\n]*namespace\s+[A-Z][\w.]*\s*[;{]?\s*$");
             score += 4 * Count(source, @"\{\s*get\s*;|\bget\s*\{|\bset\s*\{|\bget\s*=>");
             score += 3 * Count(source, @"\bConsole\.(Write|Read)");
             score += 3 * Count(source, @"\bforeach\s*\(\s*var\b");
@@ -322,11 +322,11 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 @"\.(Where|Select|SelectMany|OrderBy|OrderByDescending|GroupBy|ToList|ToArray|ToDictionary" +
                 @"|FirstOrDefault|SingleOrDefault|LastOrDefault)\s*\(");
             score += 2 * Count(source, @"\bstring\s+\w+\s*[=;,)]|\bstring\.[A-Z]");
-            score += 2 * Count(source, @"^\s*\[[A-Z]\w*(\(.*\))?\]\s*$");
+            score += 2 * Count(source, @"^[^\S\r\n]*\[[A-Z]\w*(\(.*\))?\]\s*$");
             score += 2 * Count(source, @"\$@?""");
             score += 2 * Count(source, @"\boverride\b");
-            score += 2 * Count(source, @"^\s*#(region|endregion)\b");
-            score += 2 * Count(source, @"^\s*///");
+            score += 2 * Count(source, @"^[^\S\r\n]*#(region|endregion)\b");
+            score += 2 * Count(source, @"^[^\S\r\n]*///");
             score += Count(source, @"\.[A-Z][a-z]\w*\(");
             score += Count(source, @"\bvar\s+\w+\s*=");
             score += Count(source, @"\bbool\b");
@@ -335,7 +335,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline);
         }
     }
 }

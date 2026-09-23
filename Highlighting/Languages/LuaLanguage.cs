@@ -279,9 +279,9 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             var score = 0;
             score += 4 * Count(source, @"\blocal\s+\w+");
             score += 4 * Count(source, @"\bfunction\b[^\n]*\)\s*$");
-            score += 3 * Count(source, @"^\s*end\s*$");
+            score += 3 * Count(source, @"^[^\S\r\n]*end\s*$");
             // 排除 CSS 自定义属性 --main-color: #fff; 这种形状的行
-            score += 3 * Count(source, @"^\s*--(?![\w-]+\s*:.*;\s*$)");
+            score += 3 * Count(source, @"^[^\S\r\n]*--(?![\w-]+\s*:.*;\s*$)");
             score += 2 * Count(source, @"\b(then|elseif|repeat|until)\b");
             score += 2 * Count(source, @"\bnil\b");
             score += 2 * Count(source, @"~=");
@@ -291,7 +291,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline);
         }
     }
 }

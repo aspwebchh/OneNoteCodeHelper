@@ -404,7 +404,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 @"\b(Get|Set|New|Remove|Add|Write|Read|Start|Stop|Test|Invoke|Import|Export|Out|Select|Where|ForEach" +
                 @"|Sort|Group|Format|ConvertTo|ConvertFrom|Join|Split|Copy|Move|Clear|Enable|Disable|Register" +
                 @"|Unregister|Resolve|Wait|Measure|Update|Install|Uninstall|Push|Pop|Restart|Show|Use)-[A-Z][A-Za-z]+");
-            score += 4 * Count(source, @"^\s*param\s*\(", RegexOptions.IgnoreCase);
+            score += 4 * Count(source, @"^[^\S\r\n]*param\s*\(", RegexOptions.IgnoreCase);
             score += 3 * Count(source, @"\$(true|false|null|_|PSScriptRoot|PSCmdlet|args|env:\w+)\b", RegexOptions.IgnoreCase);
             score += 3 * Count(source,
                 @"\[(string|int|bool|switch|object|hashtable|array|datetime|Parameter|CmdletBinding|System\.[\w.]+)(\[\])?[\]\(]",
@@ -419,7 +419,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern, RegexOptions options = RegexOptions.None)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline | options).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline | options);
         }
     }
 }

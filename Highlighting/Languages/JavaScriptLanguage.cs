@@ -236,13 +236,13 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         public int ScoreLikelihood(string source)
         {
             var score = 0;
-            score += 3 * Count(source, @"^\s*(export\s+)?(const|let)\s+[\w${}\[\], ]+\s*=");
+            score += 3 * Count(source, @"^[^\S\r\n]*(export\s+)?(const|let)\s+[\w${}\[\], ]+\s*=");
             score += 4 * Count(source, @"\bfunction\s*\*?\s*[\w$]*\s*\([^)]*\)\s*\{");
             score += 4 * Count(source, @"\bconsole\.(log|error|warn|info|debug)\s*\(");
             score += 3 * Count(source, @"\b(document|window)\.\w+");
             score += 4 * Count(source,
-                @"\brequire\s*\(\s*['""]|\bmodule\.exports\b|^\s*export\s+(default|const|let|function|class|async)\b" +
-                @"|^\s*import\s+.*\bfrom\s+['""]|^\s*import\s+['""]");
+                @"\brequire\s*\(\s*['""]|\bmodule\.exports\b|^[^\S\r\n]*export\s+(default|const|let|function|class|async)\b" +
+                @"|^[^\S\r\n]*import\s+.*\bfrom\s+['""]|^[^\S\r\n]*import\s+['""]");
             score += 3 * Count(source, @"===|!==");
             score += 2 * Count(source, @"\bundefined\b");
             score += 2 * Count(source, @"`[^`]*\$\{");
@@ -254,7 +254,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline);
         }
     }
 }

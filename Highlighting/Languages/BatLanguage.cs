@@ -423,22 +423,22 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         public int ScoreLikelihood(string source)
         {
             var score = 0;
-            score += 10 * Count(source, @"^\s*@echo\s+off\b");
-            score += 3 * Count(source, @"^\s*@?rem(\s|$)");
-            score += 3 * Count(source, @"^\s*::(?!\w+::)");
+            score += 10 * Count(source, @"^[^\S\r\n]*@echo\s+off\b");
+            score += 3 * Count(source, @"^[^\S\r\n]*@?rem(\s|$)");
+            score += 3 * Count(source, @"^[^\S\r\n]*::(?!\w+::)");
             score += 3 * Count(source, @"%\w+%|%~\w*\d|%%~?\w");
             score += 4 * Count(source, @"\bsetlocal\b");
             score += 4 * Count(source, @"\bif\s+(not\s+)?(exist|defined|errorlevel)\b");
             score += 2 * Count(source, @"\s(equ|neq|lss|leq|gtr|geq)\s");
             score += 2 * Count(source, @"\bgoto\s+:?\w+|\bcall\s+:\w+");
-            score += 2 * Count(source, @"^\s*set\s+(/[ap]\s+)?""?\w+=");
+            score += 2 * Count(source, @"^[^\S\r\n]*set\s+(/[ap]\s+)?""?\w+=");
             score += 2 * Count(source, @"!\w+!");
             return score;
         }
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline | RegexOptions.IgnoreCase).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline | RegexOptions.IgnoreCase);
         }
     }
 }

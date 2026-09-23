@@ -35,7 +35,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern, RegexOptions options)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline | options).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline | options);
         }
     }
 }

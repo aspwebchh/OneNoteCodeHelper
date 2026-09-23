@@ -497,7 +497,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         public int ScoreLikelihood(string source)
         {
             // 带标签的是 HTML/XML，里面的 <style> 不能把整段拉成 CSS
-            if (Regex.IsMatch(source, @"<[A-Za-z!/]"))
+            if (LikelihoodPatterns.IsMatch(source, @"<[A-Za-z!/]"))
             {
                 return 0;
             }
@@ -510,7 +510,9 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 @"|transform|animation(-\w+)?|box-\w+|line-height|content|visibility|outline|white-space)\s*:[^:]");
             score += 3 * Count(source, @"(^|[{;\s])--[\w-]+\s*:");
             score += 4 * Count(source, @"@(media|import|keyframes|font-face|supports|charset|layer|container)\b");
-            score += 3 * Count(source, @"^\s*[.#][\w-]+[^;{}]*\{");
+            // 选择器那一行后面紧跟 {，或者 { 另起一行（Allman 风格）。[^;{}\r\n] 不能跨行：
+            // 不排除换行的话，#define 这种没有 ;{} 的行会一路扫到文件末尾，几千行就要几十秒。
+            score += 3 * Count(source, @"^[^\S\r\n]*[.#][\w-]+[^;{}\r\n]*\s*\{");
             score += Count(source, @"\b\d+(\.\d+)?(px|em|rem|vh|vw|pt|ms|deg)\b");
             score += 2 * Count(source, @"!important\b");
             return score;
@@ -518,7 +520,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline);
         }
     }
 }

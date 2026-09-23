@@ -67,12 +67,6 @@ namespace OneNoteCodeHelper.Views
             return document;
         }
 
-        /// <summary>预览里的代码行数，和插入后 OneNote 里的行数一致。</summary>
-        internal static int LineCount(FlowDocument document)
-        {
-            return FindFrame(document)?.Blocks.Count ?? 0;
-        }
-
         private static Section FindFrame(FlowDocument document)
         {
             return document.Blocks.FirstBlock as Section;

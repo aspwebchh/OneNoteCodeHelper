@@ -76,6 +76,7 @@ powershell -ExecutionPolicy Bypass -File Tools\unregister.ps1
 AddIn.cs                    外接程序入口：IDTExtensibility2 + IRibbonExtensibility + 功能区回调
 Ribbon.xml                  功能区定义（嵌入资源）
 Interop/OfficeInterfaces.cs 手写的 Office COM 接口声明
+Interop/NativeMethods.cs    Win32 调用（以 OneNote 窗口为属主的提示框）
 Services/
   OneNoteApi.cs             OneNote COM 封装
   PageEditor.cs             选区解析、就地替换、插入
@@ -86,6 +87,7 @@ Services/
   RenderDiagnostics.cs      不碰 OneNote 就能跑通渲染链路的诊断入口
 Highlighting/
   TokenKind / Token / ILanguage / LexerCursor / LanguageRegistry
+  LikelihoodPatterns.cs     自动识别打分用的正则：实例缓存 + 匹配超时
   Languages/                每种语言一个 ILanguage 实现；XML 与 HTML 共用 MarkupLexer，
                             HTML 的 <style>/<script> 分别交给 CSS/JavaScript 着色；
                             CommonScanners 放 C 系语言共用的注释、字符串、数字、插值字符串扫描
@@ -103,6 +105,8 @@ Tools/unregister.ps1        只做注销这一步
 1. 在 `Highlighting/Languages/` 下实现 `ILanguage`：`Tokenize` 切 token，`ScoreLikelihood` 给自动识别打分。
    `Tokenize` 必须保证返回的 token 按序、不重叠、完整覆盖整个源码 — `RenderDiagnostics.VerifyCoverage`
    就是用来验这条契约的。
+   `ScoreLikelihood` 的正则走 `LikelihoodPatterns`；多行模式下行首缩进写 `^[^\S\r\n]*`，
+   不要写 `^\s*`（`\s` 会跨行，连续空行一多就是平方级回溯）。
 2. 在 `LanguageRegistry.All` 里加一行。
 
 功能区下拉、设置、预览都会自动跟上，不需要改别的地方。
@@ -124,6 +128,9 @@ Tools/unregister.ps1        只做注销这一步
   所以代码里有中文注释又想对齐，只能整体换成中英文都等宽的字体（插入窗口里可以选「NSimSun」新宋体）。
 - **WPF 窗口必须在 STA 线程上创建**。OneNote 对代理进程的功能区回调在 MTA 上运行；
   插入窗口使用独立 STA 线程和 `ShowDialog()` 消息循环。
+- **功能区回调里不做耗时的事，也不同步弹框**。回调返回之前 OneNote 界面是停住的；
+  在回调里弹的 `MessageBox` 没有属主，常被压在 OneNote 后面，看起来就是 OneNote 卡死了。
+  所以「高亮选中」在后台线程里跑，提示框也在单独的线程里以 OneNote 窗口为属主弹出。
 - **OneNote 以本地服务器方式激活 COM 加载项**。只注册 `InprocServer32=mscoree.dll`
   会返回 `0x80040154`，OneNote 随即把 `LoadBehavior` 降为 2。注册脚本为该 CLSID
   配置相同的 AppID 和空值 `DllSurrogate`，由 Windows 的 `dllhost.exe` 承载托管 DLL。

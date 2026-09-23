@@ -259,16 +259,16 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         public int ScoreLikelihood(string source)
         {
             var score = 0;
-            score += 5 * Count(source, @"^\s*(async\s+)?def\s+\w+\s*\(.*\)\s*(->\s*[^:]+)?:\s*(#.*)?$");
-            score += 5 * Count(source, @"^\s*from\s+[\w.]+\s+import\b");
-            score += 3 * Count(source, @"^\s*import\s+[\w.]+(\s+as\s+\w+)?(\s*,\s*[\w.]+)*\s*$");
-            score += 3 * Count(source, @"^\s*class\s+\w+(\(.*\))?:\s*$");
-            score += 2 * Count(source, @"^\s*(if|elif|else|for|while|try|except|finally|with)\b.*:\s*(#.*)?$");
+            score += 5 * Count(source, @"^[^\S\r\n]*(async\s+)?def\s+\w+\s*\(.*\)\s*(->\s*[^:]+)?:\s*(#.*)?$");
+            score += 5 * Count(source, @"^[^\S\r\n]*from\s+[\w.]+\s+import\b");
+            score += 3 * Count(source, @"^[^\S\r\n]*import\s+[\w.]+(\s+as\s+\w+)?(\s*,\s*[\w.]+)*\s*$");
+            score += 3 * Count(source, @"^[^\S\r\n]*class\s+\w+(\(.*\))?:\s*$");
+            score += 2 * Count(source, @"^[^\S\r\n]*(if|elif|else|for|while|try|except|finally|with)\b.*:\s*(#.*)?$");
             score += 3 * Count(source, @"\belif\b");
             score += 2 * Count(source, @"\b(None|True|False)\b");
             score += 3 * Count(source, @"__\w+__");
             score += 3 * Count(source, @"\bdef\s+\w+\s*\(\s*self\b");
-            score += 2 * Count(source, @"^\s*@[a-z_][\w.]*");
+            score += 2 * Count(source, @"^[^\S\r\n]*@[a-z_][\w.]*");
             score += 2 * Count(source, @"\blambda\b[^:\n]*:");
             score += Count(source, @"\bself\.\w+");
             score += Count(source, @"\bf[""'][^""'\n]*\{");
@@ -277,7 +277,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline);
         }
     }
 }

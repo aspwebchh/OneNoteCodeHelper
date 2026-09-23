@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
+using System.Windows.Threading;
 using Microsoft.Office.Interop.OneNote;
 using OneNoteCodeHelper.Highlighting;
 using OneNoteCodeHelper.Interop;
@@ -39,6 +40,13 @@ namespace OneNoteCodeHelper
         private PageEditor _editor;
         private AddInSettings _settings;
         private IRibbonUI _ribbon;
+
+        // 「高亮选中」正在后台跑时为 1。
+        private int _highlightRunning;
+
+        // 「插入代码」窗口开着（或正在创建）时为 1；_insertWindow 是窗口创建好之后的那个实例。
+        private int _insertWindowOpen;
+        private volatile InsertCodeWindow _insertWindow;
 
         // OnConnection 传进来的两个宿主对象。它们在本代理进程里是跨进程 RCW，
         // 断开时必须主动还回去，见 ReleaseHostReferences。
@@ -214,8 +222,23 @@ namespace OneNoteCodeHelper
         {
             Guard("高亮选中", () =>
             {
-                var result = _editor.HighlightSelection(_settings, _settings.LanguageId);
-                Report(result);
+                var editor = _editor;
+                var settings = _settings.Clone();
+                var owner = _api.GetMainWindowHandle();
+
+                // 连点两下时后一下直接忽略，不能对同一页并发读写。
+                if (Interlocked.CompareExchange(ref _highlightRunning, 1, 0) != 0)
+                {
+                    AddInLog.Info("上一次「高亮选中」还没结束，忽略这次点击。");
+                    return;
+                }
+
+                // 读页面、识别语言、生成代码框、写回都放到后台线程，回调立即返回。功能区回调期间
+                // OneNote 的界面是停住的，这些耗时要是都算在回调里，大段代码能把 OneNote 卡上好几秒。
+                // 和功能区回调一样用 MTA，宿主对象就是在 MTA 里拿到的，直接调用不用封送。
+                RunInBackground("高亮选中", ApartmentState.MTA, owner,
+                    () => Report(editor.HighlightSelection(settings, settings.LanguageId), owner),
+                    () => Interlocked.Exchange(ref _highlightRunning, 0));
             });
         }
 
@@ -223,17 +246,27 @@ namespace OneNoteCodeHelper
         {
             Guard("插入代码", () =>
             {
+                // 同一时刻只开一个窗口：两个窗口各自改设置、关闭时各自存盘，会互相覆盖。
+                // 已经开着的就把它拉到前面来；还在创建中的（_insertWindow 还没赋值）直接忽略。
+                if (Interlocked.CompareExchange(ref _insertWindowOpen, 1, 0) != 0)
+                {
+                    var existing = _insertWindow;
+                    existing?.Dispatcher.BeginInvoke(new Action(() => existing.Activate()));
+                    return;
+                }
+
                 var editor = _editor;
                 var settings = _settings;
                 var ownerHandle = _api.GetMainWindowHandle();
 
                 // OneNote 在 DLL 代理进程中以 MTA 调用功能区回调。WPF 窗口
                 // 必须在 STA 线程创建；回调立即返回，避免阻塞 OneNote 的 COM 调用。
-                var thread = new Thread(() =>
+                RunInBackground("插入代码", ApartmentState.STA, ownerHandle, () =>
                 {
                     try
                     {
                         var window = new InsertCodeWindow(editor, settings, ownerHandle);
+                        _insertWindow = window;
                         window.ShowDialog();
 
                         if (window.SettingsChanged)
@@ -243,16 +276,16 @@ namespace OneNoteCodeHelper
                             InvalidateRibbon();
                         }
                     }
-                    catch (Exception ex)
+                    finally
                     {
-                        AddInLog.Error("「插入代码」窗口失败。", ex);
-                        ShowMessage($"「插入代码」失败：{ex.Message}\n\n详情见日志：\n{AddInLog.LogPath}",
-                            MessageBoxImage.Error);
+                        _insertWindow = null;
+
+                        // 每个线程有自己的 Dispatcher，线程结束前要关掉它，
+                        // 否则它连同和渲染线程之间的通道一直留着，开关几次窗口就漏几份。
+                        Dispatcher.CurrentDispatcher.InvokeShutdown();
                     }
-                });
-                thread.SetApartmentState(ApartmentState.STA);
-                thread.IsBackground = true;
-                thread.Start();
+                },
+                () => Interlocked.Exchange(ref _insertWindowOpen, 0));
             });
         }
 
@@ -378,7 +411,45 @@ namespace OneNoteCodeHelper
             }
         }
 
-        private static void Report(EditResult result)
+        /// <summary>
+        /// 在独立的后台线程里执行 body，异常写日志并提示。onExit 一定会执行，线程没能启动时也一样。
+        /// </summary>
+        private static void RunInBackground(
+            string action, ApartmentState apartment, IntPtr owner, Action body, Action onExit)
+        {
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    body();
+                }
+                catch (Exception ex)
+                {
+                    AddInLog.Error($"「{action}」失败。", ex);
+                    ShowMessage($"「{action}」失败：{ex.Message}\n\n详情见日志：\n{AddInLog.LogPath}",
+                        MessageBoxImage.Error, owner);
+                }
+                finally
+                {
+                    onExit();
+                }
+            });
+
+            thread.SetApartmentState(apartment);
+            thread.IsBackground = true;
+
+            try
+            {
+                thread.Start();
+            }
+            catch
+            {
+                onExit();
+                throw;
+            }
+        }
+
+        private static void Report(EditResult result, IntPtr owner)
         {
             if (result.Success)
             {
@@ -386,12 +457,26 @@ namespace OneNoteCodeHelper
                 return;
             }
 
-            ShowMessage(result.Message, MessageBoxImage.Warning);
+            ShowMessage(result.Message, MessageBoxImage.Warning, owner);
         }
 
-        private static void ShowMessage(string message, MessageBoxImage icon)
+        /// <summary>
+        /// 弹提示框。一律放到单独的线程里弹，调用方立即返回：在功能区回调里同步弹的话，
+        /// OneNote 要等框被点掉才能继续，框又不一定在最前面，看起来就是 OneNote 卡死了。
+        /// owner 是 OneNote 的窗口句柄，拿不到时传 IntPtr.Zero，框会置顶弹出。
+        /// </summary>
+        private static void ShowMessage(string message, MessageBoxImage icon, IntPtr owner = default)
         {
-            MessageBox.Show(message, "OneNote 代码高亮", MessageBoxButton.OK, icon);
+            try
+            {
+                var thread = new Thread(() => NativeMethods.ShowMessageBox(owner, message, "OneNote 代码高亮", icon));
+                thread.IsBackground = true;
+                thread.Start();
+            }
+            catch (Exception ex)
+            {
+                AddInLog.Warn("弹出提示框失败：" + message, ex);
+            }
         }
 
         /// <summary>

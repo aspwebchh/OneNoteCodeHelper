@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using OneNoteCodeHelper.Highlighting;
 using OneNoteCodeHelper.Highlighting.Themes;
 using OneNoteCodeHelper.Services;
@@ -48,10 +51,28 @@ namespace OneNoteCodeHelper.Views
             "Courier New"
         };
 
+        /// <summary>
+        /// 预览最多画这么多行。FlowDocument 没有虚拟化，几千行光建文档加排版就要好几秒；
+        /// 插入到 OneNote 的始终是全部代码，不受这个限制。
+        /// </summary>
+        private const int PreviewLineLimit = 300;
+
+        /// <summary>停止输入这么久之后才刷新预览，免得每敲一个字都重做一遍识别和排版。</summary>
+        private static readonly TimeSpan PreviewDelay = TimeSpan.FromMilliseconds(250);
+
         private readonly PageEditor _editor;
+
+        private readonly DispatcherTimer _previewTimer;
+
+        /// <summary>每发起一次刷新加一。后台识别完回来时编号已经变了，说明期间又改过，结果作废。</summary>
+        private int _previewVersion;
 
         internal InsertCodeWindow(PageEditor editor, AddInSettings settings, IntPtr ownerHandle)
         {
+            _previewTimer = new DispatcherTimer { Interval = PreviewDelay };
+            _previewTimer.Tick += (_, __) => UpdatePreview();
+            Closed += (_, __) => _previewTimer.Stop();
+
             InitializeComponent();
 
             _editor = editor;
@@ -105,27 +126,41 @@ namespace OneNoteCodeHelper.Views
             return choices;
         }
 
-        private void OnCodeChanged(object sender, RoutedEventArgs e) => UpdatePreview();
+        private void OnCodeChanged(object sender, RoutedEventArgs e)
+        {
+            _previewTimer.Stop();
+            _previewTimer.Start();
+        }
 
         private void OnOptionChanged(object sender, RoutedEventArgs e)
         {
+            var needsRebuild = false;
+            var themeChanged = false;
+
             if (LanguageBox.SelectedItem is LanguageChoice choice && choice.Id != Settings.LanguageId)
             {
                 Settings.LanguageId = choice.Id;
                 SettingsChanged = true;
+                needsRebuild = true;
             }
 
             if (ThemeBox.SelectedItem is CodeTheme theme && theme.Id != Settings.ThemeId)
             {
                 Settings.ThemeId = theme.Id;
                 SettingsChanged = true;
+                themeChanged = true;
             }
 
-            var font = FontBox.Text?.Trim();
+            // 从下拉里选字体时，SelectionChanged 触发那一刻 FontBox.Text 还是旧值，要从事件参数里取新选的那项
+            var picked = sender == FontBox && e is SelectionChangedEventArgs selection && selection.AddedItems.Count > 0
+                ? selection.AddedItems[0] as string
+                : null;
+            var font = (picked ?? FontBox.Text)?.Trim();
             if (!string.IsNullOrEmpty(font) && font != Settings.FontFamily)
             {
                 Settings.FontFamily = font;
                 SettingsChanged = true;
+                needsRebuild = true;
             }
 
             var showBorders = BorderBox.IsChecked == true;
@@ -133,9 +168,18 @@ namespace OneNoteCodeHelper.Views
             {
                 Settings.ShowBorders = showBorders;
                 SettingsChanged = true;
+                needsRebuild = true;
             }
 
-            UpdatePreview();
+            if (needsRebuild)
+            {
+                UpdatePreview();
+            }
+            else if (themeChanged && Preview.Document != null)
+            {
+                // 只换了主题：给已经排好的 Run 重新上色就行，不必重新识别、分词、排版
+                CodePreviewRenderer.ApplyTheme(Preview.Document, Settings.Theme);
+            }
         }
 
         /// <summary>按当前选项解析出要用的语言；返回 null 表示自动识别没识别出来。</summary>
@@ -145,40 +189,79 @@ namespace OneNoteCodeHelper.Views
             return choice?.Language ?? LanguageRegistry.Detect(CodeBox.Text);
         }
 
+        /// <summary>
+        /// 刷新预览。自动识别放到后台线程做，识别完再回到界面线程画，
+        /// 这样哪怕碰上识别很慢的输入，窗口也还能打字、能关。
+        /// </summary>
         private void UpdatePreview()
+        {
+            _previewTimer.Stop();
+            var version = ++_previewVersion;
+            var code = CodeBox.Text;
+
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                ClearPreview("等待粘贴代码…");
+                return;
+            }
+
+            var chosen = (LanguageBox.SelectedItem as LanguageChoice)?.Language;
+            if (chosen != null)
+            {
+                ShowPreview(code, chosen);
+                return;
+            }
+
+            var dispatcher = Dispatcher;
+            Task.Run(() =>
+            {
+                ILanguage detected = null;
+                try
+                {
+                    detected = LanguageRegistry.Detect(code);
+                }
+                catch (Exception ex)
+                {
+                    AddInLog.Warn("自动识别语言失败。", ex);
+                }
+
+                dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (version == _previewVersion)
+                    {
+                        ShowPreview(code, detected);
+                    }
+                }));
+            });
+        }
+
+        private void ShowPreview(string code, ILanguage language)
         {
             // 预览失败不该弹窗打断打字，出错就把原因写到状态栏。
             try
             {
-                var code = CodeBox.Text;
-                var theme = Settings.Theme;
-
-                if (string.IsNullOrWhiteSpace(code))
-                {
-                    Preview.Document = null;
-                    DetectHint.Text = string.Empty;
-                    SetStatus("等待粘贴代码…");
-                    InsertButton.IsEnabled = false;
-                    return;
-                }
-
-                var language = ResolveLanguage();
                 if (language == null)
                 {
-                    Preview.Document = null;
-                    DetectHint.Text = string.Empty;
-                    SetStatus("无法自动判断这段代码的语言，请在左上角手动选择语言。");
-                    InsertButton.IsEnabled = false;
+                    ClearPreview("无法自动判断这段代码的语言，请在左上角手动选择语言。");
                     return;
                 }
 
                 DetectHint.Text = IsAutoSelected() ? $"已识别为 {language.DisplayName}" : string.Empty;
 
-                var document = CodePreviewRenderer.Build(code, language, theme, Settings);
+                // 和插入时一样去掉末尾空白，预览的行数才和插入后对得上
+                code = code.TrimEnd();
+                var lineCount = CountLines(code);
+                var truncated = lineCount > PreviewLineLimit;
+
+                var theme = Settings.Theme;
+                var document = CodePreviewRenderer.Build(
+                    truncated ? TakeLines(code, PreviewLineLimit) : code, language, theme, Settings);
                 CodePreviewRenderer.ApplyTheme(document, theme);
                 Preview.Document = document;
 
-                SetStatus($"{CodePreviewRenderer.LineCount(document)} 行，将按 {language.DisplayName} 高亮。");
+                SetStatus(truncated
+                    ? $"{lineCount} 行，将按 {language.DisplayName} 高亮。预览只显示前 {PreviewLineLimit} 行，插入的是全部。"
+                    : $"{lineCount} 行，将按 {language.DisplayName} 高亮。");
                 InsertButton.IsEnabled = true;
             }
             catch (Exception ex)
@@ -187,6 +270,63 @@ namespace OneNoteCodeHelper.Views
                 SetStatus("生成预览失败：" + ex.Message);
                 InsertButton.IsEnabled = false;
             }
+        }
+
+        private void ClearPreview(string status)
+        {
+            Preview.Document = null;
+            DetectHint.Text = string.Empty;
+            SetStatus(status);
+            InsertButton.IsEnabled = false;
+        }
+
+        /// <summary>行数，\r\n、\n、\r 都算一个换行，和插入时的拆行规则一致。</summary>
+        private static int CountLines(string code)
+        {
+            var lines = 1;
+            for (var i = 0; i < code.Length; i++)
+            {
+                var ch = code[i];
+                if (ch != '\n' && ch != '\r')
+                {
+                    continue;
+                }
+
+                if (ch == '\r' && i + 1 < code.Length && code[i + 1] == '\n')
+                {
+                    i++;
+                }
+
+                lines++;
+            }
+
+            return lines;
+        }
+
+        /// <summary>取前 count 行，不含第 count 行末尾的换行。</summary>
+        private static string TakeLines(string code, int count)
+        {
+            var lines = 0;
+            for (var i = 0; i < code.Length; i++)
+            {
+                var ch = code[i];
+                if (ch != '\n' && ch != '\r')
+                {
+                    continue;
+                }
+
+                if (++lines == count)
+                {
+                    return code.Substring(0, i);
+                }
+
+                if (ch == '\r' && i + 1 < code.Length && code[i + 1] == '\n')
+                {
+                    i++;
+                }
+            }
+
+            return code;
         }
 
         private bool IsAutoSelected()

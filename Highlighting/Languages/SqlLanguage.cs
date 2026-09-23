@@ -108,10 +108,8 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 // "name"、[name]、`name` 是带引号的标识符
                 if (ch == '"' || ch == '[' || ch == '`')
                 {
-                    var close = ch == '[' ? ']' : ch;
-                    var end = source.IndexOf(close, start + 1);
-                    var lineEnd = source.IndexOfAny(new[] { '\n', '\r' }, start + 1);
-                    if (end > 0 && (lineEnd < 0 || end < lineEnd))
+                    var end = FindOnSameLine(source, ch == '[' ? ']' : ch, start + 1);
+                    if (end > 0)
                     {
                         c.Advance(end + 1 - start);
                         c.Emit(TokenKind.Plain, start);
@@ -204,6 +202,29 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return callsFunction ? TokenKind.Function : TokenKind.Plain;
         }
 
+        /// <summary>
+        /// 在同一行里找结束符，找不到返回 -1。碰到换行就停：往后整篇去找的话，
+        /// 没配对的引号或方括号一多，每个都要扫到文件末尾。
+        /// </summary>
+        private static int FindOnSameLine(string source, char close, int from)
+        {
+            for (var i = from; i < source.Length; i++)
+            {
+                var ch = source[i];
+                if (ch == close)
+                {
+                    return i;
+                }
+
+                if (ch == '\n' || ch == '\r')
+                {
+                    return -1;
+                }
+            }
+
+            return -1;
+        }
+
         /// <summary>单引号字符串，'' 表示一个单引号，可以跨行。</summary>
         private static void ScanSingleQuoted(LexerCursor c)
         {
@@ -244,13 +265,13 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             score += 2 * Count(source, @"\bvalues\s*\(");
 
             // 和 Lua 的注释打分对冲：-- 注释两边都有，不该由它决定结果。同样排除 CSS 自定义属性那种行。
-            score += 3 * Count(source, @"^\s*--(?![\w-]+\s*:.*;\s*$)");
+            score += 3 * Count(source, @"^[^\S\r\n]*--(?![\w-]+\s*:.*;\s*$)");
             return score;
         }
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline | RegexOptions.IgnoreCase).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline | RegexOptions.IgnoreCase);
         }
     }
 }

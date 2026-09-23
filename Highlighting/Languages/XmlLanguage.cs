@@ -18,7 +18,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         public int ScoreLikelihood(string source)
         {
             var score = 0;
-            score += 10 * Count(source, @"^\s*<\?xml\b");
+            score += 10 * Count(source, @"^[^\S\r\n]*<\?xml\b");
             score += 4 * Count(source, @"\bxmlns(:\w+)?\s*=");
             score += 2 * Count(source, @"</[A-Za-z_][\w:.-]*\s*>");
             score += Count(source, @"/>");
@@ -27,7 +27,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static int Count(string source, string pattern)
         {
-            return Regex.Matches(source, pattern, RegexOptions.Multiline).Count;
+            return LikelihoodPatterns.Count(source, pattern, RegexOptions.Multiline);
         }
     }
 }
