@@ -209,6 +209,26 @@ namespace OneNoteCodeHelper.Services
                 .Select(flow => string.Join("|", DescribeLines(flow, 0))));
         }
 
+        /// <summary>
+        /// 拿一份带选区标记的页面 XML 跑一遍「高亮选中」的读选区和替换，代码框用一个空的 one:Table 代替。
+        /// 返回「源码 =&gt; 替换后的文本块」：源码的换行写成 |、制表符写成 \t；文本块的写法同 <see cref="RemoveBlankLines"/>，
+        /// 代码框是 #。读选区失败时返回 "FAIL: 说明"。Tools/highlight-selection-test.ps1 调这里。
+        /// </summary>
+        internal static string HighlightSelection(string pageXml)
+        {
+            var page = XElement.Parse(pageXml);
+            var result = PageEditor.ReadCodeSelection(page, out var selection);
+            if (!result.Success)
+            {
+                return "FAIL: " + result.Message;
+            }
+
+            selection.ReplaceWith(new XElement(OneNoteApi.One + "Table"));
+
+            return selection.Code.Replace("\t", "\\t").Replace("\n", "|") + " => " +
+                   string.Join("|", DescribeLines(selection.Block.Element(OneNoteApi.One + "OEChildren"), 0));
+        }
+
         private static IEnumerable<string> DescribeLines(XElement oeChildren, int depth)
         {
             var prefix = new string('>', depth);

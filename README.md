@@ -155,6 +155,7 @@ Tools/register.ps1          只做注册这一步
 Tools/unregister.ps1        只做注销这一步
 Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-samples/<语言 id>/ 下
 Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出解析；加 -Live 用本机配置真调一次接口
+Tools/highlight-selection-test.ps1  「高亮选中」回归测试：认选区、缩进的段落、换成代码框
 ```
 
 ## 加一种语言
@@ -204,6 +205,9 @@ Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出�
 - **`one:T` 虽然是 CDATA，内容仍按 HTML 解析**，`<` `>` `&` 必须转义，
   否则 Java 泛型 `List<String>` 会被整段吞掉。
 - **行首缩进和空行会被折叠**，必须用 `&nbsp;` 顶住。
+- **在 OneNote 里行首按 Tab 不是插入制表符**，而是把这一段挂到上一段的 `one:OEChildren` 下。
+  直接在笔记里敲的代码，选区里的段落父节点各不相同，不能按父节点判断是不是「同一块」；
+  「高亮选中」按所在的文本框 / 表格单元格判断，每深一层补一个制表符。
 - **OneNote 不认 CSS 字体栈**。给 `font-family:Consolas,NSimSun` 它只取 `Consolas`；
   而且遇到中文时会把 `font-family` 整个丢掉、回退到自己的中文字体。
   所以代码里有中文注释又想对齐，只能整体换成中英文都等宽的字体（插入窗口里可以选「NSimSun」新宋体）。

@@ -88,6 +88,92 @@ namespace OneNoteCodeHelper.Services
         }
     }
 
+    /// <summary>
+    /// 「高亮选中」选中的那几段代码，都在同一个文本框或表格单元格里。
+    ///
+    /// 在 OneNote 里敲代码时行首按 Tab 不是插入制表符，而是把这一段挂到上一段的 OEChildren 下，
+    /// 所以段落可能嵌套好几层。拼源码时每深一层补一个制表符，替换时把嵌套的段落一起换掉。
+    /// </summary>
+    internal sealed class CodeSelection
+    {
+        private readonly List<int> _levels;
+
+        internal CodeSelection(IReadOnlyList<XElement> paragraphs, XElement block, XElement outline)
+        {
+            Paragraphs = paragraphs;
+            Block = block;
+            Outline = outline;
+
+            _levels = paragraphs.Select(IndentLevel).ToList();
+            var baseLevel = _levels.Min();
+
+            Code = string.Join("\n", paragraphs.Select((oe, i) =>
+            {
+                var text = PageEditor.ExtractPlainText(oe);
+                return text.Length == 0 ? text : new string('\t', _levels[i] - baseLevel) + text;
+            }));
+        }
+
+        /// <summary>选中的段落，按页面上从上到下的顺序。</summary>
+        internal IReadOnlyList<XElement> Paragraphs { get; }
+
+        /// <summary>段落所在的文本框（one:Outline）或表格单元格（one:Cell）。</summary>
+        internal XElement Block { get; }
+
+        /// <summary>要回传的文本框。</summary>
+        internal XElement Outline { get; }
+
+        internal string Code { get; }
+
+        private static XNamespace One => OneNoteApi.One;
+
+        /// <summary>
+        /// 把选中的段落换成代码框。
+        ///
+        /// 代码框放在最外一层的第一个选中段落处：选区是连续的一段，最外一层的选中段落都是同一个 OEChildren
+        /// 里挨着的兄弟，选区开头那几段更深的段落挂在前一个兄弟下面，所以放在这里上下文顺序不变。
+        /// 选区在一个缩进块中间结束时，被删的段落下面还挂着没选中的段落，把它们提到代码框后面留着，不跟着删掉。
+        /// </summary>
+        internal void ReplaceWith(XElement table)
+        {
+            var baseLevel = _levels.Min();
+            var anchor = Paragraphs[_levels.IndexOf(baseLevel)];
+            var codeBlock = new XElement(One + "OE", table);
+            anchor.AddBeforeSelf(codeBlock);
+
+            var selected = new HashSet<XElement>(Paragraphs);
+            var left = Paragraphs
+                .SelectMany(oe => oe.Elements(One + "OEChildren").Elements(One + "OE"))
+                .Where(oe => !selected.Contains(oe))
+                .InDocumentOrder()
+                .ToList();
+
+            foreach (var oe in left)
+            {
+                oe.Remove();
+            }
+
+            codeBlock.AddAfterSelf(left);
+
+            foreach (var oe in Paragraphs)
+            {
+                var parent = oe.Parent;
+                oe.Remove();
+
+                // 缩进的下级段落删光了，空的 OEChildren 也去掉。
+                if (parent != null && parent.Parent?.Name == One + "OE" && !parent.Elements(One + "OE").Any())
+                {
+                    parent.Remove();
+                }
+            }
+        }
+
+        private int IndentLevel(XElement oe)
+        {
+            return oe.Ancestors().TakeWhile(e => e != Block).Count(e => e.Name == One + "OE");
+        }
+    }
+
     /// <summary>读写 OneNote 页面：识别选区、就地替换成代码框、插入新代码框、AI 改写段落。</summary>
     internal sealed class PageEditor
     {
@@ -126,51 +212,71 @@ namespace OneNoteCodeHelper.Services
                 return EditResult.Fail("读取当前页面内容失败。");
             }
 
-            var selected = FindSelectedParagraphs(page);
-
-            if (selected.Count == 0)
+            var read = ReadCodeSelection(page, out var selection);
+            if (!read.Success)
             {
-                return EditResult.Fail("没有检测到选中的文本。请先在页面上选中要高亮的代码，再点「高亮选中」。");
+                return read;
             }
 
-            var code = string.Join("\n", selected.Select(ExtractPlainText));
-            if (string.IsNullOrWhiteSpace(code))
-            {
-                return EditResult.Fail("选中的内容里没有文字。");
-            }
-
-            var language = LanguageRegistry.Resolve(languageId, code);
+            var language = LanguageRegistry.Resolve(languageId, selection.Code);
             if (language == null)
             {
                 return EditResult.Fail("无法自动判断这段代码的语言。请在功能区的「语言」下拉里明确选择后重试。");
             }
 
-            // 选中的段落必须在同一个父节点下，否则替换后的结构会很怪。
-            var parent = selected[0].Parent;
-            if (selected.Any(oe => oe.Parent != parent))
+            var table = CodeBlockBuilder.BuildTable(selection.Code, language, settings.Theme, settings);
+            selection.ReplaceWith(table);
+
+            var changes = BuildPageChanges(pageId, selection.Outline);
+            return Submit(pageId, page, changes,
+                $"已按 {language.DisplayName} 高亮 {selection.Paragraphs.Count} 行所在的选区。");
+        }
+
+        /// <summary>
+        /// 从 piSelection 读到的页面里找出「高亮选中」要处理的段落，拼成源码。只读不改。
+        /// </summary>
+        internal static EditResult ReadCodeSelection(XElement page, out CodeSelection selection)
+        {
+            selection = null;
+
+            var selected = FindSelectedParagraphs(page);
+            if (selected.Count == 0)
             {
+                return EditResult.Fail("没有检测到选中的文本。请先在页面上选中要高亮的代码，再点「高亮选中」。");
+            }
+
+            // 缩进的段落挂在上一段的 OEChildren 下，父节点各不相同，所以按所在的文本框 / 表格单元格判断，
+            // 不能按父节点：在 OneNote 里敲代码时行首按 Tab 就是这样缩进的。
+            var block = TextBlockOf(selected[0]);
+            if (selected.Any(oe => TextBlockOf(oe) != block))
+            {
+                AddInLog.Info("选区跨越了不同的区块：" + string.Join("，", selected
+                    .GroupBy(TextBlockOf)
+                    .Select(g => (g.Key?.Name.LocalName ?? "(无)") + " " + g.Count() + " 段")));
                 return EditResult.Fail("选中的内容跨越了不同的区块（比如同时选了表格内外）。请只选中同一块里的代码。");
             }
 
-            var outline = selected[0].Ancestors(One + "Outline").FirstOrDefault();
-            var outlineId = (string)outline?.Attribute("objectID");
-            if (outline == null || string.IsNullOrEmpty(outlineId))
+            var outline = block?.AncestorsAndSelf(One + "Outline").FirstOrDefault();
+            if (outline == null || string.IsNullOrEmpty((string)outline.Attribute("objectID")))
             {
                 return EditResult.Fail("选中的内容不在一个可编辑的区块里，无法替换。");
             }
 
-            var table = CodeBlockBuilder.BuildTable(code, language, settings.Theme, settings);
-
-            // 在第一个被选中的段落位置放入代码框，再把原来那些段落删掉。
-            selected[0].AddBeforeSelf(new XElement(One + "OE", table));
-            foreach (var oe in selected)
+            selection = new CodeSelection(selected, block, outline);
+            if (string.IsNullOrWhiteSpace(selection.Code))
             {
-                oe.Remove();
+                selection = null;
+                return EditResult.Fail("选中的内容里没有文字。");
             }
 
-            var changes = BuildPageChanges(pageId, outline);
-            return Submit(pageId, page, changes,
-                $"已按 {language.DisplayName} 高亮 {selected.Count} 行所在的选区。");
+            return EditResult.Ok();
+        }
+
+        /// <summary>段落所在的文本块：最近的文本框、表格单元格或标题。</summary>
+        private static XElement TextBlockOf(XElement oe)
+        {
+            return oe.Ancestors().FirstOrDefault(e =>
+                e.Name == One + "Outline" || e.Name == One + "Cell" || e.Name == One + "Title");
         }
 
         /// <summary>
@@ -516,7 +622,7 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>把一个 one:OE 里的文字还原成纯文本。</summary>
-        private static string ExtractPlainText(XElement oe)
+        internal static string ExtractPlainText(XElement oe)
         {
             var parts = oe.Elements(One + "T").Select(t => OneNoteHtmlEncoder.DecodeToPlainText(t.Value));
             return string.Concat(parts);
