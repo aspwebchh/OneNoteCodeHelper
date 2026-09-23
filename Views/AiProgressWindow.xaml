@@ -77,11 +77,12 @@
                      Background="#E2E8F0"
                      BorderThickness="0" />
 
-        <Button x:Name="ActionButton"
+        <!-- 只在处理期间显示；出了结果就藏起来，关窗用标题栏的叉 -->
+        <Button x:Name="CancelButton"
                 Content="取消"
                 Style="{StaticResource BaseButton}"
                 Margin="0,16,0,0"
                 HorizontalAlignment="Right"
-                Click="OnAction" />
+                Click="OnCancel" />
     </StackPanel>
 </Window>

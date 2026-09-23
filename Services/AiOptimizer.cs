@@ -186,7 +186,9 @@ namespace OneNoteCodeHelper.Services
             }
 
             AddInLog.Info($"AI 优化结束：改了 {applied} 段，删了 {removedBlankLines} 个空行，跳过 {conflicted} 段，拒绝 {rejected} 段。");
-            return EditResult.Ok(message.ToString());
+            // 什么都没改也要让用户看到，否则进度窗一闪就没了，分不清是没东西可改还是没跑。
+            return EditResult.Ok(message.ToString(),
+                needsAttention: conflicted > 0 || rejected > 0 || (applied == 0 && removedBlankLines == 0));
         }
 
         /// <summary>

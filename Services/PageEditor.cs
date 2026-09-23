@@ -12,19 +12,27 @@ namespace OneNoteCodeHelper.Services
     /// <summary>一次页面操作的结果。失败时带一句可以直接给用户看的中文说明。</summary>
     internal sealed class EditResult
     {
-        private EditResult(bool success, string message)
+        private EditResult(bool success, string message, bool needsAttention)
         {
             Success = success;
             Message = message;
+            NeedsAttention = needsAttention;
         }
 
         internal bool Success { get; }
 
         internal string Message { get; }
 
-        internal static EditResult Ok(string message = null) => new EditResult(true, message);
+        /// <summary>
+        /// 结果里有用户该看一眼的话（失败、有段落被跳过、什么都没改）。
+        /// 为 false 时改动已经在页面上看得到，AI 优化的进度窗直接关掉，不再停留。
+        /// </summary>
+        internal bool NeedsAttention { get; }
 
-        internal static EditResult Fail(string message) => new EditResult(false, message);
+        internal static EditResult Ok(string message = null, bool needsAttention = false) =>
+            new EditResult(true, message, needsAttention);
+
+        internal static EditResult Fail(string message) => new EditResult(false, message, true);
     }
 
     /// <summary>要交给 AI 处理的一个段落。</summary>

@@ -11,23 +11,19 @@ using OneNoteCodeHelper.Services;
 namespace OneNoteCodeHelper.Views
 {
     /// <summary>
-    /// 「AI 优化」的进度小窗：显示进度、可以取消；做完显示结果，没有需要留意的就自己关掉。
+    /// 「AI 优化」的进度小窗：显示进度、可以取消。顺利改完直接关掉，改动在页面上就看得到；
+    /// 失败或结果里有要留意的话时留着，用户看完点标题栏的叉关。
     ///
     /// 和插入窗口一样在 COM 代理进程的独立 STA 线程上 ShowDialog。真正的活（读页面、调接口、写回）
     /// 在线程池上跑，这个窗口只管显示。
     /// </summary>
     public partial class AiProgressWindow : Window
     {
-        /// <summary>顺利做完、没有额外提示时，结果留这么久再自动关窗。</summary>
-        private static readonly TimeSpan AutoCloseDelay = TimeSpan.FromSeconds(2.5);
-
         private readonly Func<IProgress<AiProgress>, CancellationToken, Task<EditResult>> _job;
 
         private readonly CancellationTokenSource _cancellation = new CancellationTokenSource();
 
         private Task<EditResult> _jobTask;
-
-        private DispatcherTimer _autoCloseTimer;
 
         /// <summary>等 AI 期间每秒刷新一次「已用时」。</summary>
         private DispatcherTimer _ticker;
@@ -71,7 +67,6 @@ namespace OneNoteCodeHelper.Views
             Closed += (_, __) =>
             {
                 _closed = true;
-                _autoCloseTimer?.Stop();
                 _ticker?.Stop();
             };
         }
@@ -130,7 +125,8 @@ namespace OneNoteCodeHelper.Views
                 return;
             }
 
-            if (result == null && failure == null)
+            // 取消了，或者顺利改完、没有要交代的：直接关窗。
+            if ((result == null && failure == null) || (result != null && result.Success && !result.NeedsAttention))
             {
                 _finished = true;
                 Close();
@@ -198,20 +194,7 @@ namespace OneNoteCodeHelper.Views
             ProgressMeter.IsIndeterminate = false;
             ProgressMeter.Maximum = 1;
             ProgressMeter.Value = 1;
-            ActionButton.Content = "关闭";
-            ActionButton.IsEnabled = true;
-
-            // 结果里带了「跳过」「没采用」这类要留意的话就不自动关，让用户看清楚。
-            if (message != null && message.IndexOf('\n') < 0)
-            {
-                _autoCloseTimer = new DispatcherTimer { Interval = AutoCloseDelay };
-                _autoCloseTimer.Tick += (_, __) =>
-                {
-                    _autoCloseTimer.Stop();
-                    Close();
-                };
-                _autoCloseTimer.Start();
-            }
+            CancelButton.Visibility = Visibility.Collapsed;
         }
 
         private void ShowFailure(string message)
@@ -223,23 +206,16 @@ namespace OneNoteCodeHelper.Views
             ProgressMeter.IsIndeterminate = false;
             ProgressMeter.Value = 0;
             ProgressMeter.Visibility = Visibility.Collapsed;
-            ActionButton.Content = "关闭";
-            ActionButton.IsEnabled = true;
+            CancelButton.Visibility = Visibility.Collapsed;
         }
 
-        private void OnAction(object sender, RoutedEventArgs e)
+        private void OnCancel(object sender, RoutedEventArgs e)
         {
-            if (_finished)
-            {
-                Close();
-                return;
-            }
-
             // 先不关窗：要是已经在写回，取消不了，等它做完把结果显示出来，免得用户以为页面没动。
             _cancellation.Cancel();
             StopDetail();
             StatusText.Text = "正在取消…";
-            ActionButton.IsEnabled = false;
+            CancelButton.IsEnabled = false;
         }
     }
 }
