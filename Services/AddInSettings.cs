@@ -39,6 +39,15 @@ namespace OneNoteCodeHelper.Services
         /// <summary>代码框是否显示边框。</summary>
         public bool ShowBorders { get; set; } = true;
 
+        /// <summary>「AI 优化」用哪个功能，存 ai-settings.xml 里 Function 的 name。</summary>
+        public string AiFunction { get; set; } = AiConfigStore.TypoFunctionName;
+
+        /// <summary>「AI 优化」用哪个模型，存 ai-settings.xml 里 Model 的 name。</summary>
+        public string AiModel { get; set; } = AiConfigStore.DefaultModelName;
+
+        /// <summary>思考强度，见 <see cref="AiEfforts"/>。</summary>
+        public string AiEffort { get; set; } = AiEfforts.DefaultId;
+
         internal CodeTheme Theme => CodeThemes.Find(ThemeId);
 
         internal AddInSettings Clone()
@@ -51,7 +60,10 @@ namespace OneNoteCodeHelper.Services
                 FontSize = FontSize,
                 TabWidth = TabWidth,
                 CodeBlockWidth = CodeBlockWidth,
-                ShowBorders = ShowBorders
+                ShowBorders = ShowBorders,
+                AiFunction = AiFunction,
+                AiModel = AiModel,
+                AiEffort = AiEffort
             };
         }
 
@@ -77,6 +89,9 @@ namespace OneNoteCodeHelper.Services
             {
                 LanguageId = LanguageRegistry.AutoDetectId;
             }
+
+            // 功能和模型的名字要对照 ai-settings.xml，那边随时会改，用的时候再兜底（找不到就取第一项）。
+            AiEffort = AiEfforts.Normalize(AiEffort);
         }
 
         internal static string FormatFontSize(double size)

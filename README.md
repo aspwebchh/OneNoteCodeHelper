@@ -15,6 +15,43 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 | 字体（插入窗口内） | 默认 Consolas。代码里有中文时改选「NSimSun」新宋体，中英文才能对齐 |
 | 诊断日志 | 打开日志文件 |
 
+旁边还有一个「AI 助手」组，用大模型改笔记里的文字：
+
+| 控件 | 作用 |
+|---|---|
+| AI 优化 | 选中文字后点它，按「功能」里选的方式修改并**直接写回**；什么都不选则处理整页（含标题）。弹一个进度小窗，可以取消 |
+| 功能 | 默认有「错别字修复」「排版优化」两项，选项和提示词都来自配置文件，可以自己加 |
+| 模型 | 默认 Pro（`deepseek-v4-pro`）/ Flash（`deepseek-v4-flash`），来自配置文件 |
+| 思考 | 思考强度：不思考（`none`）/ 标准（`high`）/ 深度（`max`） |
+| AI 配置 | 用记事本打开配置文件，保存并关闭记事本后生效 |
+
+几点行为：
+
+- 只改段内文字，不合并、不拆分段落。改动按字符合并回原段落，**加粗、颜色、链接、列表和缩进都保留**；
+  改错字时新字沿用被替换字的格式，排版时补的空格不会跟进加粗或链接。
+- 代码框（段落字体是 Consolas、新宋体等等宽字体）不会交给 AI。
+- AI 处理期间你还可以继续编辑。写回前会重新读页面，处理期间被你改过的段落直接跳过，不会覆盖。
+- 和原文差别太大（相似度低于 0.6）的改动不会写回，防止模型把整段改写掉。
+
+### AI 配置文件
+
+`%APPDATA%\OneNoteCodeHelper\ai-settings.xml`，第一次点「AI 配置」时生成，里面每一项都有注释：
+
+| 字段 | 说明 |
+|---|---|
+| `ApiUrl` | OpenAI 兼容接口的地址，写到 `/v1` 为止 |
+| `ApiKey` | 接口的 Key。**默认是空的**，不填点「AI 优化」会提示 |
+| `TimeoutSeconds` | 单次请求超时，默认 300 秒 |
+| `MaxTokens` | 单次请求最多输出多少 token（含思考过程），默认 16384，0 表示用接口默认值 |
+| `Models/Model` | 「模型」下拉的选项，`name` 显示名、`id` 接口模型名 |
+| `Functions/Function` | 「功能」下拉的选项，`name` 显示名、`Prompt` 提示词 |
+
+提示词只需写清楚要做什么。输入输出的 JSON 格式、只返回改动的段落、不许合并拆分段落、代码网址保持原样
+这些约定由插件自动接在后面（见 `AiOptimizer.Protocol`），改提示词不会把格式弄坏。
+
+这份文件和 `settings.xml` 分开放，是因为 `settings.xml` 在每次切功能区选项时都会被整体重写，
+手改的 Key、提示词放在那里会被覆盖。插件只在文件不存在时写一次默认值，之后只读。
+
 ## 环境要求
 
 - OneNote **桌面版**（Office16 的 `ONENOTE.EXE`）。UWP 版「OneNote for Windows 10」没有 COM 接口，用不了。
@@ -84,7 +121,12 @@ Services/
   OneNoteHtmlEncoder.cs     Token -> one:T 里的 span HTML
   AddInSettings.cs          设置与持久化
   AddInLog.cs               文件日志
-  RenderDiagnostics.cs      不碰 OneNote 就能跑通渲染链路的诊断入口
+  RenderDiagnostics.cs      不碰 OneNote 就能跑通渲染链路的诊断入口（AI 助手的测试也走这里）
+  AiConfig.cs               ai-settings.xml 的模型与读写，思考强度的三档
+  AiClient.cs               Chat Completions 接口（HttpClient + JavaScriptSerializer）
+  AiOptimizer.cs            AI 优化的编排：读段落 → 分批并发问 AI → 写回；固定的输入输出约定
+  RichParagraph.cs          把 AI 改过的纯文本按字符合并回带格式的 one:T
+  TextDiff.cs               逐字符 diff（公共前后缀 + LCS）
 Highlighting/
   TokenKind / Token / ILanguage / LexerCursor / LanguageRegistry
   DetectionSample.cs        自动识别的样本：原文开头一段 + 去掉注释和字符串内容的同长文本
@@ -97,10 +139,12 @@ Highlighting/
 Views/
   InsertCodeWindow.xaml     插入代码窗口
   CodePreviewRenderer.cs    用同一套 token 流渲染 WPF 预览
+  AiProgressWindow.xaml     AI 优化的进度小窗
 install.ps1                 一键构建 + 安装 / 卸载
 Tools/register.ps1          只做注册这一步
 Tools/unregister.ps1        只做注销这一步
 Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-samples/<语言 id>/ 下
+Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出解析；加 -Live 用本机配置真调一次接口
 ```
 
 ## 加一种语言
@@ -174,5 +218,10 @@ Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-sa
 - **程序集必须强名称签名**。Fusion 的规则是 `codeBase` 指向应用程序目录之外时只对
   强名称程序集生效。本外接程序的 DLL 在自己的目录里、宿主却是 `ONENOTE.EXE`，
   不签名的话注册表里的 `CodeBase` 会被直接忽略。
+- **在 dllhost 里发 HTTPS 要显式开 TLS1.2**。插件的 AppDomain 由原生的 dllhost 创建，拿不到目标框架信息，
+  `ServicePointManager` 会按老默认值只开 SSL3/TLS1.0，现在的 HTTPS 服务一律握手失败。
+  `AiClient` 的静态构造里给 `SecurityProtocol` 加上了 `Tls12`。
+- **引用 `System.Web.Extensions` 要连 `System.Web` 一起引**。前者引用了后者，SDK 版的 XAML 编译器
+  （`MarkupCompilePass1`）解析不到就报 `MC1000: Could not find assembly 'System.Web'`，看起来像 XAML 写错了。
 - **`-replace` 的第一个参数是正则**。`$path -replace '\', '/'` 里的单个反斜杠是非法模式，
   会直接抛 `InvalidRegularExpression`。要替换路径分隔符用 `.Replace()`。

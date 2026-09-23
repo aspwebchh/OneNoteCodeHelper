@@ -49,6 +49,13 @@ namespace OneNoteCodeHelper
         private int _insertWindowOpen;
         private volatile InsertCodeWindow _insertWindow;
 
+        // 「AI 优化」的进度窗开着、或者后台任务还没收尾时为 1；_aiWindow 同 _insertWindow。
+        private int _aiRunning;
+        private volatile AiProgressWindow _aiWindow;
+
+        // ai-settings.xml 的内容。点「AI 优化」时、用记事本改完配置后都会重新读。
+        private volatile AiConfig _aiConfig;
+
         // OnConnection 传进来的两个宿主对象。它们在本代理进程里是跨进程 RCW，
         // 断开时必须主动还回去，见 ReleaseHostReferences。
         private object _hostApplication;
@@ -112,6 +119,7 @@ namespace OneNoteCodeHelper
                 _hostApplication = application;
                 _hostAddIn = addInInst;
                 _settings = SettingsStore.Load();
+                _aiConfig = AiConfigStore.Load();
 
                 // 宿主传来的是原始 COM IDispatch。用 PIA 为这个已有对象创建
                 // 包装器；不能再 new Application()，否则会额外激活 OneNote，
@@ -442,6 +450,210 @@ namespace OneNoteCodeHelper
             });
         }
 
+        public void OnAiOptimize(object control)
+        {
+            Guard("AI 优化", () =>
+            {
+                var owner = _api.GetMainWindowHandle();
+
+                // 已经在跑就把进度窗拉到前面，不能对同一页并发改写。
+                if (Interlocked.CompareExchange(ref _aiRunning, 1, 0) != 0)
+                {
+                    var existing = _aiWindow;
+                    existing?.Dispatcher.BeginInvoke(new Action(() => existing.Activate()));
+                    return;
+                }
+
+                // 每次都重新读：用户可能用别的编辑器改了配置。读失败会退回默认值，不会抛。
+                var config = ReloadAiConfig();
+
+                if (string.IsNullOrWhiteSpace(config.ApiKey))
+                {
+                    Interlocked.Exchange(ref _aiRunning, 0);
+                    ShowMessage("还没有配置 AI 接口的 Key。\n\n请点「AI 助手」里的「AI 配置」，在打开的文件里填好 ApiKey 并保存，再点「AI 优化」。",
+                        MessageBoxImage.Warning, owner);
+                    return;
+                }
+
+                var editor = _editor;
+                var function = config.FindFunction(_settings.AiFunction);
+                var model = config.FindModel(_settings.AiModel);
+                var effort = AiEfforts.Normalize(_settings.AiEffort);
+                var caption = $"{function.Name} · {model.Name} · {AiEfforts.LabelOf(effort)}";
+
+                // 进度窗和插入窗口一样要 STA 线程；真正的活在窗口里交给线程池（MTA）去跑。
+                RunInBackground("AI 优化", ApartmentState.STA, owner, () =>
+                {
+                    AiProgressWindow window = null;
+                    try
+                    {
+                        var optimizer = new AiOptimizer(editor, config, function, model, effort);
+                        window = new AiProgressWindow(caption, optimizer.RunAsync, owner);
+                        _aiWindow = window;
+                        window.ShowDialog();
+                    }
+                    finally
+                    {
+                        _aiWindow = null;
+
+                        // 窗口关了后台任务未必结束（中途关窗 = 取消，HTTP 马上会停；写回则要等它写完）。
+                        // 等它收尾再放行下一次，免得两次写回撞在一起。
+                        window?.WaitForJob(TimeSpan.FromMinutes(2));
+                        Dispatcher.CurrentDispatcher.InvokeShutdown();
+                    }
+                },
+                () => Interlocked.Exchange(ref _aiRunning, 0));
+            });
+        }
+
+        public int GetAiFunctionCount(object control)
+        {
+            return CurrentAiConfig().Functions.Count;
+        }
+
+        public string GetAiFunctionId(object control, int index)
+        {
+            return "OncAiFunction" + index;
+        }
+
+        public string GetAiFunctionLabel(object control, int index)
+        {
+            var functions = CurrentAiConfig().Functions;
+            return index >= 0 && index < functions.Count ? functions[index].Name : string.Empty;
+        }
+
+        public int GetAiFunctionIndex(object control)
+        {
+            var settings = _settings ?? (_settings = SettingsStore.Load());
+            return CurrentAiConfig().IndexOfFunction(settings.AiFunction);
+        }
+
+        /// <summary>dropDown 的 onAction 比按钮多两个参数：选中项的 id 和下标。</summary>
+        public void OnAiFunctionChanged(object control, string selectedId, int selectedIndex)
+        {
+            Guard("切换 AI 功能", () =>
+            {
+                var functions = CurrentAiConfig().Functions;
+                if (selectedIndex >= 0 && selectedIndex < functions.Count)
+                {
+                    _settings.AiFunction = functions[selectedIndex].Name;
+                    SettingsStore.Save(_settings);
+                    AddInLog.Info("AI 功能切换为 " + _settings.AiFunction);
+                }
+            });
+        }
+
+        public int GetAiModelCount(object control)
+        {
+            return CurrentAiConfig().Models.Count;
+        }
+
+        public string GetAiModelId(object control, int index)
+        {
+            return "OncAiModel" + index;
+        }
+
+        public string GetAiModelLabel(object control, int index)
+        {
+            var models = CurrentAiConfig().Models;
+            return index >= 0 && index < models.Count ? models[index].Name : string.Empty;
+        }
+
+        public int GetAiModelIndex(object control)
+        {
+            var settings = _settings ?? (_settings = SettingsStore.Load());
+            return CurrentAiConfig().IndexOfModel(settings.AiModel);
+        }
+
+        public void OnAiModelChanged(object control, string selectedId, int selectedIndex)
+        {
+            Guard("切换 AI 模型", () =>
+            {
+                var models = CurrentAiConfig().Models;
+                if (selectedIndex >= 0 && selectedIndex < models.Count)
+                {
+                    _settings.AiModel = models[selectedIndex].Name;
+                    SettingsStore.Save(_settings);
+                    AddInLog.Info("AI 模型切换为 " + _settings.AiModel);
+                }
+            });
+        }
+
+        public int GetAiEffortCount(object control)
+        {
+            return AiEfforts.Ids.Length;
+        }
+
+        public string GetAiEffortId(object control, int index)
+        {
+            return "OncAiEffort" + index;
+        }
+
+        public string GetAiEffortLabel(object control, int index)
+        {
+            return index >= 0 && index < AiEfforts.Labels.Length ? AiEfforts.Labels[index] : string.Empty;
+        }
+
+        public int GetAiEffortIndex(object control)
+        {
+            var settings = _settings ?? (_settings = SettingsStore.Load());
+            return Array.IndexOf(AiEfforts.Ids, AiEfforts.Normalize(settings.AiEffort));
+        }
+
+        public void OnAiEffortChanged(object control, string selectedId, int selectedIndex)
+        {
+            Guard("切换思考强度", () =>
+            {
+                if (selectedIndex >= 0 && selectedIndex < AiEfforts.Ids.Length)
+                {
+                    _settings.AiEffort = AiEfforts.Ids[selectedIndex];
+                    SettingsStore.Save(_settings);
+                    AddInLog.Info("思考强度切换为 " + _settings.AiEffort);
+                }
+            });
+        }
+
+        /// <summary>
+        /// 用记事本打开 ai-settings.xml（没有就先生成默认的）。记事本关掉后重新读一遍，
+        /// 新加、改名的功能和模型随即出现在下拉里。
+        /// </summary>
+        public void OnOpenAiConfig(object control)
+        {
+            Guard("AI 配置", () =>
+            {
+                var path = AiConfigStore.EnsureFile();
+                var notepad = Process.Start(new ProcessStartInfo("notepad.exe", "\"" + path + "\"")
+                {
+                    UseShellExecute = false
+                });
+
+                if (notepad == null)
+                {
+                    return;
+                }
+
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        using (notepad)
+                        {
+                            notepad.WaitForExit();
+                        }
+
+                        ReloadAiConfig();
+                        AddInLog.Info("AI 配置已重新读取。");
+                    }
+                    catch (Exception ex)
+                    {
+                        AddInLog.Warn("等待记事本关闭或重新读取 AI 配置失败。", ex);
+                    }
+                });
+                thread.IsBackground = true;
+                thread.Start();
+            });
+        }
+
         public void OnOpenLog(object control)
         {
             Guard("打开日志", () =>
@@ -460,6 +672,26 @@ namespace OneNoteCodeHelper
         private const string CodeThemesLightId = "light";
 
         private const string CodeThemesDarkId = "dark";
+
+        private AiConfig CurrentAiConfig()
+        {
+            return _aiConfig ?? (_aiConfig = AiConfigStore.Load());
+        }
+
+        /// <summary>重新读 AI 配置；下拉里的功能、模型有变化才刷新功能区，免得每次都闪一下。</summary>
+        private AiConfig ReloadAiConfig()
+        {
+            var previous = _aiConfig;
+            var config = AiConfigStore.Load();
+            _aiConfig = config;
+
+            if (!config.HasSameChoices(previous))
+            {
+                InvalidateRibbon();
+            }
+
+            return config;
+        }
 
         /// <summary>
         /// 统一的回调外壳：保证前置条件齐备、异常不外泄、出错有提示也有日志。

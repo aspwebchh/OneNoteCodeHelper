@@ -107,6 +107,63 @@ namespace OneNoteCodeHelper.Services
                 .Select(x => x.Language.Id + "=" + x.Score));
         }
 
+        /// <summary>
+        /// 解析一个 one:OE 的 XML，返回给 AI 看的纯文本。拼不回原样的段落返回 "UNSUPPORTED"。
+        /// Tools/ai-merge-test.ps1 调这里。
+        /// </summary>
+        internal static string ParagraphText(string oeXml)
+        {
+            var rich = RichParagraph.Parse(XElement.Parse(oeXml));
+            return rich.IsLossless ? rich.Text : "UNSUPPORTED";
+        }
+
+        /// <summary>把新文本合并进一个 one:OE，返回合并后各个 one:T 的 HTML，用 | 隔开。</summary>
+        internal static string MergeParagraph(string oeXml, string newText)
+        {
+            var oe = XElement.Parse(oeXml);
+            RichParagraph.Parse(oe).Apply(newText);
+            return string.Join("|", oe.Elements(OneNoteApi.One + "T").Select(t => t.Value));
+        }
+
+        internal static double TextSimilarity(string oldText, string newText)
+        {
+            return TextDiff.Similarity(oldText, newText);
+        }
+
+        /// <summary>解析模型输出，返回 "id=文本" 逐行，按 id 排序。</summary>
+        internal static string ParseAiReply(string content)
+        {
+            return string.Join("\n", AiOptimizer.ParseReply(content)
+                .OrderBy(x => x.Key)
+                .Select(x => x.Key + "=" + x.Value));
+        }
+
+        internal static string CleanAiReplyText(string original, string text)
+        {
+            return AiOptimizer.CleanReplyText(original, text);
+        }
+
+        /// <summary>
+        /// 用本机 ai-settings.xml 真调一次接口：按「AI 优化」完全一样的提示词和格式问，返回解析后的结果。
+        /// paragraphs 用 \n 分隔。
+        /// </summary>
+        internal static string RunAiSample(string functionName, string modelName, string effort, string paragraphs)
+        {
+            var config = AiConfigStore.Load();
+            var function = config.FindFunction(functionName);
+            var model = config.FindModel(modelName);
+            var texts = paragraphs.Split('\n');
+
+            var content = AiClient.CompleteAsync(
+                    config, model.Id, AiEfforts.Normalize(effort),
+                    AiOptimizer.BuildSystemPrompt(function.Prompt),
+                    AiOptimizer.BuildUserMessage(texts.Select((text, i) => (i + 1, text))),
+                    System.Threading.CancellationToken.None)
+                .GetAwaiter().GetResult();
+
+            return $"[{function.Name} · {model.Id} · {AiEfforts.Normalize(effort)}]\n" + ParseAiReply(content);
+        }
+
         private static ILanguage ResolveLanguage(string code, string languageId)
         {
             var language = LanguageRegistry.Resolve(languageId, code);

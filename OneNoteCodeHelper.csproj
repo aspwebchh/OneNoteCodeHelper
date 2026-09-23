@@ -42,11 +42,20 @@
       <EmbedInteropTypes>false</EmbedInteropTypes>
       <Private>true</Private>
     </Reference>
+    <!--
+      AI 助手：HttpClient 调接口，JavaScriptSerializer（System.Web.Extensions）处理 JSON。都是框架自带的，不引 NuGet。
+      System.Web 本身用不到，但 System.Web.Extensions 引用了它，SDK 版的 XAML 编译器要能解析到，否则报 MC1000。
+    -->
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web" />
+    <Reference Include="System.Web.Extensions" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="Ribbon.xml" />
     <EmbeddedResource Include="Resources\HighlightSelection.png" />
+    <EmbeddedResource Include="Resources\AiOptimize.png" />
+    <EmbeddedResource Include="Resources\AiConfig.png" />
   </ItemGroup>
 
 </Project>

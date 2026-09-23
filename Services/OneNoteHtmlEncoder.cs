@@ -353,7 +353,7 @@ namespace OneNoteCodeHelper.Services
             return builder.ToString();
         }
 
-        private static string DecodeEntity(string entity)
+        internal static string DecodeEntity(string entity)
         {
             switch (entity.ToLowerInvariant())
             {

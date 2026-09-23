@@ -85,6 +85,63 @@
                   onAction="OnOpenLog" />
 
         </group>
+
+        <group id="OneNoteAiGroup" label="AI 助手">
+
+          <button id="OncAiOptimize"
+                  label="AI 优化"
+                  size="large"
+                  image="AiOptimize"
+                  screentip="用 AI 修改选中的文字"
+                  supertip="先选中要处理的文字再点这里；什么都不选则处理整页。按右边「功能」里选的方式修改，结果直接写回页面。代码框不会交给 AI。"
+                  onAction="OnAiOptimize" />
+
+          <!--
+            三个下拉叠成一列。只能从列表里选，所以用 dropDown 而不是 comboBox；
+            三个都是 dropDown、sizeString 一样才对得齐（原因见上面「语言」「字号」的注释）。
+            功能、模型两个的选项来自 ai-settings.xml，改完配置会刷新。
+          -->
+          <dropDown id="OncAiFunction"
+                    label="功能"
+                    sizeString="错别字修复xx"
+                    screentip="AI 要做什么"
+                    supertip="选项和对应的提示词都在「AI 配置」里，可以自己加。"
+                    getItemCount="GetAiFunctionCount"
+                    getItemID="GetAiFunctionId"
+                    getItemLabel="GetAiFunctionLabel"
+                    getSelectedItemIndex="GetAiFunctionIndex"
+                    onAction="OnAiFunctionChanged" />
+
+          <dropDown id="OncAiModel"
+                    label="模型"
+                    sizeString="错别字修复xx"
+                    screentip="用哪个模型"
+                    supertip="Pro 效果更好，Flash 更快。"
+                    getItemCount="GetAiModelCount"
+                    getItemID="GetAiModelId"
+                    getItemLabel="GetAiModelLabel"
+                    getSelectedItemIndex="GetAiModelIndex"
+                    onAction="OnAiModelChanged" />
+
+          <dropDown id="OncAiEffort"
+                    label="思考"
+                    sizeString="错别字修复xx"
+                    screentip="思考强度"
+                    supertip="不思考最快；深度最慢，但更不容易漏改、改错。"
+                    getItemCount="GetAiEffortCount"
+                    getItemID="GetAiEffortId"
+                    getItemLabel="GetAiEffortLabel"
+                    getSelectedItemIndex="GetAiEffortIndex"
+                    onAction="OnAiEffortChanged" />
+
+          <button id="OncAiConfig"
+                  label="AI 配置"
+                  image="AiConfig"
+                  screentip="编辑 AI 接口地址、Key 和各功能的提示词"
+                  supertip="用记事本打开 %APPDATA%\OneNoteCodeHelper\ai-settings.xml，保存并关闭记事本后生效。"
+                  onAction="OnOpenAiConfig" />
+
+        </group>
       </tab>
     </tabs>
   </ribbon>

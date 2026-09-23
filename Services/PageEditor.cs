@@ -27,9 +27,65 @@ namespace OneNoteCodeHelper.Services
         internal static EditResult Fail(string message) => new EditResult(false, message);
     }
 
-    /// <summary>读写 OneNote 页面：识别选区、就地替换成代码框、插入新代码框。</summary>
+    /// <summary>要交给 AI 处理的一个段落。</summary>
+    internal sealed class AiParagraph
+    {
+        internal AiParagraph(string objectId, string text)
+        {
+            ObjectId = objectId;
+            Text = text;
+        }
+
+        /// <summary>段落（one:OE）的 objectID，写回时靠它找回这一段。</summary>
+        internal string ObjectId { get; }
+
+        /// <summary>发给 AI 的纯文本，也是写回前核对「这段期间有没有被改过」的依据。</summary>
+        internal string Text { get; }
+    }
+
+    /// <summary>AI 改过的一个段落。</summary>
+    internal sealed class AiParagraphEdit
+    {
+        internal AiParagraphEdit(AiParagraph source, string newText)
+        {
+            Source = source;
+            NewText = newText;
+        }
+
+        internal AiParagraph Source { get; }
+
+        internal string NewText { get; }
+    }
+
+    /// <summary>一次 AI 优化的处理对象：哪一页、哪些段落、是不是因为没选中文字而处理了整页。</summary>
+    internal sealed class AiTargets
+    {
+        internal AiTargets(string pageId, IReadOnlyList<AiParagraph> paragraphs, bool wholePage)
+        {
+            PageId = pageId;
+            Paragraphs = paragraphs;
+            WholePage = wholePage;
+        }
+
+        internal string PageId { get; }
+
+        internal IReadOnlyList<AiParagraph> Paragraphs { get; }
+
+        internal bool WholePage { get; }
+    }
+
+    /// <summary>读写 OneNote 页面：识别选区、就地替换成代码框、插入新代码框、AI 改写段落。</summary>
     internal sealed class PageEditor
     {
+        /// <summary>
+        /// 段落字体是这些时当成代码，不交给 AI。本插件生成的代码框每个段落都带 font-family，
+        /// 用的就是插入窗口里那几个等宽字体。
+        /// </summary>
+        private static readonly string[] CodeFonts =
+        {
+            "Consolas", "NSimSun", "新宋体", "Cascadia Mono", "Cascadia Code", "Courier New", "Courier"
+        };
+
         private readonly OneNoteApi _api;
 
         private static XNamespace One => OneNoteApi.One;
@@ -134,15 +190,133 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>
+        /// 读出「AI 优化」要处理的段落：有选中文字就只取选中的段落，否则取整页（标题加所有文本框）。
+        /// 代码段落、拼不回原格式的段落、空段落都不取。
+        /// </summary>
+        internal EditResult ReadAiTargets(out AiTargets targets)
+        {
+            targets = null;
+
+            var pageId = _api.GetCurrentPageId();
+            if (string.IsNullOrEmpty(pageId))
+            {
+                return EditResult.Fail("找不到当前页面。请先在 OneNote 里打开一个页面再试。");
+            }
+
+            var page = XDocument.Parse(_api.GetPageContent(pageId, PageInfo.piSelection)).Root;
+            if (page == null)
+            {
+                return EditResult.Fail("读取当前页面内容失败。");
+            }
+
+            var textParagraphs = page.Elements()
+                .Where(e => e.Name == One + "Title" || e.Name == One + "Outline")
+                .SelectMany(e => e.Descendants(One + "OE"))
+                .Where(oe => oe.Elements(One + "T").Any())
+                .ToList();
+
+            var selected = textParagraphs.Where(IsSelectedWithText).ToList();
+            var wholePage = selected.Count == 0;
+
+            var paragraphs = new List<AiParagraph>();
+            foreach (var oe in wholePage ? textParagraphs : selected)
+            {
+                var objectId = (string)oe.Attribute("objectID");
+                if (string.IsNullOrEmpty(objectId) || IsCodeParagraph(oe))
+                {
+                    continue;
+                }
+
+                var rich = RichParagraph.Parse(oe);
+                if (!rich.IsLossless)
+                {
+                    AddInLog.Info("段落里有拼不回原样的 HTML，不交给 AI：" + objectId);
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(rich.Text))
+                {
+                    paragraphs.Add(new AiParagraph(objectId, rich.Text));
+                }
+            }
+
+            if (paragraphs.Count == 0)
+            {
+                return EditResult.Fail(wholePage
+                    ? "当前页面上没有可以处理的文字（代码框不会交给 AI）。"
+                    : "选中的内容里没有可以处理的文字（代码框不会交给 AI）。");
+            }
+
+            targets = new AiTargets(pageId, paragraphs, wholePage);
+            return EditResult.Ok();
+        }
+
+        /// <summary>
+        /// 把 AI 改过的段落写回页面。
+        ///
+        /// AI 要跑好一阵，这期间用户可能还在改这一页，所以不能拿开始时读到的页面写回：
+        /// 重新读一遍，按 objectID 找回每一段，文字和当初发给 AI 的一样才改，否则跳过（计入 conflicted）。
+        /// 只回传有改动的那几个文本框 / 标题。
+        /// </summary>
+        internal EditResult ApplyParagraphEdits(string pageId, IReadOnlyList<AiParagraphEdit> edits,
+            out int applied, out int conflicted)
+        {
+            applied = 0;
+            conflicted = 0;
+
+            var page = XDocument.Parse(_api.GetPageContent(pageId, PageInfo.piBasic)).Root;
+            if (page == null)
+            {
+                return EditResult.Fail("重新读取页面失败，没有写回。");
+            }
+
+            var paragraphsById = page.Descendants(One + "OE")
+                .Where(oe => oe.Attribute("objectID") != null)
+                .GroupBy(oe => (string)oe.Attribute("objectID"))
+                .ToDictionary(g => g.Key, g => g.First());
+
+            var changedContainers = new HashSet<XElement>();
+
+            foreach (var edit in edits)
+            {
+                if (!paragraphsById.TryGetValue(edit.Source.ObjectId, out var oe))
+                {
+                    conflicted++;
+                    continue;
+                }
+
+                var rich = RichParagraph.Parse(oe);
+                if (!rich.IsLossless || rich.Text != edit.Source.Text)
+                {
+                    conflicted++;
+                    continue;
+                }
+
+                rich.Apply(edit.NewText);
+                applied++;
+                changedContainers.Add(oe.AncestorsAndSelf().First(e => e.Parent == page));
+            }
+
+            if (applied == 0)
+            {
+                return EditResult.Ok();
+            }
+
+            // 按页面上的先后顺序回传，标题在文本框前面。
+            var changed = page.Elements().Where(changedContainers.Contains).ToArray();
+            return Submit(pageId, page, BuildPageChanges(pageId, changed), $"AI 已修改 {applied} 段。");
+        }
+
+        /// <summary>
         /// 回传被改动的子树，而不是整页覆盖：整页回传会把图片、墨迹等二进制内容置于风险中。
         /// </summary>
-        internal static string BuildPageChanges(string pageId, XElement changedElement)
+        internal static string BuildPageChanges(string pageId, params XElement[] changedElements)
         {
             var root = new XElement(
                 One + "Page",
                 new XAttribute(XNamespace.Xmlns + "one", OneNoteApi.OneNs),
                 new XAttribute("ID", pageId),
-                changedElement);
+                changedElements);
 
             return root.ToString(SaveOptions.DisableFormatting);
         }
@@ -243,6 +417,56 @@ namespace OneNoteCodeHelper.Services
                 .Where(oe => (string)oe.Attribute("selected") == "all"
                     || oe.Elements(One + "T").Any(t => (string)t.Attribute("selected") == "all"))
                 .ToList();
+        }
+
+        /// <summary>
+        /// AI 优化用的选区判定。和 <see cref="FindSelectedParagraphs"/> 一样碰到一点就算整段，
+        /// 但只认真有文字被选中的：光标只是停在某一行时，OneNote 也可能把一个空的 one:T 标成 "all"，
+        /// 那种情况应当按「没选中」处理整页，而不是只处理光标所在的那一段。
+        /// </summary>
+        private static bool IsSelectedWithText(XElement oe)
+        {
+            return (string)oe.Attribute("selected") == "all"
+                   || oe.Elements(One + "T").Any(t => (string)t.Attribute("selected") == "all"
+                                                     && !string.IsNullOrWhiteSpace(OneNoteHtmlEncoder.DecodeToPlainText(t.Value)));
+        }
+
+        /// <summary>
+        /// 段落样式里的 font-family 是等宽字体就当成代码。本插件写的是 OE 上的 style；
+        /// 万一 OneNote 回存时把字体挪到了各个 one:T 上，全部 one:T 都是等宽字体也算。
+        /// </summary>
+        internal static bool IsCodeParagraph(XElement oe)
+        {
+            if (IsMonospaceStyle((string)oe.Attribute("style")))
+            {
+                return true;
+            }
+
+            var runs = oe.Elements(One + "T").ToList();
+            return runs.Count > 0 && runs.All(t => IsMonospaceStyle((string)t.Attribute("style")));
+        }
+
+        private static bool IsMonospaceStyle(string style)
+        {
+            if (string.IsNullOrEmpty(style))
+            {
+                return false;
+            }
+
+            foreach (var declaration in style.Split(';'))
+            {
+                var colon = declaration.IndexOf(':');
+                if (colon < 0 || !string.Equals(declaration.Substring(0, colon).Trim(), "font-family",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var family = declaration.Substring(colon + 1).Split(',')[0].Trim().Trim('\'', '"');
+                return CodeFonts.Any(f => string.Equals(f, family, StringComparison.OrdinalIgnoreCase));
+            }
+
+            return false;
         }
 
         /// <summary>把一个 one:OE 里的文字还原成纯文本。</summary>
