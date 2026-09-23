@@ -24,6 +24,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Reference Include="Extensibility">
+      <HintPath>lib\Extensibility.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>true</Private>
+    </Reference>
     <!--
       必须早绑定。本机 OneNote 的类型库未注册到 CLR 能找到的位置，导致 Type.InvokeMember
       抛 TYPE_E_LIBNOTREGISTERED、dynamic 抛 E_FAIL（两者实测均失败，而 PowerShell 原生

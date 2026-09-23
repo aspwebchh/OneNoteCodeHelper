@@ -20,15 +20,13 @@ namespace OneNoteCodeHelper.Services
 
         internal static readonly XNamespace One = XNamespace.Get(OneNs);
 
+        /// <summary>生命周期归 AddIn 管：断开时由它连同宿主对象一起释放。</summary>
         private readonly IApplication _app;
 
         internal OneNoteApi(IApplication application)
         {
             _app = application ?? throw new ArgumentNullException(nameof(application));
         }
-
-        /// <summary>脱离外接程序宿主时自行激活一个 OneNote 实例，供命令行自测使用。</summary>
-        internal static OneNoteApi CreateStandalone() => new OneNoteApi(new Application());
 
         internal string GetHierarchy(string startNodeId, HierarchyScope scope)
         {

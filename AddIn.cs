@@ -27,7 +27,7 @@ namespace OneNoteCodeHelper
     // （OnHighlightSelection 等），ClassInterfaceType.None 不生成自动类接口，
     // GetIDsOfNames 找不到这些方法，结果就是每个按钮点了都没反应。
     [ClassInterface(ClassInterfaceType.AutoDispatch)]
-    public sealed class AddIn : IDTExtensibility2, IRibbonExtensibility
+    public sealed class AddIn : Extensibility.IDTExtensibility2, IRibbonExtensibility
     {
         internal const string ClassId = "441360A0-59D3-4969-9F91-7AF166C512BE";
 
@@ -39,6 +39,11 @@ namespace OneNoteCodeHelper
         private PageEditor _editor;
         private AddInSettings _settings;
         private IRibbonUI _ribbon;
+
+        // OnConnection 传进来的两个宿主对象。它们在本代理进程里是跨进程 RCW，
+        // 断开时必须主动还回去，见 ReleaseHostReferences。
+        private object _hostApplication;
+        private object _hostAddIn;
 
         static AddIn()
         {
@@ -88,20 +93,35 @@ namespace OneNoteCodeHelper
 
         #region IDTExtensibility2
 
-        public void OnConnection(object application, int connectMode, object addInInst, ref Array custom)
+        public void OnConnection(object application, Extensibility.ext_ConnectMode connectMode,
+            object addInInst, ref Array custom)
         {
             try
             {
                 AddInLog.Info($"OnConnection 开始，connectMode={connectMode}");
 
+                _hostApplication = application;
+                _hostAddIn = addInInst;
                 _settings = SettingsStore.Load();
 
-                // 这个 PIA 的 IApplication 是托管包装接口，而宿主传入的是原始
-                // COM IDispatch。跨进程代理会把它封送成 __ComObject，不能直接
-                // 转为包装接口。通过 OneNote 的 COM 单实例对象取得 API 包装器。
-                _api = application is IApplication oneNote
-                    ? new OneNoteApi(oneNote)
-                    : OneNoteApi.CreateStandalone();
+                // 宿主传来的是原始 COM IDispatch。用 PIA 为这个已有对象创建
+                // 包装器；不能再 new Application()，否则会额外激活 OneNote，
+                // 并在退出时留下跨进程 COM 引用。
+                // CreateWrapperOfType 把包装器挂在 application 这个 RCW 上，
+                // 释放 application 时会一并释放，不用单独管它的生命周期。
+                var oneNote = application as IApplication;
+                if (oneNote == null)
+                {
+                    if (application == null || !Marshal.IsComObject(application))
+                    {
+                        throw new InvalidCastException("宿主没有传入 OneNote COM 应用对象。");
+                    }
+
+                    oneNote = (IApplication)Marshal.CreateWrapperOfType(
+                        application, typeof(ApplicationClass));
+                }
+
+                _api = new OneNoteApi(oneNote);
                 _editor = new PageEditor(_api);
                 AddInLog.Info("已连接到 OneNote。");
             }
@@ -111,14 +131,15 @@ namespace OneNoteCodeHelper
             }
         }
 
-        public void OnDisconnection(int removeMode, ref Array custom)
+        public void OnDisconnection(Extensibility.ext_DisconnectMode removeMode, ref Array custom)
         {
             try
             {
                 AddInLog.Info($"OnDisconnection，removeMode={removeMode}");
                 _editor = null;
                 _api = null;
-                _ribbon = null;
+                ReleaseHostReferences();
+                AddInLog.Info("已释放全部 OneNote COM 引用。");
             }
             catch (Exception ex)
             {
@@ -355,6 +376,49 @@ namespace OneNoteCodeHelper
         private static void ShowMessage(string message, MessageBoxImage icon)
         {
             MessageBox.Show(message, "OneNote 代码高亮", MessageBoxButton.OK, icon);
+        }
+
+        /// <summary>
+        /// 把本代理进程手里所有指向 OneNote 的 COM 引用还回去。
+        ///
+        /// 插件跑在 dllhost 里，拿到的 OneNote 对象全是跨进程代理。OneNote 关闭后 dllhost
+        /// 会被直接结束，CLR 不会替还活着的 RCW 调 Release，OneNote 只能等 DCOM 的 ping
+        /// 超时（约 6 分钟）才回收这些引用。这段时间 ONENOTE.EXE 没有窗口却一直留在后台，
+        /// 期间再打开 OneNote 就会弹「正在清理上次打开之后的内容」。本机实测：不释放时
+        /// OnDisconnection 之后正好 6 分钟 ONENOTE.EXE 才退出。
+        /// </summary>
+        private void ReleaseHostReferences()
+        {
+            FinalRelease(ref _ribbon);
+            FinalRelease(ref _hostAddIn);
+            FinalRelease(ref _hostApplication);
+
+            // 功能区回调的 control 参数、Windows 集合之类的临时 RCW 没有字段指着，
+            // 只能靠 GC。代理进程马上就要退出，不会再有机会跑终结器，所以在这里同步收掉。
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
+        private static void FinalRelease<T>(ref T reference) where T : class
+        {
+            var target = reference;
+            reference = null;
+
+            if (target == null || !Marshal.IsComObject(target))
+            {
+                return;
+            }
+
+            try
+            {
+                Marshal.FinalReleaseComObject(target);
+            }
+            catch (Exception ex)
+            {
+                AddInLog.Warn("释放 OneNote COM 引用失败。", ex);
+            }
         }
 
         private void InvalidateRibbon()
