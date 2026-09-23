@@ -46,6 +46,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Ribbon.xml" />
+    <EmbeddedResource Include="Resources\HighlightSelection.png" />
   </ItemGroup>
 
 </Project>

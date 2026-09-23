@@ -9,7 +9,7 @@
         FontFamily="Microsoft YaHei UI"
         FontSize="13"
         Background="#F1F5F9"
-        WindowStartupLocation="CenterOwner"
+        WindowStartupLocation="CenterScreen"
         ShowInTaskbar="False">
 
     <!-- 类库里没有 App.xaml，样式只能就地定义在窗口资源里 -->

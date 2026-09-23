@@ -1,9 +1,11 @@
 <?xml version="1.0"?>
 <!--
   功能区定义。挂在「开始」选项卡（idMso="TabHome"）上加一个自己的组。
-  图标一律用 Office 内置的 imageMso，省掉自带图片和 loadImage 回调。
+  图标尽量用 Office 内置的 imageMso，省掉自带图片。imageMso 写了 OneNote 不认的 id 不会报错，
+  只是按钮空白（「高亮选中」原来的 HighlightColorPicker 就是这样），所以那个按钮改用自带的
+  Resources\*.png，写成 image="文件名"，由 loadImage 回调返回 IStream。
 -->
-<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="OnRibbonLoad">
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="OnRibbonLoad" loadImage="LoadImage">
   <ribbon>
     <tabs>
       <tab idMso="TabHome">
@@ -16,7 +18,7 @@
           <button id="OncHighlightSelection"
                   label="高亮选中"
                   size="large"
-                  imageMso="HighlightColorPicker"
+                  image="HighlightSelection"
                   screentip="把选中的代码变成高亮代码框"
                   supertip="先在页面上选中代码文字，再点这里。会按下面选定的语言着色，并替换成带底色的代码框。"
                   onAction="OnHighlightSelection" />

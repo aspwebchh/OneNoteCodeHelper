@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
@@ -215,6 +216,38 @@ namespace OneNoteCodeHelper
             catch (Exception ex)
             {
                 AddInLog.Warn("保存功能区引用失败，主题切换后按钮状态可能不刷新。", ex);
+            }
+        }
+
+        /// <summary>
+        /// 功能区里 image="xxx" 的控件都经这里取图，对应嵌入资源 Resources\xxx.png。
+        /// 返回 null 时按钮只是没有图标，不影响使用，所以出错只写日志。
+        /// </summary>
+        public IStream LoadImage(string imageId)
+        {
+            try
+            {
+                var assembly = typeof(AddIn).Assembly;
+                var name = assembly.GetManifestResourceNames()
+                    .FirstOrDefault(n => n.EndsWith("." + imageId + ".png", StringComparison.OrdinalIgnoreCase));
+
+                if (name == null)
+                {
+                    AddInLog.Warn("嵌入资源里找不到功能区图标：" + imageId);
+                    return null;
+                }
+
+                using (var stream = assembly.GetManifestResourceStream(name))
+                using (var buffer = new MemoryStream())
+                {
+                    stream.CopyTo(buffer);
+                    return NativeMethods.CreateStream(buffer.ToArray());
+                }
+            }
+            catch (Exception ex)
+            {
+                AddInLog.Warn("加载功能区图标失败：" + imageId, ex);
+                return null;
             }
         }
 

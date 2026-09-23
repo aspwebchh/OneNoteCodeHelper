@@ -8,6 +8,7 @@ using System.Windows.Interop;
 using System.Windows.Threading;
 using OneNoteCodeHelper.Highlighting;
 using OneNoteCodeHelper.Highlighting.Themes;
+using OneNoteCodeHelper.Interop;
 using OneNoteCodeHelper.Services;
 
 namespace OneNoteCodeHelper.Views
@@ -83,13 +84,13 @@ namespace OneNoteCodeHelper.Views
             BorderBox.IsChecked = Settings.ShowBorders;
 
             // 认 OneNote 主窗口做属主，免得窗口跑到 OneNote 后面去。
+            // 位置自己算：WPF 的 CenterOwner 对 OneNote 这种非 WPF 属主算不准，见 NativeMethods.CenterOver。
+            // SourceInitialized 时 WPF 已按 CenterScreen 摆好、窗口还没显示，这时挪不会闪；
+            // 没有属主或挪失败时就停在 CenterScreen 的位置。
             if (ownerHandle != IntPtr.Zero)
             {
-                new WindowInteropHelper(this).Owner = ownerHandle;
-            }
-            else
-            {
-                WindowStartupLocation = WindowStartupLocation.CenterScreen;
+                var interop = new WindowInteropHelper(this) { Owner = ownerHandle };
+                SourceInitialized += (_, __) => NativeMethods.CenterOver(interop.Handle, ownerHandle);
             }
 
             var languageChoices = BuildLanguageChoices();
