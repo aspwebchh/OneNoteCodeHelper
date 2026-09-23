@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="插入高亮代码"
         Height="620"
-        Width="1040"
+        Width="1120"
         MinHeight="420"
         MinWidth="760"
         FontFamily="Microsoft YaHei UI"
@@ -99,6 +99,14 @@
                       MinWidth="170"
                       IsEditable="True"
                       ToolTip="代码里有中文时，Consolas 会被 OneNote 换掉导致对不齐；新宋体中英文都是等宽的。"
+                      SelectionChanged="OnOptionChanged"
+                      LostFocus="OnOptionChanged" />
+
+            <TextBlock Text="字号" Margin="20,0,8,0" />
+            <ComboBox x:Name="FontSizeBox"
+                      MinWidth="70"
+                      IsEditable="True"
+                      ToolTip="单位是磅，也可以直接输入，比如 10.5。"
                       SelectionChanged="OnOptionChanged"
                       LostFocus="OnOptionChanged" />
 

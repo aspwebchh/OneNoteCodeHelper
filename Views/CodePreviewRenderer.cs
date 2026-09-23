@@ -25,8 +25,7 @@ namespace OneNoteCodeHelper.Views
             var document = new FlowDocument
             {
                 FontFamily = new FontFamily(settings.FontFamily),
-                // OneNote 的字号单位是磅，WPF 是设备无关像素，按 96/72 换算才能看着一致。
-                FontSize = settings.FontSize * 96.0 / 72.0,
+                FontSize = ToDeviceUnits(settings.FontSize),
                 Foreground = ToBrush(theme.DefaultStyle.Color),
                 PagePadding = new Thickness(0),
                 PageWidth = double.NaN
@@ -65,6 +64,12 @@ namespace OneNoteCodeHelper.Views
             }
 
             return document;
+        }
+
+        /// <summary>OneNote 的字号单位是磅，WPF 是设备无关像素，按 96/72 换算才能看着一致。</summary>
+        internal static double ToDeviceUnits(double points)
+        {
+            return points * 96.0 / 72.0;
         }
 
         private static Section FindFrame(FlowDocument document)

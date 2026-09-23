@@ -41,6 +41,18 @@
                     getSelectedItemIndex="GetSelectedLanguageIndex"
                     onAction="OnLanguageChanged" />
 
+          <!-- 用 comboBox 而不是 dropDown：字号可以手输列表外的值，dropDown 显示不了 -->
+          <comboBox id="OncFontSize"
+                    label="字号"
+                    sizeString="10.5xx"
+                    screentip="代码的字号（磅）"
+                    supertip="可以从列表里选，也可以直接输入，比如 10.5。「高亮选中」和「插入代码」共用这个字号。"
+                    getItemCount="GetFontSizeCount"
+                    getItemID="GetFontSizeId"
+                    getItemLabel="GetFontSizeLabel"
+                    getText="GetFontSizeText"
+                    onChange="OnFontSizeChanged" />
+
           <toggleButton id="OncDarkTheme"
                         label="深色主题"
                         imageMso="ThemeColorsGallery"

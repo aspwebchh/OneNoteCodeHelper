@@ -79,9 +79,11 @@ namespace OneNoteCodeHelper.Views
             _editor = editor;
             Settings = settings.Clone();
 
-            // 必须最先设：下面给各个下拉赋初值会触发 OnOptionChanged，那时复选框若还是默认的
-            // 未勾选，就会把设置里的 ShowBorders 误改成 false。
+            // 这两个必须最先设：下面给各个下拉赋初值会触发 OnOptionChanged，那时复选框若还是默认的
+            // 未勾选，就会把设置里的 ShowBorders 误改成 false；字号框若还是空的，也会被当成无效输入。
             BorderBox.IsChecked = Settings.ShowBorders;
+            FontSizeBox.ItemsSource = AddInSettings.FontSizePresets.Select(AddInSettings.FormatFontSize).ToList();
+            FontSizeBox.Text = AddInSettings.FormatFontSize(Settings.FontSize);
 
             // 认 OneNote 主窗口做属主，免得窗口跑到 OneNote 后面去。
             // 位置自己算：WPF 的 CenterOwner 对 OneNote 这种非 WPF 属主算不准，见 NativeMethods.CenterOver。
@@ -113,7 +115,7 @@ namespace OneNoteCodeHelper.Views
         /// <summary>窗口里改过的设置。关闭后由调用方决定要不要持久化。</summary>
         internal AddInSettings Settings { get; }
 
-        /// <summary>用户是否改过语言、主题、字体或边框。</summary>
+        /// <summary>用户是否改过语言、主题、字体、字号或边框。</summary>
         internal bool SettingsChanged { get; private set; }
 
         private static List<LanguageChoice> BuildLanguageChoices()
@@ -137,6 +139,7 @@ namespace OneNoteCodeHelper.Views
         {
             var needsRebuild = false;
             var themeChanged = false;
+            var fontSizeChanged = false;
 
             if (LanguageBox.SelectedItem is LanguageChoice choice && choice.Id != Settings.LanguageId)
             {
@@ -164,6 +167,28 @@ namespace OneNoteCodeHelper.Views
                 needsRebuild = true;
             }
 
+            // 同字体：下拉里选的从事件参数取，手输的从 Text 取
+            var pickedSize = sender == FontSizeBox && e is SelectionChangedEventArgs sizeSelection && sizeSelection.AddedItems.Count > 0
+                ? sizeSelection.AddedItems[0] as string
+                : null;
+            if (AddInSettings.TryParseFontSize(pickedSize ?? FontSizeBox.Text, out var fontSize)
+                && fontSize != Settings.FontSize)
+            {
+                Settings.FontSize = fontSize;
+                SettingsChanged = true;
+                fontSizeChanged = true;
+            }
+
+            // 手输的字号无效、超范围或不是半磅时，把框里的字改回真正生效的值
+            if (sender == FontSizeBox && pickedSize == null)
+            {
+                var sizeText = AddInSettings.FormatFontSize(Settings.FontSize);
+                if (FontSizeBox.Text != sizeText)
+                {
+                    FontSizeBox.Text = sizeText;
+                }
+            }
+
             var showBorders = BorderBox.IsChecked == true;
             if (showBorders != Settings.ShowBorders)
             {
@@ -176,10 +201,19 @@ namespace OneNoteCodeHelper.Views
             {
                 UpdatePreview();
             }
-            else if (themeChanged && Preview.Document != null)
+            else if (Preview.Document != null)
             {
                 // 只换了主题：给已经排好的 Run 重新上色就行，不必重新识别、分词、排版
-                CodePreviewRenderer.ApplyTheme(Preview.Document, Settings.Theme);
+                if (themeChanged)
+                {
+                    CodePreviewRenderer.ApplyTheme(Preview.Document, Settings.Theme);
+                }
+
+                // 只换了字号：Run 都继承文档的字号，改文档一处就行
+                if (fontSizeChanged)
+                {
+                    Preview.Document.FontSize = CodePreviewRenderer.ToDeviceUnits(Settings.FontSize);
+                }
             }
         }
 

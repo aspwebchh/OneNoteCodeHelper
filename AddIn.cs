@@ -364,6 +364,44 @@ namespace OneNoteCodeHelper
             });
         }
 
+        public int GetFontSizeCount(object control)
+        {
+            return AddInSettings.FontSizePresets.Length;
+        }
+
+        public string GetFontSizeId(object control, int index)
+        {
+            return "OncFontSize" + index;
+        }
+
+        public string GetFontSizeLabel(object control, int index)
+        {
+            return AddInSettings.FormatFontSize(AddInSettings.FontSizePresets[index]);
+        }
+
+        public string GetFontSizeText(object control)
+        {
+            var settings = _settings ?? (_settings = SettingsStore.Load());
+            return AddInSettings.FormatFontSize(settings.FontSize);
+        }
+
+        public void OnFontSizeChanged(object control, string text)
+        {
+            Guard("切换字号", () =>
+            {
+                if (AddInSettings.TryParseFontSize(text, out var size))
+                {
+                    _settings.FontSize = size;
+                    SettingsStore.Save(_settings);
+                    AddInLog.Info("字号切换为 " + AddInSettings.FormatFontSize(size));
+                }
+
+                // 组合框里留着的是用户敲的原文。无论是否有效都刷新一次，
+                // 让它重新 getText，显示成真正生效的值（输错了就回到原来的字号）。
+                InvalidateRibbon();
+            });
+        }
+
         public bool GetDarkThemePressed(object control)
         {
             var settings = _settings ?? (_settings = SettingsStore.Load());

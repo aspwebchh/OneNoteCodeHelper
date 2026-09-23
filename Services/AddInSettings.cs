@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Xml.Serialization;
 using OneNoteCodeHelper.Highlighting;
@@ -12,6 +13,13 @@ namespace OneNoteCodeHelper.Services
     /// </summary>
     public sealed class AddInSettings
     {
+        private const double MinFontSize = 5;
+
+        private const double MaxFontSize = 72;
+
+        /// <summary>字号下拉里的备选（磅）。插入窗口和功能区共用，两边都还能手输列表外的值。</summary>
+        internal static readonly double[] FontSizePresets = { 8, 9, 9.5, 10, 10.5, 11, 12, 14, 16, 18, 20 };
+
         /// <summary>配色方案 id，见 <see cref="CodeThemes"/>。</summary>
         public string ThemeId { get; set; } = CodeThemes.Light.Id;
 
@@ -55,7 +63,7 @@ namespace OneNoteCodeHelper.Services
                 FontFamily = "Consolas";
             }
 
-            FontSize = Clamp(FontSize, 5, 72);
+            FontSize = NormalizeFontSize(FontSize);
             TabWidth = (int)Clamp(TabWidth, 1, 16);
             CodeBlockWidth = Clamp(CodeBlockWidth, 100, 2000);
 
@@ -69,6 +77,44 @@ namespace OneNoteCodeHelper.Services
             {
                 LanguageId = LanguageRegistry.AutoDetectId;
             }
+        }
+
+        internal static string FormatFontSize(double size)
+        {
+            return size.ToString("0.#", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// 解析用户输入的字号，允许带「pt」或「磅」后缀。超范围的夹回去，
+        /// 并取整到半磅——OneNote 自己的字号就是这个粒度，也让结果能和下拉里的项对上。
+        /// </summary>
+        internal static bool TryParseFontSize(string text, out double size)
+        {
+            size = 0;
+            var trimmed = text?.Trim() ?? string.Empty;
+
+            if (trimmed.EndsWith("pt", StringComparison.OrdinalIgnoreCase))
+            {
+                trimmed = trimmed.Substring(0, trimmed.Length - 2).TrimEnd();
+            }
+            else if (trimmed.EndsWith("磅", StringComparison.Ordinal))
+            {
+                trimmed = trimmed.Substring(0, trimmed.Length - 1).TrimEnd();
+            }
+
+            if (!double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+                || double.IsNaN(value) || double.IsInfinity(value))
+            {
+                return false;
+            }
+
+            size = NormalizeFontSize(value);
+            return true;
+        }
+
+        private static double NormalizeFontSize(double size)
+        {
+            return Math.Round(Clamp(size, MinFontSize, MaxFontSize) * 2, MidpointRounding.AwayFromZero) / 2;
         }
 
         private static double Clamp(double value, double min, double max)
