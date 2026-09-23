@@ -17,6 +17,11 @@ namespace OneNoteCodeHelper.Highlighting
         internal static IReadOnlyList<ILanguage> All { get; } = new ILanguage[]
         {
             new JavaLanguage(),
+            new CSharpLanguage(),
+            new CppLanguage(),
+            new JavaScriptLanguage(),
+            new PythonLanguage(),
+            new SqlLanguage(),
             new LuaLanguage(),
             new PowerShellLanguage(),
             new BatLanguage(),

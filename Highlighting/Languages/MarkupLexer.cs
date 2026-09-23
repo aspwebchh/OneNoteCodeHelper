@@ -5,12 +5,15 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 {
     /// <summary>
     /// XML 与 HTML 共用的标记语言词法。两者的差别只在 HTML 模式下的几处宽松规则：
-    /// &lt;script&gt;/&lt;style&gt; 的内容是原始文本而不是标记，标签名不区分大小写。
+    /// &lt;script&gt;/&lt;style&gt; 的内容是内嵌代码而不是标记，标签名不区分大小写。
     /// </summary>
     internal static class MarkupLexer
     {
         /// <summary>HTML 里 &lt;style&gt; 的内容交给 CSS 词法着色。</summary>
         private static readonly ILanguage Css = new CssLanguage();
+
+        /// <summary>HTML 里 &lt;script&gt; 的内容交给 JavaScript 词法着色。</summary>
+        private static readonly ILanguage JavaScript = new JavaScriptLanguage();
 
         internal static IEnumerable<Token> Tokenize(string source, bool html)
         {
@@ -174,31 +177,26 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         /// <summary>
         /// HTML 的 &lt;script&gt; 与 &lt;style&gt; 里是原始文本，里面的 &lt; 不是标签。
-        /// style 的内容交给 CSS 着色；script 的内容保持普通文字。
+        /// style 的内容交给 CSS 着色，script 的内容交给 JavaScript 着色。
         /// </summary>
         private static void SkipRawText(LexerCursor c, string tagName)
         {
-            var isStyle = string.Equals(tagName, "style", StringComparison.OrdinalIgnoreCase);
-            if (!isStyle && !string.Equals(tagName, "script", StringComparison.OrdinalIgnoreCase))
+            ILanguage inner;
+            if (string.Equals(tagName, "style", StringComparison.OrdinalIgnoreCase))
+            {
+                inner = Css;
+            }
+            else if (string.Equals(tagName, "script", StringComparison.OrdinalIgnoreCase))
+            {
+                inner = JavaScript;
+            }
+            else
             {
                 return;
             }
 
             var end = c.Source.IndexOf("</" + tagName, c.Position, StringComparison.OrdinalIgnoreCase);
-            if (end < 0)
-            {
-                end = c.Source.Length;
-            }
-
-            if (isStyle)
-            {
-                c.EmitEmbedded(Css, end);
-                return;
-            }
-
-            var start = c.Position;
-            c.Advance(end - start);
-            c.Emit(TokenKind.Plain, start);
+            c.EmitEmbedded(inner, end < 0 ? c.Source.Length : end);
         }
 
         /// <summary>&amp;name; / &amp;#123; / &amp;#x1F; 这类实体。不以分号结尾的不算，原地不动返回 false。</summary>

@@ -1,8 +1,8 @@
 # OneNote 代码高亮
 
 OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色的高亮代码框。
-目前支持 **Java**、**Lua**、**PowerShell**、**Bat**、**Bash**、**XML**、**HTML**、**CSS**，
-以及不着色的 **纯文本**（只要等宽字体和代码框，适合放日志、命令输出）。
+目前支持 **Java**、**C#**、**C/C++**、**JavaScript**、**Python**、**SQL**、**Lua**、**PowerShell**、
+**Bat**、**Bash**、**XML**、**HTML**、**CSS**，以及不着色的 **纯文本**（只要等宽字体和代码框，适合放日志、命令输出）。
 
 功能区「开始」选项卡上会多出一个「代码高亮」组：
 
@@ -10,7 +10,7 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 |---|---|
 | 高亮选中 | 选中页面上已有的代码文字，原地替换成高亮代码框 |
 | 插入代码 | 打开窗口粘贴代码，预览确认后插入到当前页 |
-| 语言 | 自动识别 / Java / Lua / PowerShell / Bat / Bash / XML / HTML / CSS / 纯文本。纯文本只能手动选，自动识别不会选它 |
+| 语言 | 自动识别，或手动选上面列的任意一种。纯文本只能手动选，自动识别不会选它 |
 | 深色主题 | 在浅色（类 IntelliJ）与深色（类 VS Code Dark+）之间切换 |
 | 字体（插入窗口内） | 默认 Consolas。代码里有中文时改选「NSimSun」新宋体，中英文才能对齐 |
 | 诊断日志 | 打开日志文件 |
@@ -87,7 +87,8 @@ Services/
 Highlighting/
   TokenKind / Token / ILanguage / LexerCursor / LanguageRegistry
   Languages/                每种语言一个 ILanguage 实现；XML 与 HTML 共用 MarkupLexer，
-                            HTML 的 <style> 内容交给 CssLanguage 着色
+                            HTML 的 <style>/<script> 分别交给 CSS/JavaScript 着色；
+                            CommonScanners 放 C 系语言共用的注释、字符串、数字、插值字符串扫描
   Themes/CodeTheme.cs, CodeThemes.cs
 Views/
   InsertCodeWindow.xaml     插入代码窗口

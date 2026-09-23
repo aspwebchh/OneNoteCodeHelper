@@ -261,8 +261,14 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             score += 3 * Count(source, @"\b(class|interface|enum|record)\s+[A-Z]\w*");
             score += 2 * Count(source, @"^\s*@[A-Z]\w*");
             score += 2 * Count(source, @"\bnew\s+[A-Z]\w*\s*\(");
-            score += 2 * Count(source, @"\bSystem\.out\.print");
+            score += 4 * Count(source, @"\bSystem\.out\.print");
             score += Count(source, @";\s*$");
+
+            // 上面几条 C# 也全都命中，下面这些才是 Java 独有的写法
+            score += 4 * Count(source, @"\bstatic\s+void\s+main\s*\(\s*String");
+            score += 3 * Count(source, @"\bboolean\b|\bthrows\s+[A-Z]");
+            score += 2 * Count(source, @"\bString(\[\])?\s+\w+\s*[=;,)]");
+            score += 2 * Count(source, @"\bfinal\s+[\w<>\[\]]+\s+\w+\s*[=;]");
             return score;
         }
 

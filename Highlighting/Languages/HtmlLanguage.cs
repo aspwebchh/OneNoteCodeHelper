@@ -5,7 +5,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 {
     /// <summary>
     /// HTML 词法着色，实际切分由 <see cref="MarkupLexer"/> 完成。
-    /// &lt;style&gt; 里的内容按 CSS 着色；&lt;script&gt; 里的内容保持普通文字。
+    /// &lt;style&gt; 里的内容按 CSS 着色，&lt;script&gt; 里的内容按 JavaScript 着色。
     /// </summary>
     internal sealed class HtmlLanguage : ILanguage
     {
