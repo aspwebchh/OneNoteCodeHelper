@@ -5,7 +5,8 @@
 .DESCRIPTION
     不碰 OneNote，只通过反射调用构建出来的 DLL 里 RenderDiagnostics 的入口，普通权限即可运行。
     重点验证 RichParagraph：改动落在加粗、链接、多个 one:T 里时格式不丢，实体写法不变，
-    插入的空格不会跟进加粗，拼不回原样的段落会被认出来。另外覆盖思考强度参数和流式返回（SSE）的解析。
+    插入的空格不会跟进加粗，拼不回原样的段落会被认出来。另外覆盖思考强度参数、流式返回（SSE）的解析
+    和排版优化附带的删多余空行。
 
     加 -Live 会用本机 %APPDATA%\OneNoteCodeHelper\ai-settings.xml 真调一次接口，打印模型的修改结果。
 
@@ -207,6 +208,77 @@ Assert-Equal '流里报错' (Invoke-Diag 'ParseAiStream' @('data: {"error":{"mes
 Assert-Equal '进度：还没收到东西' (Invoke-Diag 'DescribeAiLive' @(0, 0)) '等待 AI 响应'
 Assert-Equal '进度：思考中' (Invoke-Diag 'DescribeAiLive' @(120, 0)) 'AI 正在处理：已思考 120 字'
 Assert-Equal '进度：开始输出' (Invoke-Diag 'DescribeAiLive' @(120, 35)) 'AI 正在处理：已思考 120 字，已输出 35 字'
+
+Write-Host ''
+Write-Host '删多余的空行（排版优化）：'
+
+Assert-Equal '段内：连续空行只留一行' (Invoke-Diag 'CollapseBlankLinesInText' @("a`n`n`n`nb")) "a`n`nb"
+Assert-Equal '段内：一个空行不动' (Invoke-Diag 'CollapseBlankLinesInText' @("a`n`nb")) "a`n`nb"
+Assert-Equal '段内：开头结尾的空行去掉' (Invoke-Diag 'CollapseBlankLinesInText' @("`n `na`nb`n`n")) "a`nb"
+Assert-Equal '段内：只有空白的行也算空行，留第一行' (Invoke-Diag 'CollapseBlankLinesInText' @("a`n `n`t`n`nb")) "a`n `nb"
+Assert-Equal '段内：没有换行原样返回' (Invoke-Diag 'CollapseBlankLinesInText' @('a  b')) 'a  b'
+
+# 拼一个页面，每个参数是一个文本框（one:Outline）里的段落
+function New-Page([string[]]$outlines) {
+    $body = ($outlines | ForEach-Object { "<one:Outline><one:OEChildren>$_</one:OEChildren></one:Outline>" }) -join ''
+    "<one:Page xmlns:one=`"http://schemas.microsoft.com/office/onenote/2013/onenote`">$body</one:Page>"
+}
+
+# 一个段落。-Children 是缩进的下级段落，-Extra 放在 one:T 前面（待办标记、项目符号）
+function New-Line([string]$text, [string]$Id, [string]$Children, [string]$Extra, [string]$Style) {
+    $attributes = ''
+    if ($Id) { $attributes += " objectID=`"$Id`"" }
+    if ($Style) { $attributes += " style=`"$Style`"" }
+    $sub = if ($Children) { "<one:OEChildren>$Children</one:OEChildren>" } else { '' }
+    "<one:OE$attributes>$Extra<one:T><![CDATA[$text]]></one:T>$sub</one:OE>"
+}
+
+function New-Table([string[]]$cells) {
+    $body = ($cells | ForEach-Object { "<one:Cell><one:OEChildren>$_</one:OEChildren></one:Cell>" }) -join ''
+    "<one:OE><one:Table><one:Row>$body</one:Row></one:Table></one:OE>"
+}
+
+$A = New-Line 'A'
+$B = New-Line 'B'
+$blank = New-Line ''
+
+function Test-Blank([string]$name, [string[]]$outlines, [string]$expected, $removable = $null) {
+    Assert-Equal $name (Invoke-Diag 'RemoveBlankLines' @((New-Page $outlines), $removable)) $expected
+}
+
+Test-Blank '连续空行只留一行' @("$A$blank$blank$blank$B") '2: A|_|B'
+Test-Blank '一个空行不动' @("$A$blank$B") '0: A|_|B'
+Test-Blank '只有空格、<br> 的段落也算空行' @("$A$blank$(New-Line '&nbsp; ')$(New-Line '<br>')$B") '2: A|_|B'
+Test-Blank '文本框开头、结尾的空行删掉' @("$blank$A$blank$B$blank$blank") '3: A|_|B'
+Test-Blank '整个框都是空行时留一行' @("$blank$blank$blank") '2: _'
+Test-Blank '每个文本框各算各的' @("$A$blank", "$blank$B") '2: A / B'
+Test-Blank '缩进的空行和外层的空行连着算' @("$(New-Line 'A' -Children "$(New-Line 'c')$blank")$blank$B") '1: A|>c|>_|B'
+Test-Blank '下级段落删光时去掉空的 OEChildren' @("$(New-Line 'A' -Children "$blank$blank")") '2: A'
+
+$bullet = New-Line '' -Extra '<one:List><one:Bullet bullet="2" fontSize="11.0" /></one:List>'
+$todo = New-Line '' -Extra '<one:Tag index="0" completed="false" />'
+$codeBlank = New-Line '&nbsp;' -Style 'font-family:Consolas'
+Test-Blank '项目符号、待办、代码的空行不算空行' @("$A$blank$bullet$blank$todo$blank$codeBlank$blank$B") '0: A|_|#|_|#|_|#|_|B'
+
+Test-Blank '表格每个单元格各算各的' `
+    @("$A$(New-Table @("$(New-Line 'c1')$blank", "$blank$blank$(New-Line 'c2')"))$B") '3: A|#|B / c1 / c2'
+
+$selection = "$A$(New-Line '' -Id 'x1')$(New-Line '' -Id 'x2')$(New-Line '' -Id 'x3')$B"
+Test-Blank '选区外的空行不删，并顶上要留的那一行' @($selection) '2: A|_|B' 'x2,x3'
+Test-Blank '选区里只有一行空行时只删它' @($selection) '1: A|_|_|B' 'x2'
+
+$oldConfig = '<AiConfig><Functions>' +
+    '<Function name="错别字修复"><Prompt>p</Prompt></Function>' +
+    '<Function name="排版优化"><Prompt>p</Prompt></Function>' +
+    '<Function name="自定义" removeExtraBlankLines="true"><Prompt>p</Prompt></Function>' +
+    '</Functions></AiConfig>'
+Assert-Equal '配置：没写属性时跟同名的内置功能走，自定义功能可以打开' `
+    (Invoke-Diag 'DescribeAiFunctions' @($oldConfig)) '错别字修复=False|排版优化=True|自定义=True'
+Assert-Equal '配置：写 false 可以关掉' `
+    (Invoke-Diag 'DescribeAiFunctions' @('<AiConfig><Functions><Function name="排版优化" removeExtraBlankLines="false"><Prompt>p</Prompt></Function></Functions></AiConfig>')) `
+    '排版优化=False'
+Assert-Equal '配置：默认文件里排版优化写明了这个属性' `
+    ((Invoke-Diag 'DefaultAiConfigXml' @()).Contains('<Function name="排版优化" removeExtraBlankLines="true">')) $true
 
 if ($Live) {
     Write-Host ''

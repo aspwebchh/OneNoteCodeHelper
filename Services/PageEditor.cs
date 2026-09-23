@@ -60,11 +60,15 @@ namespace OneNoteCodeHelper.Services
     /// <summary>一次 AI 优化的处理对象：哪一页、哪些段落、是不是因为没选中文字而处理了整页。</summary>
     internal sealed class AiTargets
     {
-        internal AiTargets(string pageId, IReadOnlyList<AiParagraph> paragraphs, bool wholePage)
+        private readonly HashSet<string> _selectedBlankLines;
+
+        internal AiTargets(string pageId, IReadOnlyList<AiParagraph> paragraphs, bool wholePage,
+            HashSet<string> selectedBlankLines)
         {
             PageId = pageId;
             Paragraphs = paragraphs;
             WholePage = wholePage;
+            _selectedBlankLines = selectedBlankLines;
         }
 
         internal string PageId { get; }
@@ -72,6 +76,12 @@ namespace OneNoteCodeHelper.Services
         internal IReadOnlyList<AiParagraph> Paragraphs { get; }
 
         internal bool WholePage { get; }
+
+        /// <summary>这个空行段落在不在处理范围里：处理整页时都在，否则只有选区里的在。</summary>
+        internal bool Covers(XElement blankLine)
+        {
+            return WholePage || _selectedBlankLines.Contains((string)blankLine.Attribute("objectID") ?? string.Empty);
+        }
     }
 
     /// <summary>读写 OneNote 页面：识别选区、就地替换成代码框、插入新代码框、AI 改写段落。</summary>
@@ -247,23 +257,44 @@ namespace OneNoteCodeHelper.Services
                     : "选中的内容里没有可以处理的文字（代码框不会交给 AI）。");
             }
 
-            targets = new AiTargets(pageId, paragraphs, wholePage);
+            targets = new AiTargets(pageId, paragraphs, wholePage,
+                wholePage ? new HashSet<string>() : FindSelectedBlankLines(page));
             return EditResult.Ok();
         }
 
         /// <summary>
-        /// 把 AI 改过的段落写回页面。
+        /// 选区里的空行段落的 objectID。拖选经过空行时，空段落会不会被标成选中没有把握，
+        /// 所以夹在第一个和最后一个选中段落之间的空行也算：选区总是连续的一段。
+        /// </summary>
+        private static HashSet<string> FindSelectedBlankLines(XElement page)
+        {
+            var lines = page.Elements(One + "Outline").Descendants(One + "OE").ToList();
+            var first = lines.FindIndex(IsSelectedWithText);
+            var last = lines.FindLastIndex(IsSelectedWithText);
+
+            return new HashSet<string>(lines
+                .Where((oe, i) => (i > first && i < last) || IsSelected(oe))
+                .Where(BlankLines.IsBlankLine)
+                .Select(oe => (string)oe.Attribute("objectID"))
+                .Where(id => !string.IsNullOrEmpty(id)));
+        }
+
+        /// <summary>
+        /// 把 AI 改过的段落写回页面；removeBlankLines 时顺带删掉处理范围里多余的空行。
         ///
         /// AI 要跑好一阵，这期间用户可能还在改这一页，所以不能拿开始时读到的页面写回：
         /// 重新读一遍，按 objectID 找回每一段，文字和当初发给 AI 的一样才改，否则跳过（计入 conflicted）。
+        /// 哪些是空行也按重新读到的页面算，处理期间在空行里打了字的就不会被删。
         /// 只回传有改动的那几个文本框 / 标题。
         /// </summary>
-        internal EditResult ApplyParagraphEdits(string pageId, IReadOnlyList<AiParagraphEdit> edits,
-            out int applied, out int conflicted)
+        internal EditResult ApplyParagraphEdits(AiTargets targets, IReadOnlyList<AiParagraphEdit> edits,
+            bool removeBlankLines, out int applied, out int conflicted, out int removedBlankLines)
         {
             applied = 0;
             conflicted = 0;
+            removedBlankLines = 0;
 
+            var pageId = targets.PageId;
             var page = XDocument.Parse(_api.GetPageContent(pageId, PageInfo.piBasic)).Root;
             if (page == null)
             {
@@ -297,14 +328,20 @@ namespace OneNoteCodeHelper.Services
                 changedContainers.Add(oe.AncestorsAndSelf().First(e => e.Parent == page));
             }
 
-            if (applied == 0)
+            if (removeBlankLines)
+            {
+                removedBlankLines = BlankLines.RemoveFromPage(page, targets.Covers, changedContainers);
+            }
+
+            if (applied == 0 && removedBlankLines == 0)
             {
                 return EditResult.Ok();
             }
 
             // 按页面上的先后顺序回传，标题在文本框前面。
             var changed = page.Elements().Where(changedContainers.Contains).ToArray();
-            return Submit(pageId, page, BuildPageChanges(pageId, changed), $"AI 已修改 {applied} 段。");
+            return Submit(pageId, page, BuildPageChanges(pageId, changed),
+                $"AI 已修改 {applied} 段，删掉 {removedBlankLines} 个空行。");
         }
 
         /// <summary>
@@ -414,9 +451,14 @@ namespace OneNoteCodeHelper.Services
         {
             return page.Descendants(One + "OE")
                 .Where(oe => oe.Elements(One + "T").Any())
-                .Where(oe => (string)oe.Attribute("selected") == "all"
-                    || oe.Elements(One + "T").Any(t => (string)t.Attribute("selected") == "all"))
+                .Where(IsSelected)
                 .ToList();
+        }
+
+        private static bool IsSelected(XElement oe)
+        {
+            return (string)oe.Attribute("selected") == "all"
+                   || oe.Elements(One + "T").Any(t => (string)t.Attribute("selected") == "all");
         }
 
         /// <summary>

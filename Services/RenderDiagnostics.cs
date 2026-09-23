@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Xml.Linq;
 using OneNoteCodeHelper.Highlighting;
@@ -180,6 +181,62 @@ namespace OneNoteCodeHelper.Services
         internal static string DescribeAiLive(int reasoningChars, int contentChars)
         {
             return AiOptimizer.DescribeLive(reasoningChars, contentChars);
+        }
+
+        internal static string CollapseBlankLinesInText(string text)
+        {
+            return BlankLines.CollapseInText(text);
+        }
+
+        /// <summary>
+        /// 在一整页 XML 上删多余的空行。removableIds 是允许删的空行 objectID，逗号分隔；null 表示都能删。
+        /// 返回「删了几行: 各摞段落」，摞之间用 " / " 隔开、行之间用 | 隔开：空行写成 _，
+        /// 看得见但没有字的（待办、项目符号、表格、代码的空行）写成 #，缩进一级前面加一个 &gt;，删空了的 OEChildren 写成 !。
+        /// </summary>
+        internal static string RemoveBlankLines(string pageXml, string removableIds)
+        {
+            var page = XElement.Parse(pageXml);
+            var ids = removableIds?.Split(',');
+            var removed = BlankLines.RemoveFromPage(page,
+                oe => ids == null || ids.Contains((string)oe.Attribute("objectID")), new HashSet<XElement>());
+
+            return removed + ": " + string.Join(" / ", BlankLines.FlowsOf(page)
+                .Select(flow => string.Join("|", DescribeLines(flow, 0))));
+        }
+
+        private static IEnumerable<string> DescribeLines(XElement oeChildren, int depth)
+        {
+            var prefix = new string('>', depth);
+            var paragraphs = oeChildren.Elements(OneNoteApi.One + "OE").ToList();
+            if (paragraphs.Count == 0)
+            {
+                yield return prefix + "!";
+                yield break;
+            }
+
+            foreach (var oe in paragraphs)
+            {
+                var text = RichParagraph.Parse(oe).Text;
+                yield return prefix + (BlankLines.IsBlankLine(oe) ? "_" : string.IsNullOrWhiteSpace(text) ? "#" : text);
+
+                foreach (var line in oe.Elements(OneNoteApi.One + "OEChildren").SelectMany(c => DescribeLines(c, depth + 1)))
+                {
+                    yield return line;
+                }
+            }
+        }
+
+        /// <summary>按一份 ai-settings.xml 读出各功能，返回「名字=是否删空行」，用 | 隔开。</summary>
+        internal static string DescribeAiFunctions(string configXml)
+        {
+            return string.Join("|", AiConfigStore.Parse(XElement.Parse(configXml)).Functions
+                .Select(f => f.Name + "=" + f.RemoveExtraBlankLines));
+        }
+
+        /// <summary>第一次点「AI 配置」时生成的那份默认配置。</summary>
+        internal static string DefaultAiConfigXml()
+        {
+            return AiConfigStore.BuildDefaultDocument().ToString();
         }
 
         /// <summary>

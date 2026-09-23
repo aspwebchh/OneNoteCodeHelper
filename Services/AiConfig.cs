@@ -18,18 +18,25 @@ namespace OneNoteCodeHelper.Services
         internal string Id { get; }
     }
 
-    /// <summary>功能区「功能」下拉里的一项：显示名 + 提示词。</summary>
+    /// <summary>功能区「功能」下拉里的一项：显示名 + 提示词，外加由插件自己做、不经过 AI 的规则。</summary>
     internal sealed class AiFunction
     {
-        internal AiFunction(string name, string prompt)
+        internal AiFunction(string name, string prompt, bool removeExtraBlankLines = false)
         {
             Name = name;
             Prompt = prompt;
+            RemoveExtraBlankLines = removeExtraBlankLines;
         }
 
         internal string Name { get; }
 
         internal string Prompt { get; }
+
+        /// <summary>
+        /// 顺带删掉多余的空行：连续的空行只留一行，文本框开头、结尾的空行删掉。
+        /// 删空行就是删段落，AI 按约定不能动段落，所以这一步由插件自己做，见 <see cref="BlankLines"/>。
+        /// </summary>
+        internal bool RemoveExtraBlankLines { get; }
     }
 
     /// <summary>
@@ -145,6 +152,8 @@ namespace OneNoteCodeHelper.Services
 
         internal const string DefaultModelId = "deepseek-v4.1-flash";
 
+        private const string RemoveBlankLinesAttribute = "removeExtraBlankLines";
+
         private const string TypoPrompt =
             "你是一名严谨的中文校对编辑，负责修正笔记里的文字错误：\n" +
             "- 错别字、同音字和形近字误用（如「在/再」「的/地/得」用错）；\n" +
@@ -178,7 +187,7 @@ namespace OneNoteCodeHelper.Services
             new[]
             {
                 new AiFunction(TypoFunctionName, TypoPrompt),
-                new AiFunction("排版优化", LayoutPrompt)
+                new AiFunction("排版优化", LayoutPrompt, removeExtraBlankLines: true)
             });
 
         /// <summary>读配置。文件不存在或写坏了都退回默认值，不抛异常。</summary>
@@ -205,31 +214,7 @@ namespace OneNoteCodeHelper.Services
                 }
 
                 var root = XDocument.Load(ConfigPath).Root;
-                if (root == null)
-                {
-                    config = Default;
-                    return true;
-                }
-
-                var models = root.Element("Models")?.Elements("Model")
-                    .Select(e => new AiModel(Trim((string)e.Attribute("id"))))
-                    .Where(m => m.Id.Length > 0)
-                    .ToList();
-
-                var functions = root.Element("Functions")?.Elements("Function")
-                    .Select(e => new AiFunction(Trim((string)e.Attribute("name")), Trim((string)e.Element("Prompt"))))
-                    .Where(f => f.Name.Length > 0 && f.Prompt.Length > 0)
-                    .ToList();
-
-                var url = Trim((string)root.Element("ApiUrl"));
-
-                config = new AiConfig(
-                    url.Length > 0 ? url : DefaultApiUrl,
-                    Trim((string)root.Element("ApiKey")),
-                    ReadInt(root.Element("TimeoutSeconds"), DefaultTimeoutSeconds, 10, 3600),
-                    ReadInt(root.Element("MaxTokens"), DefaultMaxTokens, 0, 1024 * 1024),
-                    models?.Count > 0 ? models : Default.Models,
-                    functions?.Count > 0 ? functions : Default.Functions);
+                config = root == null ? Default : Parse(root);
                 return true;
             }
             catch (Exception ex)
@@ -239,6 +224,43 @@ namespace OneNoteCodeHelper.Services
                 error = ex;
                 return false;
             }
+        }
+
+        /// <summary>从 ai-settings.xml 的根元素读出配置，缺的、写空的项用默认值。</summary>
+        internal static AiConfig Parse(XElement root)
+        {
+            var models = root.Element("Models")?.Elements("Model")
+                .Select(e => new AiModel(Trim((string)e.Attribute("id"))))
+                .Where(m => m.Id.Length > 0)
+                .ToList();
+
+            var functions = root.Element("Functions")?.Elements("Function")
+                .Select(ReadFunction)
+                .Where(f => f.Name.Length > 0 && f.Prompt.Length > 0)
+                .ToList();
+
+            var url = Trim((string)root.Element("ApiUrl"));
+
+            return new AiConfig(
+                url.Length > 0 ? url : DefaultApiUrl,
+                Trim((string)root.Element("ApiKey")),
+                ReadInt(root.Element("TimeoutSeconds"), DefaultTimeoutSeconds, 10, 3600),
+                ReadInt(root.Element("MaxTokens"), DefaultMaxTokens, 0, 1024 * 1024),
+                models?.Count > 0 ? models : Default.Models,
+                functions?.Count > 0 ? functions : Default.Functions);
+        }
+
+        private static AiFunction ReadFunction(XElement element)
+        {
+            var name = Trim((string)element.Attribute("name"));
+
+            // 没写这个属性时和同名的内置功能一样，这样加这条规则之前生成的配置文件，
+            // 里面的「排版优化」不用改也会删空行；写了 false 就关掉。
+            var removeBlankLines = bool.TryParse(Trim((string)element.Attribute(RemoveBlankLinesAttribute)), out var value)
+                ? value
+                : Default.Functions.FirstOrDefault(f => f.Name == name)?.RemoveExtraBlankLines ?? false;
+
+            return new AiFunction(name, Trim((string)element.Element("Prompt")), removeBlankLines);
         }
 
         /// <summary>配置文件不存在时写出一份带注释的默认配置，返回文件路径。</summary>
@@ -260,7 +282,7 @@ namespace OneNoteCodeHelper.Services
             return ConfigPath;
         }
 
-        private static XDocument BuildDefaultDocument()
+        internal static XDocument BuildDefaultDocument()
         {
             var config = Default;
 
@@ -282,12 +304,15 @@ namespace OneNoteCodeHelper.Services
                         config.Models.Select(m => new XElement("Model", new XAttribute("id", m.Id)))),
                     new XComment(
                         " 功能区「功能」下拉里的选项，可以自己加。Prompt 只需写清楚要做什么；\n" +
-                        "       输入输出的 JSON 格式、只返回改动的段落、不要合并拆分段落等约定由插件自动附加，不用写。 "),
+                        "       输入输出的 JSON 格式、只返回改动的段落、不要合并拆分段落等约定由插件自动附加，不用写。\n" +
+                        "       removeExtraBlankLines=\"true\" 表示顺带删掉多余的空行：连续的空行只留一行，文本框开头、结尾的空行删掉。\n" +
+                        "       这一步由插件自己做，不经过 AI。 "),
                     new XElement(
                         "Functions",
                         config.Functions.Select(f => new XElement(
                             "Function",
                             new XAttribute("name", f.Name),
+                            f.RemoveExtraBlankLines ? new XAttribute(RemoveBlankLinesAttribute, "true") : null,
                             new XElement("Prompt", f.Prompt))))));
         }
 

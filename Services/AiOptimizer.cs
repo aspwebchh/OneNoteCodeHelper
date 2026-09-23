@@ -106,24 +106,36 @@ namespace OneNoteCodeHelper.Services
             var edits = new List<AiParagraphEdit>();
             var rejected = 0;
 
-            foreach (var reply in replies)
+            for (var i = 0; i < paragraphs.Count; i++)
             {
-                var source = paragraphs[reply.Key];
-                var text = CleanReplyText(source.Text, reply.Value);
-                if (text == source.Text)
+                var source = paragraphs[i];
+                var text = source.Text;
+
+                if (replies.TryGetValue(i, out var reply))
                 {
-                    continue;
+                    var cleaned = CleanReplyText(source.Text, reply);
+                    var similarity = TextDiff.Similarity(source.Text, cleaned);
+                    if (similarity < MinSimilarity)
+                    {
+                        rejected++;
+                        AddInLog.Warn($"AI 改动过大（相似度 {similarity:0.00}），没有写回：{source.ObjectId}");
+                    }
+                    else
+                    {
+                        text = cleaned;
+                    }
                 }
 
-                var similarity = TextDiff.Similarity(source.Text, text);
-                if (similarity < MinSimilarity)
+                // 段内多余的换行由插件自己删，AI 没改或者改动被拒的段落也照样删。
+                if (_function.RemoveExtraBlankLines)
                 {
-                    rejected++;
-                    AddInLog.Warn($"AI 改动过大（相似度 {similarity:0.00}），没有写回：{source.ObjectId}");
-                    continue;
+                    text = BlankLines.CollapseInText(text);
                 }
 
-                edits.Add(new AiParagraphEdit(source, text));
+                if (text != source.Text)
+                {
+                    edits.Add(new AiParagraphEdit(source, text));
+                }
             }
 
             // 开始写回之后就不再响应取消：写到一半停下来，页面会处在谁也说不清的状态。
@@ -131,21 +143,37 @@ namespace OneNoteCodeHelper.Services
 
             var applied = 0;
             var conflicted = 0;
+            var removedBlankLines = 0;
 
-            if (edits.Count > 0)
+            // 要删空行时即使没有段落要改也得写回：空行段落不经过 AI，只有写回时才知道删不删。
+            if (edits.Count > 0 || _function.RemoveExtraBlankLines)
             {
                 progress.Report(new AiProgress("正在写回 OneNote…"));
 
-                var write = _editor.ApplyParagraphEdits(targets.PageId, edits, out applied, out conflicted);
+                var write = _editor.ApplyParagraphEdits(targets, edits, _function.RemoveExtraBlankLines,
+                    out applied, out conflicted, out removedBlankLines);
                 if (!write.Success)
                 {
                     return write;
                 }
             }
 
-            var message = new StringBuilder(applied > 0
-                ? $"完成：{scope} {paragraphs.Count} 段中改了 {applied} 段。"
-                : $"完成：{scope} {paragraphs.Count} 段中没有发现需要修改的地方。");
+            var message = new StringBuilder($"完成：{scope} {paragraphs.Count} 段中");
+            if (applied > 0)
+            {
+                message.Append($"改了 {applied} 段");
+            }
+            else
+            {
+                message.Append(removedBlankLines > 0 ? "文字没有需要修改的地方" : "没有发现需要修改的地方");
+            }
+
+            if (removedBlankLines > 0)
+            {
+                message.Append($"，另外删掉了 {removedBlankLines} 个多余的空行");
+            }
+
+            message.Append('。');
 
             if (conflicted > 0)
             {
@@ -157,7 +185,7 @@ namespace OneNoteCodeHelper.Services
                 message.Append($"\n另有 {rejected} 段 AI 改动过大，没有采用。");
             }
 
-            AddInLog.Info($"AI 优化结束：改了 {applied} 段，跳过 {conflicted} 段，拒绝 {rejected} 段。");
+            AddInLog.Info($"AI 优化结束：改了 {applied} 段，删了 {removedBlankLines} 个空行，跳过 {conflicted} 段，拒绝 {rejected} 段。");
             return EditResult.Ok(message.ToString());
         }
 
