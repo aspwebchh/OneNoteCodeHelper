@@ -18,8 +18,9 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return MarkupLexer.Tokenize(source, html: true);
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            var source = sample.Raw;
             var score = 0;
             score += 10 * Count(source, @"<!DOCTYPE\s+html", RegexOptions.IgnoreCase);
 
@@ -30,7 +31,9 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 @"|h[1-6]|img|br|hr|form|input|button|label|select|option|textarea|nav|header|footer|section" +
                 @"|article|main|aside|iframe|pre|code|strong|em|b|i|small|canvas|svg|video|audio|source)(?=[\s/>])",
                 RegexOptions.None);
-            return score;
+
+            // 不以标签开头的（比如 JSX）标签只是夹在代码里，打个折
+            return sample.IsMarkupDocument ? score : score / 2;
         }
 
         private static int Count(string source, string pattern, RegexOptions options)

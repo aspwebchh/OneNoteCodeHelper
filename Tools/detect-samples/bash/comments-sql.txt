@@ -1,0 +1,4 @@
+# 每天凌晨备份数据库：select 出来的数据导出成 csv
+# public static void main 不是 Java
+mysqldump -u root mydb > /backup/mydb.sql
+gzip /backup/mydb.sql

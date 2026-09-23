@@ -1,0 +1,18 @@
+:root {
+  --main-color: #3366ff;
+  --gap: 12px;
+}
+
+/* 窄屏下改成单列 */
+@media (max-width: 600px) {
+  .grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+  }
+}
+
+.button:hover {
+  background-color: var(--main-color);
+  transition: background-color 0.2s ease;
+}

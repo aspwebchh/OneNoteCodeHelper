@@ -397,23 +397,26 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            var code = sample.Code;
             var score = 0;
-            score += 4 * Count(source,
+            score += 4 * Count(code,
                 @"\b(Get|Set|New|Remove|Add|Write|Read|Start|Stop|Test|Invoke|Import|Export|Out|Select|Where|ForEach" +
                 @"|Sort|Group|Format|ConvertTo|ConvertFrom|Join|Split|Copy|Move|Clear|Enable|Disable|Register" +
                 @"|Unregister|Resolve|Wait|Measure|Update|Install|Uninstall|Push|Pop|Restart|Show|Use)-[A-Z][A-Za-z]+");
-            score += 4 * Count(source, @"^[^\S\r\n]*param\s*\(", RegexOptions.IgnoreCase);
-            score += 3 * Count(source, @"\$(true|false|null|_|PSScriptRoot|PSCmdlet|args|env:\w+)\b", RegexOptions.IgnoreCase);
-            score += 3 * Count(source,
+            score += 4 * Count(code, @"^[^\S\r\n]*param\s*\(", RegexOptions.IgnoreCase);
+
+            // 变量常写在双引号字符串里，要看原文
+            score += 3 * Count(sample.Raw, @"\$(true|false|null|_|PSScriptRoot|PSCmdlet|args|env:\w+)\b", RegexOptions.IgnoreCase);
+            score += 3 * Count(code,
                 @"\[(string|int|bool|switch|object|hashtable|array|datetime|Parameter|CmdletBinding|System\.[\w.]+)(\[\])?[\]\(]",
                 RegexOptions.IgnoreCase);
-            score += 2 * Count(source, @"\s-(eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|and|or|not)\s",
+            score += 2 * Count(code, @"\s-(eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|and|or|not)\s",
                 RegexOptions.IgnoreCase);
-            score += 3 * Count(source, @"<#|#>");
-            score += 2 * Count(source, @"\$\w+\s*=[^=~]");
-            score += Count(source, @"\s-[A-Z][a-z]+[A-Z]?\w*\b");
+            score += 3 * Count(sample.Raw, @"<#|#>");
+            score += 2 * Count(code, @"\$\w+\s*=[^=~]");
+            score += Count(code, @"\s-[A-Z][a-z]+[A-Z]?\w*\b");
             return score;
         }
 

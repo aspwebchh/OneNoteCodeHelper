@@ -10,7 +10,7 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 |---|---|
 | 高亮选中 | 选中页面上已有的代码文字，原地替换成高亮代码框 |
 | 插入代码 | 打开窗口粘贴代码，预览确认后插入到当前页 |
-| 语言 | 自动识别，或手动选上面列的任意一种。纯文本只能手动选，自动识别不会选它 |
+| 语言 | 自动识别，或手动选上面列的任意一种。纯文本只能手动选，自动识别不会选它；TypeScript、JSX 按 JavaScript 识别 |
 | 深色主题 | 在浅色（类 IntelliJ）与深色（类 VS Code Dark+）之间切换 |
 | 字体（插入窗口内） | 默认 Consolas。代码里有中文时改选「NSimSun」新宋体，中英文才能对齐 |
 | 诊断日志 | 打开日志文件 |
@@ -87,10 +87,12 @@ Services/
   RenderDiagnostics.cs      不碰 OneNote 就能跑通渲染链路的诊断入口
 Highlighting/
   TokenKind / Token / ILanguage / LexerCursor / LanguageRegistry
+  DetectionSample.cs        自动识别的样本：原文开头一段 + 去掉注释和字符串内容的同长文本
   LikelihoodPatterns.cs     自动识别打分用的正则：实例缓存 + 匹配超时
   Languages/                每种语言一个 ILanguage 实现；XML 与 HTML 共用 MarkupLexer，
                             HTML 的 <style>/<script> 分别交给 CSS/JavaScript 着色；
-                            CommonScanners 放 C 系语言共用的注释、字符串、数字、插值字符串扫描
+                            CommonScanners 放 C 系语言共用的注释、字符串、数字、插值字符串扫描；
+                            CFamilyFeatures 放 Java/C#/C++/JS 共有的识别特征
   Themes/CodeTheme.cs, CodeThemes.cs
 Views/
   InsertCodeWindow.xaml     插入代码窗口
@@ -98,6 +100,7 @@ Views/
 install.ps1                 一键构建 + 安装 / 卸载
 Tools/register.ps1          只做注册这一步
 Tools/unregister.ps1        只做注销这一步
+Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-samples/<语言 id>/ 下
 ```
 
 ## 加一种语言
@@ -105,11 +108,35 @@ Tools/unregister.ps1        只做注销这一步
 1. 在 `Highlighting/Languages/` 下实现 `ILanguage`：`Tokenize` 切 token，`ScoreLikelihood` 给自动识别打分。
    `Tokenize` 必须保证返回的 token 按序、不重叠、完整覆盖整个源码 — `RenderDiagnostics.VerifyCoverage`
    就是用来验这条契约的。
-   `ScoreLikelihood` 的正则走 `LikelihoodPatterns`；多行模式下行首缩进写 `^[^\S\r\n]*`，
-   不要写 `^\s*`（`\s` 会跨行，连续空行一多就是平方级回溯）。
-2. 在 `LanguageRegistry.All` 里加一行。
+2. `ScoreLikelihood` 拿到的是 `DetectionSample`：
+   - 关键字、结构类的特征在 `sample.Code` 上匹配。它把整行注释和字符串内容换成了空格，
+     注释里的一句 `public class`、字符串里拼的 SQL 就不会给别的语言加分。
+   - 要看注释标记或字符串内容的特征（C# 的 `///`、Bash 的 `"$1"`、JSON 的键）才用 `sample.Raw`。
+   - 正则走 `LikelihoodPatterns`；多行模式下行首缩进写 `^[^\S\r\n]*`，
+     不要写 `^\s*`（`\s` 会跨行，连续空行一多就是平方级回溯）。
+   - C 系语言先加上 `CFamilyFeatures.Score(sample)`，自己只写独有的特征。共有特征四种语言分数相同、
+     互相抵消，胜负才取决于独有写法。
+   - 可以扣分：本语言里不可能出现的写法（比如 Python 里的 `) {`）是很强的反证。
+3. 在 `LanguageRegistry.All` 里加一行。高亮效果和现有某一族几乎一样的，顺便加进 `LanguageRegistry` 的族表。
+4. 在 `Tools/detect-samples/<语言 id>/` 下放几段样本（短片段、长文件都要有），然后跑一遍回归测试，
+   确认新语言认得出、也没有把别的语言抢走：
+
+   ```
+   powershell -ExecutionPolicy Bypass -File Tools\detect-test.ps1
+   ```
+
+   加 `-ShowScores` 能看到每段样本各语言的得分，调权重时用得上。
 
 功能区下拉、设置、预览都会自动跟上，不需要改别的地方。
+
+## 自动识别怎么判定
+
+各语言打分后，最高分至少 3 分，而且要是次高分的 2 倍以上、或者高出 4 分以上，才算认出来；
+否则提示手动选，因为猜错语言比不猜更糟。有两个例外：
+
+- 整段以标签开头、以 `>` 结尾的，只在 XML 和 HTML 之间选，里面的 `<script>` 再像 JS 也不算。
+- 高亮效果几乎一样的语言算一族（C 系：Java/C#/C++/JavaScript；标记：XML/HTML）。整族当成一个候选
+  跟族外的最高分比，比得过就取族内分最高的那个。族内打平时，认错的代价只是个别关键字颜色不对。
 
 ## 几个踩过的坑
 

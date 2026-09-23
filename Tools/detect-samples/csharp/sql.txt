@@ -1,0 +1,13 @@
+using (var conn = new SqlConnection(connectionString))
+{
+    var cmd = new SqlCommand("SELECT Id, Name FROM Users WHERE Age > @age ORDER BY Name", conn);
+    cmd.Parameters.AddWithValue("@age", 18);
+    conn.Open();
+    using (var reader = cmd.ExecuteReader())
+    {
+        while (reader.Read())
+        {
+            Console.WriteLine(reader.GetString(1));
+        }
+    }
+}

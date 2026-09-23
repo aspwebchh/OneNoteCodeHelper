@@ -252,23 +252,31 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             }
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
-            var score = 0;
-            score += 4 * Count(source, @"^[^\S\r\n]*import\s+[\w.]+\s*;");
-            score += 4 * Count(source, @"^[^\S\r\n]*package\s+[\w.]+\s*;");
-            score += 3 * Count(source, @"\b(public|private|protected)\s+");
-            score += 3 * Count(source, @"\b(class|interface|enum|record)\s+[A-Z]\w*");
-            score += 2 * Count(source, @"^[^\S\r\n]*@[A-Z]\w*");
-            score += 2 * Count(source, @"\bnew\s+[A-Z]\w*\s*\(");
-            score += 4 * Count(source, @"\bSystem\.out\.print");
-            score += Count(source, @";\s*$");
+            var code = sample.Code;
+            var score = CFamilyFeatures.Score(sample);
+            score += 4 * Count(code, @"^[^\S\r\n]*import\s+(static\s+)?[\w.]+(\.\*)?\s*;");
+            score += 4 * Count(code, @"^[^\S\r\n]*package\s+[\w.]+\s*;");
+            score += 2 * Count(code, @"^[^\S\r\n]*@[A-Z]\w*");
+            score += 4 * Count(code, @"\bSystem\.out\.print");
+            score += 4 * Count(code, @"\bstatic\s+void\s+main\s*\(\s*String");
+            score += 3 * Count(code, @"\bboolean\b|\bthrows\s+[A-Z]");
+            score += 2 * Count(code, @"\bString(\[\])?\s+\w+\s*[=;,)]");
+            score += 2 * Count(code, @"\bfinal\s+[\w<>\[\]]+\s+\w+\s*[=;]");
+            score += 3 * Count(code, @"\b(extends|implements)\s+[A-Z]");
 
-            // 上面几条 C# 也全都命中，下面这些才是 Java 独有的写法
-            score += 4 * Count(source, @"\bstatic\s+void\s+main\s*\(\s*String");
-            score += 3 * Count(source, @"\bboolean\b|\bthrows\s+[A-Z]");
-            score += 2 * Count(source, @"\bString(\[\])?\s+\w+\s*[=;,)]");
-            score += 2 * Count(source, @"\bfinal\s+[\w<>\[\]]+\s+\w+\s*[=;]");
+            // 泛型参数只能是包装类型；C# 写 List<string>、C++ 写 vector<int>
+            score += 3 * Count(code, @"<(String|Integer|Long|Boolean|Double|Float|Character|Byte|Short|Object)(\[\])?[,>]");
+            score += 2 * Count(code, @"\b(ArrayList|HashMap|TreeMap|LinkedHashMap|Optional|Stream)<");
+
+            // 增强 for：C# 是 foreach (x in xs)，JS 是 for (x of xs)
+            score += 3 * Count(code, @"\bfor\s*\(\s*(final\s+)?[\w<>\[\],.]+\s+\w+\s*:[^:]");
+
+            // Java 的方法名是 camelCase，和 C# 那条 PascalCase 对称
+            score += 3 * Count(code,
+                @"\b(public|private|protected)\s+(static\s+|final\s+|abstract\s+|synchronized\s+)*[\w<>\[\],?]+\s+[a-z]\w*\s*\(");
+            score += 2 * Count(code, @"\.(equals|equalsIgnoreCase|isEmpty|getClass|hashCode|size)\(");
             return score;
         }
 

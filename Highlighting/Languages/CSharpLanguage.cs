@@ -294,42 +294,35 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static bool IsIdentifierPart(char c) => char.IsLetterOrDigit(c) || c == '_';
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
-            var score = 0;
-
-            // 和 Java 完全相同的几条通用特征，权重也相同：两边互相抵消，胜负交给下面各自独有的写法。
-            // 不这样做的话，代码越长 Java 靠「分号结尾的行」攒的分就越多，大段 C# 会被认成 Java。
-            score += 3 * Count(source, @"\b(public|private|protected)\s+");
-            score += 3 * Count(source, @"\b(class|interface|enum|record|struct)\s+[A-Z]\w*");
-            score += 2 * Count(source, @"\bnew\s+[A-Z]\w*\s*\(");
-            score += Count(source, @";\s*$");
-
-            score += 4 * Count(source, @"^[^\S\r\n]*using\s+(static\s+)?[\w.]+\s*;");
-            score += 4 * Count(source, @"^[^\S\r\n]*namespace\s+[A-Z][\w.]*\s*[;{]?\s*$");
-            score += 4 * Count(source, @"\{\s*get\s*;|\bget\s*\{|\bset\s*\{|\bget\s*=>");
-            score += 3 * Count(source, @"\bConsole\.(Write|Read)");
-            score += 3 * Count(source, @"\bforeach\s*\(\s*var\b");
-            score += 3 * Count(source, @"\b(async\s+Task|Task<|IEnumerable<|IReadOnly\w*<|IList<|Dictionary<)");
-            score += 3 * Count(source, @"\b(internal|sealed|readonly|nameof)\b");
-            score += 3 * Count(source, @"\bis\s+(not\s+)?null\b");
+            var code = sample.Code;
+            var score = CFamilyFeatures.Score(sample);
+            score += 4 * Count(code, @"^[^\S\r\n]*using\s+(static\s+)?[\w.]+\s*;");
+            score += 4 * Count(code, @"^[^\S\r\n]*namespace\s+[A-Z][\w.]*\s*[;{]?\s*$");
+            score += 4 * Count(code, @"\{\s*get\s*;|\bget\s*\{|\bset\s*\{|\bget\s*=>");
+            score += 3 * Count(code, @"\bConsole\.(Write|Read)");
+            score += 3 * Count(code, @"\bforeach\s*\(\s*var\b");
+            score += 3 * Count(code, @"\b(async\s+Task|Task<|IEnumerable<|IReadOnly\w*<|IList<|Dictionary<)");
+            score += 3 * Count(code, @"\b(internal|sealed|readonly|nameof)\b");
+            score += 3 * Count(code, @"\bis\s+(not\s+)?null\b");
 
             // C# 的方法名是 PascalCase，Java 是 camelCase
-            score += 3 * Count(source,
+            score += 3 * Count(code,
                 @"\b(public|private|protected|internal)\s+(static\s+|override\s+|virtual\s+|async\s+)*[\w<>\[\],?]+\s+[A-Z]\w*\s*\(");
-            score += 2 * Count(source, @"<(string|int|bool|double|long|object|byte|char|float|decimal)(\[\])?[,>]");
-            score += 2 * Count(source,
+            score += 2 * Count(code, CFamilyFeatures.PrimitiveTypeArgument);
+            score += 2 * Count(code,
                 @"\.(Where|Select|SelectMany|OrderBy|OrderByDescending|GroupBy|ToList|ToArray|ToDictionary" +
                 @"|FirstOrDefault|SingleOrDefault|LastOrDefault)\s*\(");
-            score += 2 * Count(source, @"\bstring\s+\w+\s*[=;,)]|\bstring\.[A-Z]");
-            score += 2 * Count(source, @"^[^\S\r\n]*\[[A-Z]\w*(\(.*\))?\]\s*$");
-            score += 2 * Count(source, @"\$@?""");
-            score += 2 * Count(source, @"\boverride\b");
-            score += 2 * Count(source, @"^[^\S\r\n]*#(region|endregion)\b");
-            score += 2 * Count(source, @"^[^\S\r\n]*///");
-            score += Count(source, @"\.[A-Z][a-z]\w*\(");
-            score += Count(source, @"\bvar\s+\w+\s*=");
-            score += Count(source, @"\bbool\b");
+            score += 2 * Count(code, @"\bstring\s+\w+\s*[=;,)]|\bstring\.[A-Z]");
+            score += 2 * Count(code, @"^[^\S\r\n]*\[[A-Z]\w*(\(.*\))?\]\s*$");
+            score += 2 * Count(sample.Raw, @"\$@?""");
+            score += 2 * Count(code, @"\boverride\b");
+            score += 2 * Count(code, @"^[^\S\r\n]*#(region|endregion)\b");
+            score += 2 * Count(sample.Raw, @"^[^\S\r\n]*///");
+            score += Count(code, @"\.[A-Z][a-z]\w*\(");
+            score += Count(code, @"\bvar\s+\w+\s*=");
+            score += Count(code, @"\bbool\b");
             return score;
         }
 

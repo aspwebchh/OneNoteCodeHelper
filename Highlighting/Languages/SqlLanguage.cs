@@ -249,23 +249,25 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_' || c == '$';
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            // 在去掉字符串和注释的文本上匹配：别的语言字符串里拼的 SQL 不能算
+            var code = sample.Code;
             var score = 0;
-            score += 4 * Count(source,
+            score += 4 * Count(code,
                 @"\b(insert\s+into|delete\s+from|create\s+(or\s+replace\s+)?(table|view|index|procedure|function|trigger|database|schema)" +
                 @"|alter\s+table|drop\s+(table|view|index)|truncate\s+table)\b");
-            score += 3 * Count(source, @"\b(inner|left|right|full|cross)\s+(outer\s+)?join\b");
-            score += 3 * Count(source, @"\b(group|order|partition)\s+by\b");
-            score += 3 * Count(source, @"\bselect\s+(distinct\s+|top\s*\(?\d+\)?\s+)?(\*|[\w.@\[\]""`]+\s*(,|\bas\b|\bfrom\b|$))");
-            score += 2 * Count(source, @"\bwhere\s+[\w.\[\]""`]+\s*(=|<>|!=|<|>|\bin\b|\blike\b|\bis\b|\bbetween\b)");
-            score += 3 * Count(source, @"\bupdate\s+[\w.\[\]""`]+\s+set\b");
-            score += 3 * Count(source, @"\b(primary|foreign)\s+key\b");
-            score += 2 * Count(source, @"\b(varchar|nvarchar|bigint|decimal|datetime)\s*\(");
-            score += 2 * Count(source, @"\bvalues\s*\(");
+            score += 3 * Count(code, @"\b(inner|left|right|full|cross)\s+(outer\s+)?join\b");
+            score += 3 * Count(code, @"\b(group|order|partition)\s+by\b");
+            score += 3 * Count(code, @"\bselect\s+(distinct\s+|top\s*\(?\d+\)?\s+)?(\*|[\w.@\[\]""`]+\s*(,|\bas\b|\bfrom\b|$))");
+            score += 2 * Count(code, @"\bwhere\s+[\w.\[\]""`]+\s*(=|<>|!=|<|>|\bin\b|\blike\b|\bis\b|\bbetween\b)");
+            score += 3 * Count(code, @"\bupdate\s+[\w.\[\]""`]+\s+set\b");
+            score += 3 * Count(code, @"\b(primary|foreign)\s+key\b");
+            score += 2 * Count(code, @"\b(varchar|nvarchar|bigint|decimal|datetime)\s*\(");
+            score += 2 * Count(code, @"\bvalues\s*\(");
 
             // 和 Lua 的注释打分对冲：-- 注释两边都有，不该由它决定结果。同样排除 CSS 自定义属性那种行。
-            score += 3 * Count(source, @"^[^\S\r\n]*--(?![\w-]+\s*:.*;\s*$)");
+            score += 3 * Count(sample.Raw, @"^[^\S\r\n]*--(?![\w-]+\s*:.*;\s*$)");
             return score;
         }
 

@@ -1,0 +1,3 @@
+Map<String, Long> counts = words.stream()
+        .filter(w -> !w.isEmpty())
+        .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));

@@ -1,0 +1,7 @@
+import os
+import sys
+
+files = os.listdir(sys.argv[1])
+for name in files:
+    if name.endswith(".txt"):
+        print(name)

@@ -1,0 +1,5 @@
+deploy() {
+  local target=$1
+  rsync -av ./dist/ "$target"
+}
+deploy /var/www

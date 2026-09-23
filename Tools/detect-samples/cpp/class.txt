@@ -1,0 +1,25 @@
+#include <string>
+#include <vector>
+
+class Stack {
+public:
+    explicit Stack(size_t capacity) : data_(), capacity_(capacity) {}
+
+    bool push(int value) {
+        if (data_.size() >= capacity_) {
+            return false;
+        }
+        data_.push_back(value);
+        return true;
+    }
+
+    int pop() {
+        int top = data_.back();
+        data_.pop_back();
+        return top;
+    }
+
+private:
+    std::vector<int> data_;
+    size_t capacity_;
+};

@@ -1,0 +1,9 @@
+local config = {
+  width = 800,
+  height = 600,
+  title = "demo",
+}
+
+if config.width > 640 then
+  print("wide")
+end

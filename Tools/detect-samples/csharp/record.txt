@@ -1,0 +1,7 @@
+public record Person(string Name, int Age);
+
+var people = new List<Person> { new("Ann", 30), new("Bob", 25) };
+foreach (var p in people.Where(p => p.Age > 26))
+{
+    Console.WriteLine(p.Name);
+}

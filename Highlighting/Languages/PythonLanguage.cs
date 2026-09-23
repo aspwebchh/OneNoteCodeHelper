@@ -256,22 +256,35 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return line.TrimEnd().EndsWith(":", StringComparison.Ordinal);
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            var code = sample.Code;
             var score = 0;
-            score += 5 * Count(source, @"^[^\S\r\n]*(async\s+)?def\s+\w+\s*\(.*\)\s*(->\s*[^:]+)?:\s*(#.*)?$");
-            score += 5 * Count(source, @"^[^\S\r\n]*from\s+[\w.]+\s+import\b");
-            score += 3 * Count(source, @"^[^\S\r\n]*import\s+[\w.]+(\s+as\s+\w+)?(\s*,\s*[\w.]+)*\s*$");
-            score += 3 * Count(source, @"^[^\S\r\n]*class\s+\w+(\(.*\))?:\s*$");
-            score += 2 * Count(source, @"^[^\S\r\n]*(if|elif|else|for|while|try|except|finally|with)\b.*:\s*(#.*)?$");
-            score += 3 * Count(source, @"\belif\b");
-            score += 2 * Count(source, @"\b(None|True|False)\b");
-            score += 3 * Count(source, @"__\w+__");
-            score += 3 * Count(source, @"\bdef\s+\w+\s*\(\s*self\b");
-            score += 2 * Count(source, @"^[^\S\r\n]*@[a-z_][\w.]*");
-            score += 2 * Count(source, @"\blambda\b[^:\n]*:");
-            score += Count(source, @"\bself\.\w+");
-            score += Count(source, @"\bf[""'][^""'\n]*\{");
+            score += 10 * Count(sample.Raw, @"\A#!.*\bpython");
+            score += 5 * Count(code, @"^[^\S\r\n]*(async\s+)?def\s+\w+\s*\(.*\)\s*(->\s*[^:]+)?:\s*(#.*)?$");
+            score += 5 * Count(code, @"^[^\S\r\n]*from\s+[\w.]+\s+import\b");
+            score += 3 * Count(code, @"^[^\S\r\n]*import\s+[\w.]+(\s+as\s+\w+)?(\s*,\s*[\w.]+)*\s*$");
+            score += 3 * Count(code, @"^[^\S\r\n]*class\s+\w+(\(.*\))?:\s*$");
+            score += 2 * Count(code, @"^[^\S\r\n]*(if|elif|else|for|while|try|except|finally|with)\b.*:\s*(#.*)?$");
+            score += 3 * Count(code, @"\belif\b");
+            score += 2 * Count(code, @"\b(None|True|False)\b");
+            score += 3 * Count(code, @"__\w+__");
+            score += 3 * Count(code, @"\bdef\s+\w+\s*\(\s*self\b");
+            score += 2 * Count(code, @"^[^\S\r\n]*@[a-z_][\w.]*");
+            score += 2 * Count(code, @"\blambda\b[^:\n]*:");
+            score += Count(code, @"\bself\.\w+");
+            score += Count(sample.Raw, @"\bf[""'][^""'\n]*\{");
+
+            // 单独一行、行尾不带分号的 print(...)，短片段常常只有这一句
+            score += 3 * Count(code, @"^[^\S\r\n]*print\s*\(.*\)[^\S\r\n]*$");
+            score += 2 * Count(code, @"(?<![.\w])(len|range|enumerate|isinstance|sorted|zip)\s*\(");
+
+            // 不带声明关键字的多行集合赋值：CONFIG = {。JS 要写 const/let，C 系要写类型，Lua 一般带 local
+            score += 2 * Count(code, @"^[^\S\r\n]*[A-Za-z_]\w*[^\S\r\n]*=[^\S\r\n]*[\[{(][^\S\r\n]*$");
+
+            // 反证：Python 的语句不以分号结尾，也不会有 ) { 这种块开头
+            score -= 2 * Count(code, @";[^\S\r\n]*$");
+            score -= 3 * Count(code, @"\)[^\S\r\n]*\{[^\S\r\n]*$");
             return score;
         }
 

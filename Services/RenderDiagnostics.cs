@@ -94,6 +94,19 @@ namespace OneNoteCodeHelper.Services
             return LanguageRegistry.Detect(code)?.DisplayName ?? "(无法确定)";
         }
 
+        /// <summary>自动识别时各语言的得分，形如 "java=12 csharp=5"，不列 0 分的。Tools/detect-test.ps1 调这里。</summary>
+        internal static string DescribeDetectionScores(string code)
+        {
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                return string.Empty;
+            }
+
+            return string.Join(" ", LanguageRegistry.Rank(code)
+                .Where(x => x.Score != 0)
+                .Select(x => x.Language.Id + "=" + x.Score));
+        }
+
         private static ILanguage ResolveLanguage(string code, string languageId)
         {
             var language = LanguageRegistry.Resolve(languageId, code);

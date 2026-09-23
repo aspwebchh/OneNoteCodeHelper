@@ -1,0 +1,12 @@
+@echo off
+setlocal enabledelayedexpansion
+cd /d %~dp0
+for %%f in (*.log) do (
+    echo processing %%f
+    copy "%%f" backup\ >nul
+)
+if errorlevel 1 goto :fail
+exit /b 0
+:fail
+echo failed
+exit /b 1

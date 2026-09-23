@@ -1,0 +1,5 @@
+foreach (var item in items) {
+    if (item.IsValid) {
+        Process(item);
+    }
+}

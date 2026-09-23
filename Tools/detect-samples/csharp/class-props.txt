@@ -1,0 +1,19 @@
+using System;
+using System.Collections.Generic;
+
+namespace Demo.Models
+{
+    /// <summary>A customer order.</summary>
+    public sealed class Order
+    {
+        public int Id { get; set; }
+
+        public string Customer { get; set; } = string.Empty;
+
+        public List<OrderLine> Lines { get; } = new List<OrderLine>();
+
+        public decimal Total => Lines.Sum(l => l.Price * l.Quantity);
+
+        public override string ToString() => $"Order {Id} for {Customer}";
+    }
+}

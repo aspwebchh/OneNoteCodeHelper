@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Login</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; }
+    .box { width: 320px; margin: 40px auto; }
+  </style>
+</head>
+<body>
+  <form class="box" action="/login" method="post">
+    <label for="user">User</label>
+    <input id="user" name="user" type="text">
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>

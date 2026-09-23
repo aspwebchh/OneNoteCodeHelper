@@ -266,26 +266,25 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             c.Emit(TokenKind.String, start);
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
-            var score = 0;
-            score += 5 * Count(source, @"^[^\S\r\n]*#\s*include\s*[<""]");
-            score += 3 * Count(source, @"^[^\S\r\n]*#\s*(define|ifdef|ifndef|endif|pragma|undef)\b");
-            score += 3 * Count(source, @"\bstd::");
-            score += 3 * Count(source, @"\b(cout|cerr)\s*<<|\bcin\s*>>");
-            score += 4 * Count(source, @"\btemplate\s*<");
-            score += 4 * Count(source, @"\bint\s+main\s*\(");
-            score += 3 * Count(source, @"\b(nullptr|typedef|constexpr)\b");
-            score += 2 * Count(source, @"\b(printf|scanf|malloc|calloc|free|memcpy|memset|strlen|strcpy)\s*\(");
-            score += 2 * Count(source, @"\b(unsigned|size_t|u?int\d+_t|const\s+char\s*\*)");
-            score += 2 * Count(source, @"\b\w+::~?\w+\s*\(");
-            score += 2 * Count(source, @"\bstruct\s+\w+\s*\*");
-            score += 3 * Count(source, @"^[^\S\r\n]*(public|private|protected)\s*:");
-            score += 2 * Count(source, @"\bconst\s+[\w:<>]+\s*&");
-            score += Count(source, @"\w->\w");
-
-            // 和 Java/C# 一样按「分号结尾的行」计分，让这条通用特征互相抵消
-            score += Count(source, @";\s*$");
+            var code = sample.Code;
+            var score = CFamilyFeatures.Score(sample);
+            score += 5 * Count(code, @"^[^\S\r\n]*#\s*include\s*[<""]");
+            score += 3 * Count(code, @"^[^\S\r\n]*#\s*(define|ifdef|ifndef|endif|pragma|undef)\b");
+            score += 5 * Count(code, @"\bstd::");
+            score += 3 * Count(code, @"\b(cout|cerr)\s*<<|\bcin\s*>>");
+            score += 4 * Count(code, @"\btemplate\s*<");
+            score += 4 * Count(code, @"\bint\s+main\s*\(");
+            score += 3 * Count(code, @"\b(nullptr|typedef|constexpr)\b");
+            score += 2 * Count(code, @"\b(printf|scanf|malloc|calloc|free|memcpy|memset|strlen|strcpy)\s*\(");
+            score += 2 * Count(code, @"\b(unsigned|size_t|u?int\d+_t|const\s+char\s*\*)");
+            score += 2 * Count(code, @"\b\w+::~?\w+\s*\(");
+            score += 2 * Count(code, @"\bstruct\s+\w+\s*\*");
+            score += 3 * Count(code, @"^[^\S\r\n]*(public|private|protected)\s*:");
+            score += 2 * Count(code, @"\bconst\s+[\w:<>]+\s*&");
+            score += 2 * Count(code, CFamilyFeatures.PrimitiveTypeArgument);
+            score += Count(code, @"\w->\w");
             return score;
         }
 

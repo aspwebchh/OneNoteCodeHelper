@@ -1,0 +1,23 @@
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class Order:
+    id: int
+    customer: str
+    lines: List["Line"] = field(default_factory=list)
+
+    @property
+    def total(self) -> float:
+        return sum(line.price * line.qty for line in self.lines)
+
+    def add(self, line):
+        if line.qty <= 0:
+            raise ValueError("qty must be positive")
+        self.lines.append(line)
+
+
+if __name__ == "__main__":
+    order = Order(1, "alice")
+    print(order.total)

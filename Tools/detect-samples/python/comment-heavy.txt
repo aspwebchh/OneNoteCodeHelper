@@ -1,0 +1,4 @@
+# This function returns the user; it is public and static in spirit.
+# See: public class User { private String name; }
+def get_user(uid):
+    return db.find(uid)

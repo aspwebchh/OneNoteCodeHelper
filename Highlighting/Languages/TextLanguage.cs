@@ -17,6 +17,6 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return new LexerCursor(source).Finish();
         }
 
-        public int ScoreLikelihood(string source) => 0;
+        public int ScoreLikelihood(DetectionSample sample) => 0;
     }
 }

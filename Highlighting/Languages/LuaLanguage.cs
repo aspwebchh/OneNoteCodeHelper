@@ -274,18 +274,22 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             }
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            var code = sample.Code;
             var score = 0;
-            score += 4 * Count(source, @"\blocal\s+\w+");
-            score += 4 * Count(source, @"\bfunction\b[^\n]*\)\s*$");
-            score += 3 * Count(source, @"^[^\S\r\n]*end\s*$");
+            score += 4 * Count(code, @"\blocal\s+\w+");
+            score += 4 * Count(code, @"\bfunction\b[^\n]*\)\s*$");
+            score += 3 * Count(code, @"^[^\S\r\n]*end\s*$");
             // 排除 CSS 自定义属性 --main-color: #fff; 这种形状的行
-            score += 3 * Count(source, @"^[^\S\r\n]*--(?![\w-]+\s*:.*;\s*$)");
-            score += 2 * Count(source, @"\b(then|elseif|repeat|until)\b");
-            score += 2 * Count(source, @"\bnil\b");
-            score += 2 * Count(source, @"~=");
-            score += 2 * Count(source, @"\b(ipairs|pairs|setmetatable)\s*\(");
+            score += 3 * Count(sample.Raw, @"^[^\S\r\n]*--(?![\w-]+\s*:.*;\s*$)");
+            score += 2 * Count(code, @"\b(then|elseif|repeat|until)\b");
+            score += 2 * Count(code, @"\bnil\b");
+            score += 2 * Count(code, @"~=");
+            score += 2 * Count(code, @"\b(ipairs|pairs|setmetatable)\s*\(");
+
+            // .. 拼接字符串，两边带空格：name .. "!"。路径里的 ../ 两边不是空格
+            score += 2 * Count(code, @"[\w""')\]][^\S\r\n]+\.\.[^\S\r\n]+[\w""'(]");
             return score;
         }
 

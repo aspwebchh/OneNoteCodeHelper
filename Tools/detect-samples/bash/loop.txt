@@ -1,0 +1,5 @@
+for f in *.log; do
+  if [[ -s "$f" ]]; then
+    gzip "$f"
+  fi
+done

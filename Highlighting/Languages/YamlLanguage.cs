@@ -416,8 +416,11 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return NumberPattern.IsMatch(text) ? TokenKind.Number : TokenKind.String;
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            // 数据格式的特征就是键和值本身，没有要去掉的噪声，全部在原文上匹配
+            var source = sample.Raw;
+
             // 以 { [ 开头的归 JSON，以 < 开头的归 XML/HTML
             if (LikelihoodPatterns.IsMatch(source, @"\A\s*[\[{<]"))
             {

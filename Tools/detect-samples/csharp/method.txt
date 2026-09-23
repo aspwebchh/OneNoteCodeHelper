@@ -1,0 +1,9 @@
+private static int Sum(int[] arr)
+{
+    int total = 0;
+    foreach (var x in arr)
+    {
+        total += x;
+    }
+    return total;
+}

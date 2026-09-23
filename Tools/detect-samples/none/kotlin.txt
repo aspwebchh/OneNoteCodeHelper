@@ -1,0 +1,4 @@
+fun main() {
+    val names = listOf("a", "b")
+    for (n in names) println(n)
+}

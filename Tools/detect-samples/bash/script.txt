@@ -1,0 +1,10 @@
+#!/bin/bash
+# Deploy script: builds the project and copies it to the server.
+# Usage: public static void main - not java
+
+set -e
+APP_DIR=/opt/app
+echo "Building..."
+npm run build
+rsync -avz dist/ user@server:$APP_DIR
+ssh user@server "systemctl restart app"

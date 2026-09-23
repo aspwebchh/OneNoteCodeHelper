@@ -1,0 +1,10 @@
+CREATE PROCEDURE dbo.GetOrders
+    @CustomerId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT Id, Amount, CreatedAt
+    FROM dbo.Orders
+    WHERE CustomerId = @CustomerId
+    ORDER BY CreatedAt DESC;
+END

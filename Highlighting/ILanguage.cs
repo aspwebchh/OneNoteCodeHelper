@@ -20,8 +20,10 @@ namespace OneNoteCodeHelper.Highlighting
         IEnumerable<Token> Tokenize(string source);
 
         /// <summary>
-        /// 给出「这段代码像不像本语言」的打分，供自动识别用。分值只在同一批候选间比较大小。
+        /// 给出「这段代码像不像本语言」的打分，供自动识别用。分值只在同一批候选间比较大小，可以为负（反证）。
+        /// 关键字、结构类的特征在 <see cref="DetectionSample.Code"/> 上匹配，要看注释标记或字符串内容的才用
+        /// <see cref="DetectionSample.Raw"/>。
         /// </summary>
-        int ScoreLikelihood(string source);
+        int ScoreLikelihood(DetectionSample sample);
     }
 }

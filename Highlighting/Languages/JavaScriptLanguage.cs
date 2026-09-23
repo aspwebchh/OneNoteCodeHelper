@@ -233,22 +233,41 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return -1;
         }
 
-        public int ScoreLikelihood(string source)
+        /// <summary>TypeScript、JSX 也按 JavaScript 识别，下面有几条就是 TS 独有的写法。</summary>
+        public int ScoreLikelihood(DetectionSample sample)
         {
-            var score = 0;
-            score += 3 * Count(source, @"^[^\S\r\n]*(export\s+)?(const|let)\s+[\w${}\[\], ]+\s*=");
-            score += 4 * Count(source, @"\bfunction\s*\*?\s*[\w$]*\s*\([^)]*\)\s*\{");
-            score += 4 * Count(source, @"\bconsole\.(log|error|warn|info|debug)\s*\(");
-            score += 3 * Count(source, @"\b(document|window)\.\w+");
-            score += 4 * Count(source,
-                @"\brequire\s*\(\s*['""]|\bmodule\.exports\b|^[^\S\r\n]*export\s+(default|const|let|function|class|async)\b" +
+            var code = sample.Code;
+            var score = CFamilyFeatures.Score(sample);
+            score += 10 * Count(sample.Raw, @"\A#!.*\bnode\b");
+            score += 3 * Count(code, @"^[^\S\r\n]*(export\s+)?(const|let)\s+[\w${}\[\], ]+\s*=");
+            score += 4 * Count(code, @"\bfunction\s*\*?\s*[\w$]*\s*\([^)]*\)\s*\{");
+            score += 4 * Count(code, @"\bconsole\.(log|error|warn|info|debug)\s*\(");
+            score += 3 * Count(code, @"\b(document|window)\.\w+");
+            score += 4 * Count(code,
+                @"\brequire\s*\(\s*['""]|\bmodule\.exports\b" +
+                @"|^[^\S\r\n]*export\s+(default|const|let|function|class|async|interface|type|enum|abstract)\b" +
                 @"|^[^\S\r\n]*import\s+.*\bfrom\s+['""]|^[^\S\r\n]*import\s+['""]");
-            score += 3 * Count(source, @"===|!==");
-            score += 2 * Count(source, @"\bundefined\b");
-            score += 2 * Count(source, @"`[^`]*\$\{");
-            score += 2 * Count(source, @"\.then\s*\(|\bawait\s+fetch\b|\baddEventListener\s*\(");
-            score += Count(source, @"=>");
-            score += Count(source, @"\bvar\s+\w+\s*=");
+            score += 3 * Count(code, @"===|!==");
+            score += 2 * Count(code, @"\bundefined\b");
+            score += 2 * Count(sample.Raw, @"`[^`]*\$\{");
+            score += 2 * Count(code, @"\.then\s*\(|\bawait\s+fetch\b|\baddEventListener\s*\(");
+            score += Count(code, @"=>");
+            score += Count(code, @"\bvar\s+\w+\s*=");
+
+            // class 里不写返回类型的方法：speak() {、async load(id) {。Java/C# 的方法前面总有返回类型；
+            // 排除掉的是各语言带括号的语句块（C# 的 foreach/using/lock、Java 的 synchronized）
+            score += 3 * Count(code, @"\bconstructor\s*\(");
+            score += 2 * Count(code,
+                @"^[^\S\r\n]*(async\s+|static\s+|get\s+|set\s+)*" +
+                @"(?!(if|for|foreach|while|switch|catch|function|return|else|using|lock|synchronized|fixed|with)\b)" +
+                @"[A-Za-z_$][\w$]*[^\S\r\n]*\([^()\r\n]*\)[^\S\r\n]*\{");
+
+            // TypeScript：类型标注跟在名字后面，后面接 ; , ) = { |。行尾结束的不算，那是 YAML 的 type: string
+            score += 3 * Count(code,
+                @"[\w)?][^\S\r\n]*:[^\S\r\n]*(string|number|boolean|any|void|unknown|never)(\[\])?[^\S\r\n]*[;,)={|]");
+            // 不含 string：C# 的 List<string> 也长这样
+            score += 2 * Count(code, @"<(number|boolean|void|any|unknown)[,>]");
+            score += 3 * Count(code, @"^[^\S\r\n]*type\s+\w+(<[^>\r\n]*>)?\s*=");
             return score;
         }
 

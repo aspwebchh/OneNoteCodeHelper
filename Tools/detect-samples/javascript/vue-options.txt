@@ -1,0 +1,13 @@
+export default {
+  name: 'TodoList',
+  data() {
+    return { items: [], text: '' };
+  },
+  methods: {
+    add() {
+      if (!this.text) return;
+      this.items.push({ id: Date.now(), text: this.text });
+      this.text = '';
+    },
+  },
+};

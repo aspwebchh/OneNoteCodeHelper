@@ -1,0 +1,2 @@
+$files = Get-ChildItem *.txt
+foreach ($f in $files) { Write-Host $f.Name }

@@ -1,0 +1,17 @@
+export interface Order {
+  id: number;
+  items: string[];
+  total: number;
+}
+
+export class OrderService {
+  private orders: Order[] = [];
+
+  public add(order: Order): void {
+    this.orders.push(order);
+  }
+
+  public findById(id: number): Order | undefined {
+    return this.orders.find(o => o.id === id);
+  }
+}

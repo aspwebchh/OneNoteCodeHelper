@@ -1,0 +1,6 @@
+public async Task<User> GetUserAsync(int id, CancellationToken token)
+{
+    var response = await _client.GetAsync($"users/{id}", token);
+    response.EnsureSuccessStatusCode();
+    return await response.Content.ReadFromJsonAsync<User>(cancellationToken: token);
+}

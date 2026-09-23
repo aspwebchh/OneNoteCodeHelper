@@ -1,0 +1,21 @@
+local M = {}
+
+-- 简单的计数器
+function M.new(start)
+  local self = setmetatable({}, { __index = M })
+  self.count = start or 0
+  return self
+end
+
+function M:inc()
+  self.count = self.count + 1
+  if self.count > 10 then
+    print("over ten: " .. self.count)
+  end
+end
+
+for i, v in ipairs({ 1, 2, 3 }) do
+  print(i, v)
+end
+
+return M

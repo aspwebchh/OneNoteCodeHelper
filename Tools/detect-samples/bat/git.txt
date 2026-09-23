@@ -1,0 +1,4 @@
+@echo off
+cd /d D:\work\app
+git pull
+call npm run build

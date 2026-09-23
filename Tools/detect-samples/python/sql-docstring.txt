@@ -1,0 +1,14 @@
+import sqlite3
+
+def load_users(path):
+    conn = sqlite3.connect(path)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, email
+        FROM users
+        WHERE active = 1
+        ORDER BY name
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows

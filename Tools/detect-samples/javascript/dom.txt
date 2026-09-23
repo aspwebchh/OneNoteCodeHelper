@@ -1,0 +1,11 @@
+document.querySelector('#save').addEventListener('click', function (event) {
+  event.preventDefault();
+  var name = document.getElementById('name').value;
+  if (name === '') {
+    alert('Name is required');
+    return;
+  }
+  fetch('/api/save', { method: 'POST', body: JSON.stringify({ name: name }) })
+    .then(function (res) { return res.json(); })
+    .then(function (data) { console.log(data); });
+});

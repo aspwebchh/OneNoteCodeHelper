@@ -1,0 +1,6 @@
+// def foo(): pass  -- this is not python
+// local x = 1
+// from os import path
+public int getId() {
+    return id;
+}

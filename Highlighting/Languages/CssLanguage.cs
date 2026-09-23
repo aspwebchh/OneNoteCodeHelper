@@ -494,14 +494,16 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             c.SkipWhile(char.IsLetter);
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
             // 带标签的是 HTML/XML，里面的 <style> 不能把整段拉成 CSS
-            if (LikelihoodPatterns.IsMatch(source, @"<[A-Za-z!/]"))
+            if (LikelihoodPatterns.IsMatch(sample.Raw, @"<[A-Za-z!/]"))
             {
                 return 0;
             }
 
+            // 在去掉注释和字符串的文本上匹配：#id、--var: 后面不是空白，不会被当成注释抹掉
+            var source = sample.Code;
             var score = 0;
             score += 3 * Count(source,
                 @"(^|[{;\s])(color|background(-\w+)?|margin(-\w+)?|padding(-\w+)?|font(-\w+)?|display|width|height" +

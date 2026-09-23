@@ -1,0 +1,10 @@
+function Get-Size {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $total = (Get-ChildItem $Path -Recurse -File | Measure-Object -Property Length -Sum).Sum
+    "{0:N1} MB" -f ($total / 1MB)
+}

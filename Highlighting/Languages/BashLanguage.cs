@@ -518,24 +518,36 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return true;
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            var source = sample.Raw;
+
             // 带闭合标签的是 XML/HTML：一行一个的 name="value" 属性不能被当成 shell 赋值
             if (LikelihoodPatterns.IsMatch(source, @"</[A-Za-z][\w:.-]*\s*>|<\?xml\b"))
             {
                 return 0;
             }
 
+            var code = sample.Code;
             var score = 0;
             score += 10 * Count(source, @"\A#!.*\b(ba|z|k|da)?sh\b");
-            score += 4 * Count(source, @"^[^\S\r\n]*(fi|done|esac)\s*(;.*)?$");
+            score += 4 * Count(code, @"^[^\S\r\n]*(fi|done|esac)\s*(;.*)?$");
+
+            // 变量常写在双引号里（"$1"、"${name}"），要看原文
             score += 3 * Count(source, @"\$\{[\w#!]");
-            score += 3 * Count(source, @"\[\[?\s+!?\s*-[a-zA-Z]\s");
+            score += 3 * Count(code, @"\[\[?\s+!?\s*-[a-zA-Z]\s");
             score += 2 * Count(source, @"\$[0-9@#?]");
-            score += 3 * Count(source, @"^[^\S\r\n]*(export|readonly|declare|local)\s+\w+=");
-            score += 2 * Count(source, @"\|\s*(grep|awk|sed|xargs|sort|uniq|head|tail|wc|cut|tr)\b");
-            score += 2 * Count(source, @";\s*(then|do)\s*$");
-            score += 2 * Count(source, @"^[^\S\r\n]*\w+=\S");
+            score += 3 * Count(code, @"^[^\S\r\n]*(export|readonly|declare|local)\s+\w+=");
+            score += 2 * Count(code, @"\|\s*(grep|awk|sed|xargs|sort|uniq|head|tail|wc|cut|tr)\b");
+            score += 2 * Count(code, @";\s*(then|do)\s*$");
+            score += 2 * Count(code, @"^[^\S\r\n]*\w+=\S");
+
+            // 以常见 Unix 命令开头的行，可以带 $ 提示符。cd、echo、mkdir 这类 bat 里也有的不算；
+            // 后面紧跟 = ( . 的是别的语言里的同名变量或函数调用
+            score += 3 * Count(code,
+                @"^[^\S\r\n]*(\$[^\S\r\n]+)?(sudo|apt|apt-get|yum|dnf|brew|pip3?|npm|npx|yarn|pnpm|git|docker|docker-compose" +
+                @"|kubectl|helm|curl|wget|ssh|scp|rsync|chmod|chown|ls|grep|ps|tar|unzip|gzip|systemctl|journalctl|source" +
+                @"|touch|ln|sed|awk|nohup|tail|kill|pkill|which)([^\S\r\n]+[^\s=(.]|[^\S\r\n]*$)");
             return score;
         }
 

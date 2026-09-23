@@ -90,8 +90,10 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return c.Finish();
         }
 
-        public int ScoreLikelihood(string source)
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            var source = sample.Raw;
+
             // 必须以 { 或 [ 开头（前面可以有 // 注释）：JS、Python 里的对象字面量前面总有 const x =、return 之类，
             // 这条把它们挡在外面
             if (!LikelihoodPatterns.IsMatch(source, @"\A\s*(//[^\r\n]*\s*)*[\[{]"))
@@ -100,7 +102,37 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             }
 
             // 带引号的键。不锚定行首，压缩成一行的 JSON 也能认出来
-            return 3 * Count(source, @"""[^""\r\n]*""\s*:");
+            var score = 3 * Count(source, @"""[^""\r\n]*""\s*:");
+
+            // 整段都能按 JSON 切分，[1, 2, 3] 这种没有键的也认；[1, 2].map(...) 里的 .map 切不出来，不算
+            if (IsAllJsonTokens(source))
+            {
+                score += 4;
+            }
+
+            return score;
+        }
+
+        /// <summary>除空白外，每个 token 都是 JSON 里合法的东西（含 JSONC 注释与 JSON5 的裸键）。</summary>
+        private bool IsAllJsonTokens(string source)
+        {
+            foreach (var token in Tokenize(source))
+            {
+                if (token.Kind != TokenKind.Plain)
+                {
+                    continue;
+                }
+
+                for (var i = token.Start; i < token.End; i++)
+                {
+                    if (!char.IsWhiteSpace(source[i]))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
         }
 
         private static int Count(string source, string pattern)

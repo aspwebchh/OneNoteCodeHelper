@@ -1,0 +1,11 @@
+-- 每个客户最近 30 天的订单金额
+SELECT c.id,
+       c.name,
+       COUNT(o.id)   AS order_count,
+       SUM(o.amount) AS total
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE o.created_at >= DATEADD(day, -30, GETDATE())
+GROUP BY c.id, c.name
+HAVING SUM(o.amount) > 1000
+ORDER BY total DESC;

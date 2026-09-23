@@ -1,0 +1,6 @@
+// VS Code settings
+{
+  "editor.fontSize": 14,
+  "editor.tabSize": 2, // two spaces
+  "files.exclude": { "**/node_modules": true }
+}

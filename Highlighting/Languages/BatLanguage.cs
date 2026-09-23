@@ -420,8 +420,12 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
         private static bool IsWordChar(char c) => c != '\0' && !char.IsWhiteSpace(c) && WordBreakChars.IndexOf(c) < 0 && c != '.';
 
-        public int ScoreLikelihood(string source)
+        /// <summary>
+        /// 全部在原文上匹配：bat 的特征大多是 rem/:: 注释和写在引号里的 %变量%，去噪会把它们抹掉。
+        /// </summary>
+        public int ScoreLikelihood(DetectionSample sample)
         {
+            var source = sample.Raw;
             var score = 0;
             score += 10 * Count(source, @"^[^\S\r\n]*@echo\s+off\b");
             score += 3 * Count(source, @"^[^\S\r\n]*@?rem(\s|$)");
