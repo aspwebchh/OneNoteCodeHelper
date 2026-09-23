@@ -56,11 +56,7 @@ namespace OneNoteCodeHelper.Services
                 return EditResult.Fail("读取当前页面内容失败。");
             }
 
-            // selected="all" 表示这个段落被整体选中；只点了光标没拖选时 OneNote 也会这样标当前段。
-            var selected = page.Descendants(One + "OE")
-                .Where(oe => (string)oe.Attribute("selected") == "all")
-                .Where(oe => oe.Elements(One + "T").Any())
-                .ToList();
+            var selected = FindSelectedParagraphs(page);
 
             if (selected.Count == 0)
             {
@@ -231,6 +227,24 @@ namespace OneNoteCodeHelper.Services
                 : 0;
         }
 
+        /// <summary>
+        /// 找出选区涉及的段落，碰到一点就算整行。
+        ///
+        /// 不能只认 OE 上的 selected="all"：本机实测，在文本框里拖选几行时，OneNote 只把段落里的
+        /// one:T 标成 "all"，段落本身一律标 "partial"——哪怕整行文字都选上了。只有点文本框边框、
+        /// Ctrl+A 这类整体选中才会把 OE 标成 "all"，所以以前只能高亮整个框。
+        /// 选区从行中间开始或结束时，OneNote 会把那行的 one:T 在边界处拆开，只有选中那截标 "all"，
+        /// 这里同样按整行算，代码只高亮半行没有意义。
+        /// </summary>
+        internal static List<XElement> FindSelectedParagraphs(XElement page)
+        {
+            return page.Descendants(One + "OE")
+                .Where(oe => oe.Elements(One + "T").Any())
+                .Where(oe => (string)oe.Attribute("selected") == "all"
+                    || oe.Elements(One + "T").Any(t => (string)t.Attribute("selected") == "all"))
+                .ToList();
+        }
+
         /// <summary>把一个 one:OE 里的文字还原成纯文本。</summary>
         private static string ExtractPlainText(XElement oe)
         {
@@ -250,9 +264,7 @@ namespace OneNoteCodeHelper.Services
             var page = XDocument.Parse(_api.GetPageContent(pageId, PageInfo.piSelection)).Root;
             return page == null
                 ? Array.Empty<string>()
-                : page.Descendants(One + "OE")
-                    .Where(oe => (string)oe.Attribute("selected") == "all")
-                    .Where(oe => oe.Elements(One + "T").Any())
+                : FindSelectedParagraphs(page)
                     .Select(ExtractPlainText)
                     .ToList();
         }
