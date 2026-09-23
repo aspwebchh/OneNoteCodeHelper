@@ -31,20 +31,25 @@
                   supertip="打开一个窗口，把代码粘进去、看好预览效果，再插入到当前页面。"
                   onAction="OnShowInsertWindow" />
 
-          <dropDown id="OncLanguage"
+          <!--
+            「语言」「字号」上下叠在一列，两个都得是 comboBox、sizeString 也得一样才对得齐：
+            dropDown 和 comboBox 的内边距不同，同样的 sizeString 画出来也差几个像素。
+            字号本来就要用 comboBox（能手输列表外的值），所以语言也跟着用，顺带能直接敲语言名。
+          -->
+          <comboBox id="OncLanguage"
                     label="语言"
                     sizeString="PowerShellxx"
                     screentip="高亮时使用的语言"
+                    supertip="可以从列表里选，也可以直接输入语言名，比如 python。"
                     getItemCount="GetLanguageCount"
                     getItemID="GetLanguageId"
                     getItemLabel="GetLanguageLabel"
-                    getSelectedItemIndex="GetSelectedLanguageIndex"
-                    onAction="OnLanguageChanged" />
+                    getText="GetLanguageText"
+                    onChange="OnLanguageChanged" />
 
-          <!-- 用 comboBox 而不是 dropDown：字号可以手输列表外的值，dropDown 显示不了 -->
           <comboBox id="OncFontSize"
                     label="字号"
-                    sizeString="10.5xx"
+                    sizeString="PowerShellxx"
                     screentip="代码的字号（磅）"
                     supertip="可以从列表里选，也可以直接输入，比如 10.5。「高亮选中」和「插入代码」共用这个字号。"
                     getItemCount="GetFontSizeCount"
@@ -52,6 +57,9 @@
                     getItemLabel="GetFontSizeLabel"
                     getText="GetFontSizeText"
                     onChange="OnFontSizeChanged" />
+
+          <!-- 小控件默认每 3 个排一列，不隔开的话「深色主题」会挤进下拉框那一列 -->
+          <separator id="OncOptionsSeparator" />
 
           <toggleButton id="OncDarkTheme"
                         label="深色主题"

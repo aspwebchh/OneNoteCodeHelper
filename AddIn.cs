@@ -338,29 +338,37 @@ namespace OneNoteCodeHelper
             return index == 0 ? AutoDetectLabel : LanguageRegistry.All[index - 1].DisplayName;
         }
 
-        public int GetSelectedLanguageIndex(object control)
+        public string GetLanguageText(object control)
         {
             var settings = _settings ?? (_settings = SettingsStore.Load());
-
-            for (var i = 0; i < LanguageRegistry.All.Count; i++)
-            {
-                if (string.Equals(LanguageRegistry.All[i].Id, settings.LanguageId,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    return i + 1;
-                }
-            }
-
-            return 0;
+            return LanguageRegistry.Find(settings.LanguageId)?.DisplayName ?? AutoDetectLabel;
         }
 
-        public void OnLanguageChanged(object control, string selectedId, int selectedIndex)
+        /// <summary>
+        /// 语言框是 comboBox，传进来的是框里的文字：从列表选的就是显示名，手输的可能是任意大小写的
+        /// 显示名或 id。认不出来就不改设置。
+        /// </summary>
+        public void OnLanguageChanged(object control, string text)
         {
             Guard("切换语言", () =>
             {
-                _settings.LanguageId = selectedId;
-                SettingsStore.Save(_settings);
-                AddInLog.Info("语言切换为 " + selectedId);
+                var input = text?.Trim();
+                var id = string.Equals(input, AutoDetectLabel, StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(input, LanguageRegistry.AutoDetectId, StringComparison.OrdinalIgnoreCase)
+                    ? LanguageRegistry.AutoDetectId
+                    : (LanguageRegistry.All.FirstOrDefault(l =>
+                           string.Equals(l.DisplayName, input, StringComparison.OrdinalIgnoreCase))
+                       ?? LanguageRegistry.Find(input))?.Id;
+
+                if (id != null)
+                {
+                    _settings.LanguageId = id;
+                    SettingsStore.Save(_settings);
+                    AddInLog.Info("语言切换为 " + id);
+                }
+
+                // 和字号一样：刷新一次让框里显示规范的语言名，认不出来的输入也会弹回原值。
+                InvalidateRibbon();
             });
         }
 
