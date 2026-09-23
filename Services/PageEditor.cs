@@ -76,7 +76,7 @@ namespace OneNoteCodeHelper.Services
             var language = LanguageRegistry.Resolve(languageId, code);
             if (language == null)
             {
-                return EditResult.Fail("无法自动判断这段代码是 Java 还是 Lua。请在功能区的「语言」下拉里明确选择后重试。");
+                return EditResult.Fail("无法自动判断这段代码的语言。请在功能区的「语言」下拉里明确选择后重试。");
             }
 
             // 选中的段落必须在同一个父节点下，否则替换后的结构会很怪。

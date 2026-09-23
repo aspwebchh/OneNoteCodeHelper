@@ -38,7 +38,7 @@ $ClassId  = '{441360A0-59D3-4969-9F91-7AF166C512BE}'
 $ProgId   = 'OneNoteCodeHelper.AddIn'
 $AsmName  = 'OneNoteCodeHelper'
 $Friendly = 'OneNote 代码高亮'
-$Descr    = 'Java / Lua 代码语法高亮'
+$Descr    = '代码语法高亮（Java、Lua、PowerShell、Bat、Bash、XML、HTML、CSS）'
 
 # ---------- 1. 必须是管理员 ----------
 $isAdmin = ([Security.Principal.WindowsPrincipal] `

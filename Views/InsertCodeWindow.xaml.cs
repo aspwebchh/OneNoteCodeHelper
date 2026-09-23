@@ -156,7 +156,7 @@ namespace OneNoteCodeHelper.Views
                 {
                     Preview.Document = null;
                     DetectHint.Text = string.Empty;
-                    SetStatus("无法自动判断这段代码的语言，请在左上角手动选择 Java 或 Lua。");
+                    SetStatus("无法自动判断这段代码的语言，请在左上角手动选择语言。");
                     InsertButton.IsEnabled = false;
                     return;
                 }

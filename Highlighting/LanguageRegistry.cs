@@ -13,10 +13,18 @@ namespace OneNoteCodeHelper.Highlighting
         /// <summary>「自动识别」在界面与配置里的标识。</summary>
         internal const string AutoDetectId = "auto";
 
+        /// <summary>顺序即下拉顺序；自动识别打平时也取靠前的那个。</summary>
         internal static IReadOnlyList<ILanguage> All { get; } = new ILanguage[]
         {
             new JavaLanguage(),
-            new LuaLanguage()
+            new LuaLanguage(),
+            new PowerShellLanguage(),
+            new BatLanguage(),
+            new BashLanguage(),
+            new XmlLanguage(),
+            new HtmlLanguage(),
+            new CssLanguage(),
+            new TextLanguage()
         };
 
         internal static ILanguage Find(string id)

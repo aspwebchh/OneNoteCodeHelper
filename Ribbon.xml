@@ -31,7 +31,7 @@
 
           <dropDown id="OncLanguage"
                     label="语言"
-                    sizeString="自动识别xxx"
+                    sizeString="PowerShellxx"
                     screentip="高亮时使用的语言"
                     getItemCount="GetLanguageCount"
                     getItemID="GetLanguageId"
