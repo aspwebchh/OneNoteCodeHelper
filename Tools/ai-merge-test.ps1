@@ -27,7 +27,7 @@ param(
     [switch]$Live,
 
     # 模型 id，要在 ai-settings.xml 的 Models 里
-    [string]$Model = 'deepseek-v4-flash',
+    [string]$Model = 'deepseek-v4.1-flash',
 
     [ValidateSet('none', 'low', 'medium', 'high', 'max')]
     [string]$Effort = 'none'
@@ -165,7 +165,7 @@ foreach ($level in @('low', 'medium', 'high', 'max')) {
 }
 
 Assert-Equal '不认识的值归到 high' ((Invoke-Diag 'DescribeRequestBody' @('ultra')).Contains('"reasoning_effort":"high"')) $true
-Assert-Equal '模型参数是 id' ((Invoke-Diag 'DescribeRequestBody' @('high')).Contains('"model":"deepseek-v4-flash"')) $true
+Assert-Equal '模型参数是 id' ((Invoke-Diag 'DescribeRequestBody' @('high')).Contains('"model":"deepseek-v4.1-flash"')) $true
 
 Write-Host ''
 Write-Host '流式返回：'

@@ -143,7 +143,7 @@ namespace OneNoteCodeHelper.Services
 
         internal const string TypoFunctionName = "错别字修复";
 
-        internal const string DefaultModelId = "deepseek-v4-flash";
+        internal const string DefaultModelId = "deepseek-v4.1-flash";
 
         private const string TypoPrompt =
             "你是一名严谨的中文校对编辑，负责修正笔记里的文字错误：\n" +
@@ -184,17 +184,31 @@ namespace OneNoteCodeHelper.Services
         /// <summary>读配置。文件不存在或写坏了都退回默认值，不抛异常。</summary>
         internal static AiConfig Load()
         {
+            TryLoad(out var config, out _);
+            return config;
+        }
+
+        /// <summary>
+        /// 读配置。读不了（文件正被编辑器写着、XML 写坏了）时返回 false，config 给默认值，error 是原因，已记日志。
+        /// 文件不存在不算失败，给默认值。
+        /// </summary>
+        internal static bool TryLoad(out AiConfig config, out Exception error)
+        {
+            error = null;
+
             try
             {
                 if (!File.Exists(ConfigPath))
                 {
-                    return Default;
+                    config = Default;
+                    return true;
                 }
 
                 var root = XDocument.Load(ConfigPath).Root;
                 if (root == null)
                 {
-                    return Default;
+                    config = Default;
+                    return true;
                 }
 
                 var models = root.Element("Models")?.Elements("Model")
@@ -209,18 +223,21 @@ namespace OneNoteCodeHelper.Services
 
                 var url = Trim((string)root.Element("ApiUrl"));
 
-                return new AiConfig(
+                config = new AiConfig(
                     url.Length > 0 ? url : DefaultApiUrl,
                     Trim((string)root.Element("ApiKey")),
                     ReadInt(root.Element("TimeoutSeconds"), DefaultTimeoutSeconds, 10, 3600),
                     ReadInt(root.Element("MaxTokens"), DefaultMaxTokens, 0, 1024 * 1024),
                     models?.Count > 0 ? models : Default.Models,
                     functions?.Count > 0 ? functions : Default.Functions);
+                return true;
             }
             catch (Exception ex)
             {
-                AddInLog.Warn("读取 AI 配置失败，改用默认值。文件：" + ConfigPath, ex);
-                return Default;
+                AddInLog.Warn("读取 AI 配置失败。文件：" + ConfigPath, ex);
+                config = Default;
+                error = ex;
+                return false;
             }
         }
 

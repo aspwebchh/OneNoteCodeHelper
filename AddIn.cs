@@ -53,8 +53,13 @@ namespace OneNoteCodeHelper
         private int _aiRunning;
         private volatile AiProgressWindow _aiWindow;
 
-        // ai-settings.xml 的内容。点「AI 优化」时、用记事本改完配置后都会重新读。
+        // ai-settings.xml 的内容。点「AI 优化」时、文件被改过之后都会重新读。
         private volatile AiConfig _aiConfig;
+
+        // 盯着 ai-settings.xml，保存后重新读，让功能、模型下拉跟着变。见 WatchAiConfig。
+        private FileSystemWatcher _aiConfigWatcher;
+        private Timer _aiConfigReloadTimer;
+        private int _aiConfigReloadAttempts;
 
         // OnConnection 传进来的两个宿主对象。它们在本代理进程里是跨进程 RCW，
         // 断开时必须主动还回去，见 ReleaseHostReferences。
@@ -140,6 +145,7 @@ namespace OneNoteCodeHelper
 
                 _api = new OneNoteApi(oneNote);
                 _editor = new PageEditor(_api);
+                WatchAiConfig();
                 AddInLog.Info("已连接到 OneNote。");
             }
             catch (Exception ex)
@@ -153,6 +159,7 @@ namespace OneNoteCodeHelper
             try
             {
                 AddInLog.Info($"OnDisconnection，removeMode={removeMode}");
+                StopWatchingAiConfig();
                 _editor = null;
                 _api = null;
                 ReleaseHostReferences();
@@ -614,43 +621,26 @@ namespace OneNoteCodeHelper
         }
 
         /// <summary>
-        /// 用记事本打开 ai-settings.xml（没有就先生成默认的）。记事本关掉后重新读一遍，
-        /// 新加、改名的功能和模型随即出现在下拉里。
+        /// 用系统默认的程序打开 ai-settings.xml（没有就先生成默认的）。保存后由 <see cref="WatchAiConfig"/>
+        /// 重新读，新加、改名的功能和模型随即出现在下拉里。.xml 没有关联任何程序时退回记事本。
         /// </summary>
         public void OnOpenAiConfig(object control)
         {
             Guard("AI 配置", () =>
             {
                 var path = AiConfigStore.EnsureFile();
-                var notepad = Process.Start(new ProcessStartInfo("notepad.exe", "\"" + path + "\"")
-                {
-                    UseShellExecute = false
-                });
+                WatchAiConfig();
 
-                if (notepad == null)
+                try
                 {
-                    return;
+                    Process.Start(new ProcessStartInfo(path) { UseShellExecute = true })?.Dispose();
                 }
-
-                var thread = new Thread(() =>
+                catch (System.ComponentModel.Win32Exception ex)
                 {
-                    try
-                    {
-                        using (notepad)
-                        {
-                            notepad.WaitForExit();
-                        }
-
-                        ReloadAiConfig();
-                        AddInLog.Info("AI 配置已重新读取。");
-                    }
-                    catch (Exception ex)
-                    {
-                        AddInLog.Warn("等待记事本关闭或重新读取 AI 配置失败。", ex);
-                    }
-                });
-                thread.IsBackground = true;
-                thread.Start();
+                    AddInLog.Warn(".xml 没有可用的默认程序，改用记事本打开。", ex);
+                    Process.Start(new ProcessStartInfo("notepad.exe", "\"" + path + "\"") { UseShellExecute = false })
+                        ?.Dispose();
+                }
             });
         }
 
@@ -681,16 +671,112 @@ namespace OneNoteCodeHelper
         /// <summary>重新读 AI 配置；下拉里的功能、模型有变化才刷新功能区，免得每次都闪一下。</summary>
         private AiConfig ReloadAiConfig()
         {
-            var previous = _aiConfig;
             var config = AiConfigStore.Load();
+            ApplyAiConfig(config);
+            return config;
+        }
+
+        private void ApplyAiConfig(AiConfig config)
+        {
+            var previous = _aiConfig;
             _aiConfig = config;
 
             if (!config.HasSameChoices(previous))
             {
                 InvalidateRibbon();
             }
+        }
 
-            return config;
+        /// <summary>
+        /// 开始盯着 ai-settings.xml，已经在盯了就什么都不做。
+        ///
+        /// 配置文件用系统默认的程序打开，常见的 Notepad++、VS Code 都是单实例的：打开文件的那个进程
+        /// 转手交给已经开着的窗口就退出了，没法像以前用记事本时那样等它关掉再读，只能盯着文件本身。
+        /// 编辑器保存时往往连着触发好几次事件（有的还是先写临时文件再改名），所以等安静下来再读。
+        /// </summary>
+        private void WatchAiConfig()
+        {
+            try
+            {
+                var directory = Path.GetDirectoryName(AiConfigStore.ConfigPath);
+                if (_aiConfigWatcher != null || directory == null || !Directory.Exists(directory))
+                {
+                    return;
+                }
+
+                _aiConfigReloadTimer = new Timer(_ => ReloadAiConfigFromFile());
+
+                var watcher = new FileSystemWatcher(directory, Path.GetFileName(AiConfigStore.ConfigPath))
+                {
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size
+                };
+                FileSystemEventHandler onChanged = (_, __) => ScheduleAiConfigReload(0);
+                watcher.Changed += onChanged;
+                watcher.Created += onChanged;
+                watcher.Renamed += (_, __) => ScheduleAiConfigReload(0);
+                watcher.EnableRaisingEvents = true;
+                _aiConfigWatcher = watcher;
+            }
+            catch (Exception ex)
+            {
+                AddInLog.Warn("监视 AI 配置文件失败，改完配置要点一次「AI 优化」才会刷新下拉。", ex);
+            }
+        }
+
+        private void StopWatchingAiConfig()
+        {
+            try
+            {
+                _aiConfigWatcher?.Dispose();
+                _aiConfigReloadTimer?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                AddInLog.Warn("停止监视 AI 配置文件失败。", ex);
+            }
+            finally
+            {
+                _aiConfigWatcher = null;
+                _aiConfigReloadTimer = null;
+            }
+        }
+
+        /// <summary>attempt 是第几次重试，文件事件触发的都是 0。每来一次事件就把读取往后推。</summary>
+        private void ScheduleAiConfigReload(int attempt)
+        {
+            try
+            {
+                Interlocked.Exchange(ref _aiConfigReloadAttempts, attempt);
+                _aiConfigReloadTimer?.Change(attempt == 0 ? 500 : 1000, Timeout.Infinite);
+            }
+            catch (ObjectDisposedException)
+            {
+                // 已经断开了。
+            }
+        }
+
+        private void ReloadAiConfigFromFile()
+        {
+            try
+            {
+                if (AiConfigStore.TryLoad(out var config, out var error))
+                {
+                    ApplyAiConfig(config);
+                    AddInLog.Info("AI 配置已重新读取。");
+                    return;
+                }
+
+                // 编辑器还没写完、文件被占着：过一会儿再读。XML 写坏了就留着原来的配置，等下一次保存。
+                var attempt = Volatile.Read(ref _aiConfigReloadAttempts);
+                if (error is IOException && attempt < 3)
+                {
+                    ScheduleAiConfigReload(attempt + 1);
+                }
+            }
+            catch (Exception ex)
+            {
+                AddInLog.Warn("重新读取 AI 配置失败。", ex);
+            }
         }
 
         /// <summary>

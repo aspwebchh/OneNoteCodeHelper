@@ -190,17 +190,17 @@ namespace OneNoteCodeHelper.Services
         {
             var config = AiConfigStore.Load();
             var function = config.FindFunction(functionName);
-            var model = config.FindModel(modelId);
             var texts = paragraphs.Split('\n');
 
+            // 模型名原样用，不在配置里找：测试时想试哪个模型就试哪个，找不到也不会悄悄换成别的。
             var content = AiClient.CompleteAsync(
-                    config, model.Id, AiEfforts.Normalize(effort),
+                    config, modelId, AiEfforts.Normalize(effort),
                     AiOptimizer.BuildSystemPrompt(function.Prompt),
                     AiOptimizer.BuildUserMessage(texts.Select((text, i) => (i + 1, text))),
                     null, System.Threading.CancellationToken.None)
                 .GetAwaiter().GetResult();
 
-            return $"[{function.Name} · {model.Id} · {AiEfforts.Normalize(effort)}]\n" + ParseAiReply(content);
+            return $"[{function.Name} · {modelId} · {AiEfforts.Normalize(effort)}]\n" + ParseAiReply(content);
         }
 
         private static ILanguage ResolveLanguage(string code, string languageId)

@@ -21,9 +21,9 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 |---|---|
 | AI 优化 | 选中文字后点它，按「功能」里选的方式修改并**直接写回**；什么都不选则处理整页（含标题）。弹一个进度小窗，可以取消 |
 | 功能 | 默认有「错别字修复」「排版优化」两项，选项和提示词都来自配置文件，可以自己加 |
-| 模型 | 直接显示发给接口的模型名，默认 `deepseek-v4-flash` / `deepseek-v4-pro`，来自配置文件 |
+| 模型 | 直接显示发给接口的模型名，默认 `deepseek-v4.1-flash` / `deepseek-v4-pro`，来自配置文件 |
 | 思考 | 思考强度 `none` / `low` / `medium` / `high` / `max`，参数和 opencode 配置里 deepseek 的 variants 一致：`none` 传 `"thinking":{"type":"disabled"}`；其余传 `"thinking":{"type":"enabled"}` 加 `"reasoning_effort":"<变体名>"` |
-| AI 配置 | 用记事本打开配置文件，保存并关闭记事本后生效 |
+| AI 配置 | 用系统默认的程序（.xml 关联的编辑器）打开配置文件，保存后自动重新读取，下拉随即刷新 |
 
 几点行为：
 

@@ -329,6 +329,13 @@ namespace OneNoteCodeHelper.Services
         private static string DescribeHttpError(HttpStatusCode status, object root, string responseText)
         {
             var detail = Get(Get(root, "error"), "message") as string;
+
+            // 模型名是用户在配置里手填的，填了网关上没有的（或者网关还没开通），网关回 503 + model_not_found。
+            if (string.Equals(Get(Get(root, "error"), "code") as string, "model_not_found", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"AI 接口上没有这个模型（HTTP {(int)status}）。请在「模型」里换一个，" +
+                       $"或者检查「AI 配置」里的模型名是否写对、网关是否已经开通。\n{detail}";
+            }
             if (string.IsNullOrWhiteSpace(detail))
             {
                 detail = responseText?.Trim() ?? string.Empty;
