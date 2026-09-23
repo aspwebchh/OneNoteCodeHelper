@@ -32,6 +32,8 @@ namespace OneNoteCodeHelper.Highlighting
             new XmlLanguage(),
             new HtmlLanguage(),
             new CssLanguage(),
+            new JsonLanguage(),
+            new YamlLanguage(),
             new TextLanguage()
         };
 

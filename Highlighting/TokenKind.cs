@@ -9,10 +9,10 @@ namespace OneNoteCodeHelper.Highlighting
         /// <summary>语言关键字。</summary>
         Keyword,
 
-        /// <summary>字面量关键字：Java 的 true/false/null、Lua 的 nil、PowerShell 的 $true/$null 等。</summary>
+        /// <summary>字面量关键字：Java 的 true/false/null、Lua 的 nil、PowerShell 的 $true/$null、YAML 的 yes/no/~ 等。</summary>
         Literal,
 
-        /// <summary>类型名（Java 里按大写开头的标识符启发式判定；PowerShell 的 [type]；CSS 的 .class）。</summary>
+        /// <summary>类型名（Java 里按大写开头的标识符启发式判定；PowerShell 的 [type]；CSS 的 .class；YAML 的 !tag）。</summary>
         Type,
 
         /// <summary>常量（全大写标识符，如 MAX_SIZE；XML/HTML 实体；CSS 的 #id）。</summary>
@@ -24,13 +24,13 @@ namespace OneNoteCodeHelper.Highlighting
         /// <summary>语言内置库、内置函数与内置命令（Lua 标准库、Bash/Bat 内置命令）。</summary>
         Builtin,
 
-        /// <summary>变量引用：$var、${var}、%VAR%、!VAR!、%%i、CSS 的 --custom-prop。</summary>
+        /// <summary>变量引用：$var、${var}、%VAR%、!VAR!、%%i、CSS 的 --custom-prop、YAML 的 &amp;anchor 与 *alias。</summary>
         Variable,
 
         /// <summary>XML/HTML 标签名，以及 CSS 的元素选择器。</summary>
         Tag,
 
-        /// <summary>XML/HTML 属性名、CSS 属性名、命令行参数与开关（-Path、--flag、/Q）。</summary>
+        /// <summary>XML/HTML 属性名、CSS 属性名、JSON/YAML 的键、命令行参数与开关（-Path、--flag、/Q）。</summary>
         Attribute,
 
         /// <summary>字符串字面量，含 Lua 长字符串、Java 文本块、here-string 与 heredoc。</summary>
