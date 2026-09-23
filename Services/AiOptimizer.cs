@@ -35,6 +35,66 @@ namespace OneNoteCodeHelper.Services
     }
 
     /// <summary>
+    /// 一次「AI 优化」的结果，进度窗按它画结果区。Error 不为 null 表示失败，这时其余字段没有意义。
+    /// </summary>
+    internal sealed class AiReport
+    {
+        private AiReport(string error)
+        {
+            Error = error;
+            Changes = Array.Empty<string>();
+        }
+
+        internal AiReport(string scope, IReadOnlyList<string> changes, int applied, int removedBlankLines,
+            int conflicted)
+        {
+            Scope = scope;
+            Changes = changes;
+            Applied = applied;
+            RemovedBlankLines = removedBlankLines;
+            Conflicted = conflicted;
+        }
+
+        internal string Error { get; }
+
+        internal bool Success => Error == null;
+
+        /// <summary>「整页」或「选中的」。</summary>
+        internal string Scope { get; }
+
+        /// <summary>AI 自己给的改动说明，只算真正写回了的段落，已去重。</summary>
+        internal IReadOnlyList<string> Changes { get; }
+
+        /// <summary>写回了改动的段落数。不显示，只用来判断页面有没有动、AI 有没有漏写说明。</summary>
+        internal int Applied { get; }
+
+        /// <summary>删掉的空行数。同上，不显示。</summary>
+        internal int RemovedBlankLines { get; }
+
+        /// <summary>处理期间被用户改过、为了不覆盖而跳过的段落数。不单独提示，只用来选结果的状态。</summary>
+        internal int Conflicted { get; }
+
+        /// <summary>页面有没有被改动。</summary>
+        internal bool Changed => Applied + RemovedBlankLines > 0;
+
+        internal static AiReport Failed(string message) => new AiReport(message ?? "AI 优化失败。");
+    }
+
+    /// <summary>AI 对一个段落的回复：改后的全文，和它自己写的改动说明（可能为空）。</summary>
+    internal sealed class AiParagraphReply
+    {
+        internal AiParagraphReply(string text, IReadOnlyList<string> changes)
+        {
+            Text = text;
+            Changes = changes;
+        }
+
+        internal string Text { get; }
+
+        internal IReadOnlyList<string> Changes { get; }
+    }
+
+    /// <summary>
     /// 一次「AI 优化」：读段落 → 分批问 AI → 写回。整个过程在线程池（MTA）上跑，
     /// 和「高亮选中」一样直接调 OneNote 的 COM 对象，不用封送。
     /// </summary>
@@ -49,22 +109,19 @@ namespace OneNoteCodeHelper.Services
         /// <summary>流式返回时，进度最多每隔这么久（毫秒）刷新一次。</summary>
         private const int ReportIntervalMs = 200;
 
-        /// <summary>
-        /// 新旧文本相似度低于这个值的段落不写回。结果是直接替换、没有人工把关，
-        /// 这是防模型「自由发挥」把整段改写掉的安全阀。改错字、加空格远到不了这么低。
-        /// </summary>
-        internal const double MinSimilarity = 0.6;
-
         /// <summary>接在用户提示词后面的固定约定。放在代码里，用户改提示词也不会破坏输入输出格式。</summary>
         private const string Protocol =
             "【输入格式】用户消息是一个 JSON 对象：{\"paragraphs\":[{\"id\":段落编号,\"text\":\"段落原文\"}]}，" +
             "每一项是笔记里的一个段落。\n" +
             "【输出要求】\n" +
-            "1. 只输出一个 JSON 对象：{\"paragraphs\":[{\"id\":段落编号,\"text\":\"修改后的完整段落\"}]}，" +
-            "不要输出任何解释，也不要用 Markdown 代码块包裹。\n" +
+            "1. 只输出一个 JSON 对象：" +
+            "{\"paragraphs\":[{\"id\":段落编号,\"text\":\"修改后的完整段落\",\"changes\":[\"改动说明\"]}]}，" +
+            "不要在 JSON 之外输出任何解释，也不要用 Markdown 代码块包裹。\n" +
             "2. 只列出确实做了修改的段落；没有任何修改时输出 {\"paragraphs\":[]}。\n" +
             "3. id 必须与输入对应。每个段落单独处理：不能合并、拆分或调换段落，text 里不要加入换行。\n" +
-            "4. 段落中的代码、命令、网址、文件路径、邮箱地址保持原样。";
+            "4. 段落中的代码、命令、网址、文件路径、邮箱地址保持原样。\n" +
+            "5. changes 用简短的中文逐条说明这一段改了什么，每条只说一件事，" +
+            "例如 \"帐号 → 账号\"、\"中英文之间加空格\"；同一类改动合成一条。";
 
         private readonly PageEditor _editor;
 
@@ -85,14 +142,14 @@ namespace OneNoteCodeHelper.Services
             _effort = effort;
         }
 
-        internal async Task<EditResult> RunAsync(IProgress<AiProgress> progress, CancellationToken cancellation)
+        internal async Task<AiReport> RunAsync(IProgress<AiProgress> progress, CancellationToken cancellation)
         {
             progress.Report(new AiProgress("正在读取页面…"));
 
             var read = _editor.ReadAiTargets(out var targets);
             if (!read.Success)
             {
-                return read;
+                return AiReport.Failed(read.Message);
             }
 
             var paragraphs = targets.Paragraphs;
@@ -104,29 +161,21 @@ namespace OneNoteCodeHelper.Services
                 .ConfigureAwait(false);
 
             var edits = new List<AiParagraphEdit>();
-            var rejected = 0;
 
             for (var i = 0; i < paragraphs.Count; i++)
             {
                 var source = paragraphs[i];
                 var text = source.Text;
+                IReadOnlyList<string> changes = Array.Empty<string>();
 
+                // AI 回了什么就用什么，不再按改动大小把关。
                 if (replies.TryGetValue(i, out var reply))
                 {
-                    var cleaned = CleanReplyText(source.Text, reply);
-                    var similarity = TextDiff.Similarity(source.Text, cleaned);
-                    if (similarity < MinSimilarity)
-                    {
-                        rejected++;
-                        AddInLog.Warn($"AI 改动过大（相似度 {similarity:0.00}），没有写回：{source.ObjectId}");
-                    }
-                    else
-                    {
-                        text = cleaned;
-                    }
+                    text = CleanReplyText(source.Text, reply.Text);
+                    changes = reply.Changes;
                 }
 
-                // 段内多余的换行由插件自己删，AI 没改或者改动被拒的段落也照样删。
+                // 段内多余的换行由插件自己删，AI 没改的段落也照样删。
                 if (_function.RemoveExtraBlankLines)
                 {
                     text = BlankLines.CollapseInText(text);
@@ -134,14 +183,14 @@ namespace OneNoteCodeHelper.Services
 
                 if (text != source.Text)
                 {
-                    edits.Add(new AiParagraphEdit(source, text));
+                    edits.Add(new AiParagraphEdit(source, text, changes));
                 }
             }
 
             // 开始写回之后就不再响应取消：写到一半停下来，页面会处在谁也说不清的状态。
             cancellation.ThrowIfCancellationRequested();
 
-            var applied = 0;
+            var applied = new List<AiParagraphEdit>();
             var conflicted = 0;
             var removedBlankLines = 0;
 
@@ -154,51 +203,43 @@ namespace OneNoteCodeHelper.Services
                     out applied, out conflicted, out removedBlankLines);
                 if (!write.Success)
                 {
-                    return write;
+                    return AiReport.Failed(write.Message);
                 }
             }
 
-            var message = new StringBuilder($"完成：{scope} {paragraphs.Count} 段中");
-            if (applied > 0)
-            {
-                message.Append($"改了 {applied} 段");
-            }
-            else
-            {
-                message.Append(removedBlankLines > 0 ? "文字没有需要修改的地方" : "没有发现需要修改的地方");
-            }
+            AddInLog.Info($"AI 优化结束：改了 {applied.Count} 段，删了 {removedBlankLines} 个空行，跳过 {conflicted} 段。");
 
-            if (removedBlankLines > 0)
-            {
-                message.Append($"，另外删掉了 {removedBlankLines} 个多余的空行");
-            }
+            // 只汇总真正写回了的段落：处理期间被用户改过而跳过的，它们的说明不算数。
+            return new AiReport(scope, MergeChanges(applied.Select(e => e.Changes)), applied.Count,
+                removedBlankLines, conflicted);
+        }
 
-            message.Append('。');
+        /// <summary>把各段的改动说明按先后顺序连起来，去掉重复的和空的。</summary>
+        internal static List<string> MergeChanges(IEnumerable<IReadOnlyList<string>> changes)
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var result = new List<string>();
 
-            if (conflicted > 0)
+            foreach (var change in changes.SelectMany(c => c))
             {
-                message.Append($"\n另有 {conflicted} 段在处理期间被改过，为了不覆盖你的修改已跳过。");
-            }
-
-            if (rejected > 0)
-            {
-                message.Append($"\n另有 {rejected} 段 AI 改动过大，没有采用。");
+                var text = change?.Trim();
+                if (!string.IsNullOrEmpty(text) && seen.Add(text))
+                {
+                    result.Add(text);
+                }
             }
 
-            AddInLog.Info($"AI 优化结束：改了 {applied} 段，删了 {removedBlankLines} 个空行，跳过 {conflicted} 段，拒绝 {rejected} 段。");
-            // 什么都没改也要让用户看到，否则进度窗一闪就没了，分不清是没东西可改还是没跑。
-            return EditResult.Ok(message.ToString(),
-                needsAttention: conflicted > 0 || rejected > 0 || (applied == 0 && removedBlankLines == 0));
+            return result;
         }
 
         /// <summary>
-        /// 分批并发地问 AI，返回「段落下标 → 新文本」。任何一批失败就取消其余的，抛出那一批的异常。
+        /// 分批并发地问 AI，返回「段落下标 → AI 的回复」。任何一批失败就取消其余的，抛出那一批的异常。
         /// </summary>
-        private async Task<Dictionary<int, string>> AskInBatchesAsync(IReadOnlyList<AiParagraph> paragraphs,
+        private async Task<Dictionary<int, AiParagraphReply>> AskInBatchesAsync(IReadOnlyList<AiParagraph> paragraphs,
             List<List<int>> batches, string scope, IProgress<AiProgress> progress, CancellationToken cancellation)
         {
             var systemPrompt = BuildSystemPrompt(_function.Prompt);
-            var results = new Dictionary<int, string>();
+            var results = new Dictionary<int, AiParagraphReply>();
             var sync = new object();
             var done = 0;
             var reasoningChars = 0;
@@ -367,10 +408,10 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>
-        /// 解析模型的输出，返回「id → 新文本」。容忍外面包了 ``` 代码块、直接给了数组、id 写成字符串。
-        /// 格式完全不对时抛 <see cref="AiException"/>。
+        /// 解析模型的输出，返回「id → 回复」。容忍外面包了 ``` 代码块、直接给了数组、id 写成字符串，
+        /// changes 缺了、或者写成了单个字符串。格式完全不对时抛 <see cref="AiException"/>。
         /// </summary>
-        internal static Dictionary<int, string> ParseReply(string content)
+        internal static Dictionary<int, AiParagraphReply> ParseReply(string content)
         {
             var json = StripCodeFence(content);
 
@@ -390,7 +431,7 @@ namespace OneNoteCodeHelper.Services
                 throw new AiException("AI 返回的 JSON 里没有 paragraphs 数组，没有写回。可以换个模型或者再试一次。");
             }
 
-            var result = new Dictionary<int, string>();
+            var result = new Dictionary<int, AiParagraphReply>();
             foreach (var item in list)
             {
                 var id = AiClient.Get(item, "id");
@@ -399,11 +440,26 @@ namespace OneNoteCodeHelper.Services
                 if (text != null && int.TryParse(Convert.ToString(id, CultureInfo.InvariantCulture),
                         NumberStyles.Integer, CultureInfo.InvariantCulture, out var number))
                 {
-                    result[number] = text;
+                    result[number] = new AiParagraphReply(text, ReadChanges(AiClient.Get(item, "changes")));
                 }
             }
 
             return result;
+        }
+
+        /// <summary>说明只是给人看的，写得不规范也不影响写回：不是字符串的项跳过，空的丢掉。</summary>
+        private static IReadOnlyList<string> ReadChanges(object value)
+        {
+            var items = value is string single ? new object[] { single } : value as IList;
+            if (items == null)
+            {
+                return Array.Empty<string>();
+            }
+
+            return items.OfType<string>()
+                .Select(s => s.Trim())
+                .Where(s => s.Length > 0)
+                .ToList();
         }
 
         /// <summary>

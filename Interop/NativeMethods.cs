@@ -23,6 +23,8 @@ namespace OneNoteCodeHelper.Interop
 
         private const int StreamSeekSet = 0;
 
+        private const int DwmwaCaptionColor = 35;
+
         [StructLayout(LayoutKind.Sequential)]
         private struct Rect
         {
@@ -69,6 +71,25 @@ namespace OneNoteCodeHelper.Interop
         [DllImport("ole32.dll")]
         private static extern int CreateStreamOnHGlobal(IntPtr global, [MarshalAs(UnmanagedType.Bool)] bool deleteOnRelease,
             out IStream stream);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+        /// <summary>
+        /// 把标题栏刷成 color，和窗口底色一样时看起来是一整块。Windows 11 才支持这个属性，
+        /// 更早的系统返回错误码、什么也不发生，所以不看返回值。
+        /// </summary>
+        internal static void TrySetCaptionColor(IntPtr window, System.Windows.Media.Color color)
+        {
+            if (window == IntPtr.Zero)
+            {
+                return;
+            }
+
+            // COLORREF 是 0x00BBGGRR。
+            var colorRef = color.R | (color.G << 8) | (color.B << 16);
+            DwmSetWindowAttribute(window, DwmwaCaptionColor, ref colorRef, sizeof(int));
+        }
 
         /// <summary>
         /// 弹一个以 owner 为属主的提示框，阻塞到用户点掉为止。

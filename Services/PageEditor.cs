@@ -12,27 +12,19 @@ namespace OneNoteCodeHelper.Services
     /// <summary>一次页面操作的结果。失败时带一句可以直接给用户看的中文说明。</summary>
     internal sealed class EditResult
     {
-        private EditResult(bool success, string message, bool needsAttention)
+        private EditResult(bool success, string message)
         {
             Success = success;
             Message = message;
-            NeedsAttention = needsAttention;
         }
 
         internal bool Success { get; }
 
         internal string Message { get; }
 
-        /// <summary>
-        /// 结果里有用户该看一眼的话（失败、有段落被跳过、什么都没改）。
-        /// 为 false 时改动已经在页面上看得到，AI 优化的进度窗直接关掉，不再停留。
-        /// </summary>
-        internal bool NeedsAttention { get; }
+        internal static EditResult Ok(string message = null) => new EditResult(true, message);
 
-        internal static EditResult Ok(string message = null, bool needsAttention = false) =>
-            new EditResult(true, message, needsAttention);
-
-        internal static EditResult Fail(string message) => new EditResult(false, message, true);
+        internal static EditResult Fail(string message) => new EditResult(false, message);
     }
 
     /// <summary>要交给 AI 处理的一个段落。</summary>
@@ -54,15 +46,19 @@ namespace OneNoteCodeHelper.Services
     /// <summary>AI 改过的一个段落。</summary>
     internal sealed class AiParagraphEdit
     {
-        internal AiParagraphEdit(AiParagraph source, string newText)
+        internal AiParagraphEdit(AiParagraph source, string newText, IReadOnlyList<string> changes)
         {
             Source = source;
             NewText = newText;
+            Changes = changes;
         }
 
         internal AiParagraph Source { get; }
 
         internal string NewText { get; }
+
+        /// <summary>AI 对这一段写的改动说明。只删了段内空行、或 AI 的改动没采用时为空。</summary>
+        internal IReadOnlyList<string> Changes { get; }
     }
 
     /// <summary>一次 AI 优化的处理对象：哪一页、哪些段落、是不是因为没选中文字而处理了整页。</summary>
@@ -293,12 +289,12 @@ namespace OneNoteCodeHelper.Services
         /// AI 要跑好一阵，这期间用户可能还在改这一页，所以不能拿开始时读到的页面写回：
         /// 重新读一遍，按 objectID 找回每一段，文字和当初发给 AI 的一样才改，否则跳过（计入 conflicted）。
         /// 哪些是空行也按重新读到的页面算，处理期间在空行里打了字的就不会被删。
-        /// 只回传有改动的那几个文本框 / 标题。
+        /// 只回传有改动的那几个文本框 / 标题。applied 是真正写上去的那些。
         /// </summary>
         internal EditResult ApplyParagraphEdits(AiTargets targets, IReadOnlyList<AiParagraphEdit> edits,
-            bool removeBlankLines, out int applied, out int conflicted, out int removedBlankLines)
+            bool removeBlankLines, out List<AiParagraphEdit> applied, out int conflicted, out int removedBlankLines)
         {
-            applied = 0;
+            applied = new List<AiParagraphEdit>();
             conflicted = 0;
             removedBlankLines = 0;
 
@@ -332,7 +328,7 @@ namespace OneNoteCodeHelper.Services
                 }
 
                 rich.Apply(edit.NewText);
-                applied++;
+                applied.Add(edit);
                 changedContainers.Add(oe.AncestorsAndSelf().First(e => e.Parent == page));
             }
 
@@ -341,7 +337,7 @@ namespace OneNoteCodeHelper.Services
                 removedBlankLines = BlankLines.RemoveFromPage(page, targets.Covers, changedContainers);
             }
 
-            if (applied == 0 && removedBlankLines == 0)
+            if (applied.Count == 0 && removedBlankLines == 0)
             {
                 return EditResult.Ok();
             }
@@ -349,7 +345,7 @@ namespace OneNoteCodeHelper.Services
             // 按页面上的先后顺序回传，标题在文本框前面。
             var changed = page.Elements().Where(changedContainers.Contains).ToArray();
             return Submit(pageId, page, BuildPageChanges(pageId, changed),
-                $"AI 已修改 {applied} 段，删掉 {removedBlankLines} 个空行。");
+                $"AI 已修改 {applied.Count} 段，删掉 {removedBlankLines} 个空行。");
         }
 
         /// <summary>

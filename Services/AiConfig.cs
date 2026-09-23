@@ -154,20 +154,38 @@ namespace OneNoteCodeHelper.Services
 
         private const string RemoveBlankLinesAttribute = "removeExtraBlankLines";
 
-        private const string TypoPrompt =
-            "你是一名严谨的中文校对编辑，负责修正笔记里的文字错误：\n" +
+        private const string CombinedFunctionName = "错别字 + 排版";
+
+        /// <summary>「错别字修复」要改的几类错误，「错别字 + 排版」也用这一份。</summary>
+        private const string TypoRules =
             "- 错别字、同音字和形近字误用（如「在/再」「的/地/得」用错）；\n" +
             "- 漏字、多字、重复的字词；\n" +
-            "- 明显的标点错误，以及英文单词的拼写错误。\n" +
+            "- 明显的标点错误，以及英文单词的拼写错误。\n";
+
+        /// <summary>「排版优化」的几条规则，「错别字 + 排版」也用这一份。</summary>
+        private const string LayoutRules =
+            "- 中文与英文、中文与数字之间加一个半角空格；数字与单位按惯例处理（如 10 GB、20%）；\n" +
+            "- 中文语境使用全角标点，英文句子内部使用半角标点；\n" +
+            "- 去掉多余的空格，修正重复或误用的标点；\n" +
+            "- 专有名词使用正确的大小写（如 GitHub、iOS、JavaScript）。\n";
+
+        private const string TypoPrompt =
+            "你是一名严谨的中文校对编辑，负责修正笔记里的文字错误：\n" +
+            TypoRules +
             "只改错误本身：不要改写句子，不要调整语气和用词风格，不要增删内容。没有错误的段落保持原样。";
 
         private const string LayoutPrompt =
             "你是一名中文排版编辑，请参照《中文文案排版指北》优化每个段落的排版：\n" +
-            "- 中文与英文、中文与数字之间加一个半角空格；数字与单位按惯例处理（如 10 GB、20%）；\n" +
-            "- 中文语境使用全角标点，英文句子内部使用半角标点；\n" +
-            "- 去掉多余的空格，修正重复或误用的标点；\n" +
-            "- 专有名词使用正确的大小写（如 GitHub、iOS、JavaScript）。\n" +
+            LayoutRules +
             "只调整排版，不要改动文字内容和意思，不要改写句子。";
+
+        private const string CombinedPrompt =
+            "你是一名严谨的中文校对和排版编辑，对每个段落同时做两件事。\n" +
+            "一、修正文字错误：\n" +
+            TypoRules +
+            "二、参照《中文文案排版指北》优化排版：\n" +
+            LayoutRules +
+            "只改错误和排版：不要改写句子，不要调整语气和用词风格，不要增删内容。没有问题的段落保持原样。";
 
         internal static string ConfigPath { get; } = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -187,7 +205,8 @@ namespace OneNoteCodeHelper.Services
             new[]
             {
                 new AiFunction(TypoFunctionName, TypoPrompt),
-                new AiFunction("排版优化", LayoutPrompt, removeExtraBlankLines: true)
+                new AiFunction("排版优化", LayoutPrompt, removeExtraBlankLines: true),
+                new AiFunction(CombinedFunctionName, CombinedPrompt, removeExtraBlankLines: true)
             });
 
         /// <summary>读配置。文件不存在或写坏了都退回默认值，不抛异常。</summary>

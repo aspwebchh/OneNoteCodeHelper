@@ -136,17 +136,25 @@ Assert-Equal 'img 拼不回去' (Invoke-Diag 'ParagraphText' @((New-Paragraph @(
 Assert-Equal '闭标签对不上' (Invoke-Diag 'ParagraphText' @((New-Paragraph @('文字</span>')))) 'UNSUPPORTED'
 
 Write-Host ''
-Write-Host '相似度与模型输出：'
-
-$similar = Invoke-Diag 'TextSimilarity' @('今天去公圆玩。', '今天去公园玩。')
-Assert-Equal '改一个字的相似度高于安全阀' ($similar -ge 0.6) $true
-$different = Invoke-Diag 'TextSimilarity' @('今天天气很好，适合出去走走。', '完全不同的另一句话')
-Assert-Equal '整段改写的相似度低于安全阀' ($different -lt 0.6) $true
+Write-Host '模型输出：'
 
 Assert-Equal '解析：去代码块、id 是字符串也认' `
     (Invoke-Diag 'ParseAiReply' @("``````json`n{`"paragraphs`":[{`"id`":2,`"text`":`"b`"},{`"id`":`"1`",`"text`":`"a`"}]}`n``````")) `
     "1=a`n2=b"
 Assert-Equal '解析：空结果' (Invoke-Diag 'ParseAiReply' @('{"paragraphs":[]}')) ''
+Assert-Equal '解析：带改动说明' `
+    (Invoke-Diag 'ParseAiReply' @('{"paragraphs":[{"id":1,"text":"a","changes":["帐号 → 账号"," 加空格 ",""]}]}')) `
+    '1=a [帐号 → 账号; 加空格]'
+Assert-Equal '解析：改动说明写成字符串' `
+    (Invoke-Diag 'ParseAiReply' @('{"paragraphs":[{"id":1,"text":"a","changes":"修正错字"}]}')) `
+    '1=a [修正错字]'
+Assert-Equal '解析：改动说明里不是字符串的跳过' `
+    (Invoke-Diag 'ParseAiReply' @('{"paragraphs":[{"id":1,"text":"a","changes":[1,null,"x"]}]}')) `
+    '1=a [x]'
+
+Assert-Equal '汇总改动：去重保序、丢空的' `
+    (Invoke-Diag 'MergeAiChanges' @('加空格;帐号 → 账号|| 加空格 ;的 → 地')) `
+    '加空格|帐号 → 账号|的 → 地'
 
 Assert-Equal '去换行：英文之间补空格' (Invoke-Diag 'CleanAiReplyText' @('abc', "hello`nworld")) 'hello world'
 Assert-Equal '去换行：中文直接接上' (Invoke-Diag 'CleanAiReplyText' @('中文', "第一`r`n第二")) '第一第二'
@@ -270,23 +278,27 @@ Test-Blank '选区里只有一行空行时只删它' @($selection) '1: A|_|_|B' 
 $oldConfig = '<AiConfig><Functions>' +
     '<Function name="错别字修复"><Prompt>p</Prompt></Function>' +
     '<Function name="排版优化"><Prompt>p</Prompt></Function>' +
+    '<Function name="错别字 + 排版"><Prompt>p</Prompt></Function>' +
     '<Function name="自定义" removeExtraBlankLines="true"><Prompt>p</Prompt></Function>' +
     '</Functions></AiConfig>'
 Assert-Equal '配置：没写属性时跟同名的内置功能走，自定义功能可以打开' `
-    (Invoke-Diag 'DescribeAiFunctions' @($oldConfig)) '错别字修复=False|排版优化=True|自定义=True'
+    (Invoke-Diag 'DescribeAiFunctions' @($oldConfig)) '错别字修复=False|排版优化=True|错别字 + 排版=True|自定义=True'
 Assert-Equal '配置：写 false 可以关掉' `
     (Invoke-Diag 'DescribeAiFunctions' @('<AiConfig><Functions><Function name="排版优化" removeExtraBlankLines="false"><Prompt>p</Prompt></Function></Functions></AiConfig>')) `
     '排版优化=False'
 Assert-Equal '配置：默认文件里排版优化写明了这个属性' `
     ((Invoke-Diag 'DefaultAiConfigXml' @()).Contains('<Function name="排版优化" removeExtraBlankLines="true">')) $true
+Assert-Equal '配置：默认文件里有「错别字 + 排版」，也删空行' `
+    ((Invoke-Diag 'DefaultAiConfigXml' @()).Contains('<Function name="错别字 + 排版" removeExtraBlankLines="true">')) $true
 
 if ($Live) {
     Write-Host ''
     Write-Host '真调接口：'
     $typo = "今天天气很好，我们一起去公圆玩。`n这段没有错误。`n他的成积在班里名列前茅，大家都很佩服他。"
     $layout = "我们使用GitHub管理代码,一共有10个项目。`n今天学习了javascript的闭包。"
+    $combined = "我们再github上管理代码,一共有10个项目。`n今天学习了javascript的必包。"
 
-    foreach ($case in @(@('错别字修复', $typo), @('排版优化', $layout))) {
+    foreach ($case in @(@('错别字修复', $typo), @('排版优化', $layout), @('错别字 + 排版', $combined))) {
         $watch = [System.Diagnostics.Stopwatch]::StartNew()
         $result = Invoke-Diag 'RunAiSample' @($case[0], $Model, $Effort, $case[1])
         Write-Host ("{0}（{1:0.0}s）" -f $result, $watch.Elapsed.TotalSeconds)

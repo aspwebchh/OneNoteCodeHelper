@@ -486,7 +486,6 @@ namespace OneNoteCodeHelper
                 var function = config.FindFunction(_settings.AiFunction);
                 var model = config.FindModel(_settings.AiModel);
                 var effort = AiEfforts.Normalize(_settings.AiEffort);
-                var caption = $"{function.Name} · {model.Id} · {effort}";
 
                 // 进度窗和插入窗口一样要 STA 线程；真正的活在窗口里交给线程池（MTA）去跑。
                 RunInBackground("AI 优化", ApartmentState.STA, owner, () =>
@@ -495,7 +494,7 @@ namespace OneNoteCodeHelper
                     try
                     {
                         var optimizer = new AiOptimizer(editor, config, function, model, effort);
-                        window = new AiProgressWindow(caption, optimizer.RunAsync, owner);
+                        window = new AiProgressWindow(function.Name, model.Id, effort, optimizer.RunAsync, owner);
                         _aiWindow = window;
                         window.ShowDialog();
                     }

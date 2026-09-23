@@ -126,17 +126,22 @@ namespace OneNoteCodeHelper.Services
             return string.Join("|", oe.Elements(OneNoteApi.One + "T").Select(t => t.Value));
         }
 
-        internal static double TextSimilarity(string oldText, string newText)
-        {
-            return TextDiff.Similarity(oldText, newText);
-        }
-
-        /// <summary>解析模型输出，返回 "id=文本" 逐行，按 id 排序。</summary>
+        /// <summary>解析模型输出，返回 "id=文本" 逐行，按 id 排序；有改动说明时后面跟 " [说明1; 说明2]"。</summary>
         internal static string ParseAiReply(string content)
         {
             return string.Join("\n", AiOptimizer.ParseReply(content)
                 .OrderBy(x => x.Key)
-                .Select(x => x.Key + "=" + x.Value));
+                .Select(x => x.Key + "=" + x.Value.Text +
+                             (x.Value.Changes.Count > 0 ? " [" + string.Join("; ", x.Value.Changes) + "]" : "")));
+        }
+
+        /// <summary>
+        /// 汇总各段的改动说明。paragraphs 里段与段用 | 隔开，一段里的说明用 ; 隔开；返回汇总后的清单，用 | 隔开。
+        /// </summary>
+        internal static string MergeAiChanges(string paragraphs)
+        {
+            return string.Join("|", AiOptimizer.MergeChanges(paragraphs.Split('|')
+                .Select(p => (IReadOnlyList<string>)p.Split(';'))));
         }
 
         internal static string CleanAiReplyText(string original, string text)

@@ -28,7 +28,7 @@ namespace OneNoteCodeHelper.Services
     }
 
     /// <summary>
-    /// 逐字符的文本差异。用来把 AI 改过的段落文字合并回原来带格式的段落，以及估计 AI 改了多少。
+    /// 逐字符的文本差异。用来把 AI 改过的段落文字合并回原来带格式的段落。
     /// </summary>
     internal static class TextDiff
     {
@@ -96,27 +96,6 @@ namespace OneNoteCodeHelper.Services
             }
 
             return ops;
-        }
-
-        /// <summary>保留下来的字符占较长一方的比例，1 表示完全相同。</summary>
-        internal static double Similarity(string oldText, string newText)
-        {
-            var longer = Math.Max(oldText?.Length ?? 0, newText?.Length ?? 0);
-            if (longer == 0)
-            {
-                return 1;
-            }
-
-            var kept = 0;
-            foreach (var op in Compute(oldText, newText))
-            {
-                if (op.Kind == DiffKind.Keep)
-                {
-                    kept++;
-                }
-            }
-
-            return kept / (double)longer;
         }
 
         private static void AppendLcsOps(List<DiffOp> ops,
