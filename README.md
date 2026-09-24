@@ -88,6 +88,14 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 | `-Force` | OneNote 不肯退出时强制结束进程。默认只礼貌请求，失败就停下来，免得丢掉未保存内容 |
 | `-NoRestart` | 完成后不自动重开 OneNote |
 
+卸载时运行根目录的 `uninstall.ps1`，会自动提权并关闭 OneNote：
+
+```
+powershell -ExecutionPolicy Bypass -File uninstall.ps1
+```
+
+卸载脚本也支持 `-Force` 和 `-NoRestart`。卸载只清理注册表项，保留设置和日志。
+
 也可以只跑注册这一步（前提：**管理员身份的 PowerShell**、OneNote 已关闭、且已经构建过）：
 
 ```
@@ -151,6 +159,7 @@ Views/
   CodePreviewRenderer.cs    用同一套 token 流渲染 WPF 预览
   AiProgressWindow.xaml     AI 优化的进度小窗
 install.ps1                 一键构建 + 安装 / 卸载
+uninstall.ps1               一键卸载入口
 Tools/register.ps1          只做注册这一步
 Tools/unregister.ps1        只做注销这一步
 Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-samples/<语言 id>/ 下

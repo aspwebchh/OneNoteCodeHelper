@@ -22,7 +22,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] `
 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
-    Write-Error '需要管理员权限：COM 类注册在 HKLM 下。请用管理员身份重新运行（或用根目录的 install.ps1 -Uninstall，它会帮你提权）。'
+    Write-Error '需要管理员权限：COM 类注册在 HKLM 下。请用管理员身份重新运行（或用根目录的 uninstall.ps1，它会帮你提权）。'
     exit 1
 }
 
