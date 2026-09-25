@@ -317,7 +317,7 @@ namespace OneNoteCodeHelper.Services
             return body;
         }
 
-        /// <summary>配置里写到 /v1 为止；已经写全了 /chat/completions 的也认。</summary>
+        /// <summary>在配置的基础地址后补上 /chat/completions；已写全的地址直接使用。</summary>
         private static string BuildEndpoint(string apiUrl)
         {
             var url = (apiUrl ?? string.Empty).Trim().TrimEnd('/');

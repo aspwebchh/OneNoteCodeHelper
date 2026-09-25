@@ -103,7 +103,7 @@
           -->
           <dropDown id="OncAiFunction"
                     label="功能"
-                    sizeString="deepseek-v4.1-flashx"
+                    sizeString="deepseek-v4-flashx"
                     screentip="AI 要做什么"
                     supertip="选项和对应的提示词都在「AI 配置」里，可以自己加。"
                     getItemCount="GetAiFunctionCount"
@@ -114,7 +114,7 @@
 
           <dropDown id="OncAiModel"
                     label="模型"
-                    sizeString="deepseek-v4.1-flashx"
+                    sizeString="deepseek-v4-flashx"
                     screentip="用哪个模型"
                     supertip="发给接口的模型名。pro 效果更好，flash 更快。列表来自「AI 配置」。"
                     getItemCount="GetAiModelCount"
@@ -125,7 +125,7 @@
 
           <dropDown id="OncAiEffort"
                     label="思考"
-                    sizeString="deepseek-v4.1-flashx"
+                    sizeString="deepseek-v4-flashx"
                     screentip="思考强度"
                     supertip="none 不思考，最快；low → max 思考越来越多，越慢，但更不容易漏改、改错。"
                     getItemCount="GetAiEffortCount"

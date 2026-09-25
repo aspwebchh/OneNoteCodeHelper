@@ -40,7 +40,7 @@ namespace OneNoteCodeHelper.Services
         public bool ShowBorders { get; set; } = true;
 
         /// <summary>「AI 优化」用哪个功能，存 ai-settings.xml 里 Function 的 name。</summary>
-        public string AiFunction { get; set; } = AiConfigStore.TypoFunctionName;
+        public string AiFunction { get; set; } = AiConfigStore.SmartFunctionName;
 
         /// <summary>「AI 优化」用哪个模型，存模型 id（ai-settings.xml 里 Model 的 id）。</summary>
         public string AiModel { get; set; } = AiConfigStore.DefaultModelId;

@@ -28,7 +28,7 @@ param(
     [switch]$Live,
 
     # 模型 id，要在 ai-settings.xml 的 Models 里
-    [string]$Model = 'deepseek-v4.1-flash',
+    [string]$Model = 'deepseek-v4-flash',
 
     [ValidateSet('none', 'low', 'medium', 'high', 'max')]
     [string]$Effort = 'none'
@@ -174,7 +174,7 @@ foreach ($level in @('low', 'medium', 'high', 'max')) {
 }
 
 Assert-Equal '不认识的值归到 high' ((Invoke-Diag 'DescribeRequestBody' @('ultra')).Contains('"reasoning_effort":"high"')) $true
-Assert-Equal '模型参数是 id' ((Invoke-Diag 'DescribeRequestBody' @('high')).Contains('"model":"deepseek-v4.1-flash"')) $true
+Assert-Equal '模型参数是 id' ((Invoke-Diag 'DescribeRequestBody' @('high')).Contains('"model":"deepseek-v4-flash"')) $true
 
 Write-Host ''
 Write-Host '流式返回：'
@@ -286,10 +286,26 @@ Assert-Equal '配置：没写属性时跟同名的内置功能走，自定义功
 Assert-Equal '配置：写 false 可以关掉' `
     (Invoke-Diag 'DescribeAiFunctions' @('<AiConfig><Functions><Function name="排版优化" removeExtraBlankLines="false"><Prompt>p</Prompt></Function></Functions></AiConfig>')) `
     '排版优化=False'
-Assert-Equal '配置：默认文件里排版优化写明了这个属性' `
-    ((Invoke-Diag 'DefaultAiConfigXml' @()).Contains('<Function name="排版优化" removeExtraBlankLines="true">')) $true
-Assert-Equal '配置：默认文件里有「错别字 + 排版」，也删空行' `
-    ((Invoke-Diag 'DefaultAiConfigXml' @()).Contains('<Function name="错别字 + 排版" removeExtraBlankLines="true">')) $true
+Assert-Equal '配置：旧版组合功能写 false 可以关掉' `
+    (Invoke-Diag 'DescribeAiFunctions' @('<AiConfig><Functions><Function name="错别字 + 排版" removeExtraBlankLines="false"><Prompt>p</Prompt></Function></Functions></AiConfig>')) `
+    '错别字 + 排版=False'
+$defaultXml = [xml](Invoke-Diag 'DefaultAiConfigXml' @())
+Assert-Equal '配置：默认接口地址' $defaultXml.SelectSingleNode('/AiConfig/ApiUrl').InnerText 'https://api.deepseek.com'
+Assert-Equal '配置：默认 Key 为空' $defaultXml.SelectSingleNode('/AiConfig/ApiKey').InnerText ''
+Assert-Equal '配置：默认模型及顺序' `
+    (@($defaultXml.SelectNodes('/AiConfig/Models/Model') | ForEach-Object { $_.GetAttribute('id') }) -join '|') `
+    'deepseek-v4-flash|deepseek-v4-pro'
+Assert-Equal '配置：默认功能及顺序' `
+    (@($defaultXml.SelectNodes('/AiConfig/Functions/Function') | ForEach-Object { $_.GetAttribute('name') }) -join '|') `
+    '智能校正|错别字修复|排版优化'
+$newSettings = [Activator]::CreateInstance($assembly.GetType('OneNoteCodeHelper.Services.AddInSettings', $true))
+Assert-Equal '配置：新安装默认选中智能校正' $newSettings.AiFunction '智能校正'
+Assert-Equal '配置：智能校正删空行' `
+    $defaultXml.SelectSingleNode('/AiConfig/Functions/Function[@name="智能校正"]').GetAttribute('removeExtraBlankLines') 'true'
+Assert-Equal '配置：排版优化删空行' `
+    $defaultXml.SelectSingleNode('/AiConfig/Functions/Function[@name="排版优化"]').GetAttribute('removeExtraBlankLines') 'true'
+Assert-Equal '配置：错别字修复不删空行' `
+    $defaultXml.SelectSingleNode('/AiConfig/Functions/Function[@name="错别字修复"]').GetAttribute('removeExtraBlankLines') ''
 
 if ($Live) {
     Write-Host ''
@@ -298,7 +314,7 @@ if ($Live) {
     $layout = "我们使用GitHub管理代码,一共有10个项目。`n今天学习了javascript的闭包。"
     $combined = "我们再github上管理代码,一共有10个项目。`n今天学习了javascript的必包。"
 
-    foreach ($case in @(@('错别字修复', $typo), @('排版优化', $layout), @('错别字 + 排版', $combined))) {
+    foreach ($case in @(@('错别字修复', $typo), @('排版优化', $layout), @('智能校正', $combined))) {
         $watch = [System.Diagnostics.Stopwatch]::StartNew()
         $result = Invoke-Diag 'RunAiSample' @($case[0], $Model, $Effort, $case[1])
         Write-Host ("{0}（{1:0.0}s）" -f $result, $watch.Elapsed.TotalSeconds)

@@ -90,7 +90,7 @@ namespace OneNoteCodeHelper.Services
             Functions = functions;
         }
 
-        /// <summary>OpenAI 兼容接口的地址，写到 /v1 为止。</summary>
+        /// <summary>OpenAI 兼容接口的基础地址；请求时会补上 /chat/completions。</summary>
         internal string ApiUrl { get; }
 
         internal string ApiKey { get; }
@@ -142,7 +142,7 @@ namespace OneNoteCodeHelper.Services
     /// </summary>
     internal static class AiConfigStore
     {
-        private const string DefaultApiUrl = "https://fusion.sh-game.com/v1";
+        private const string DefaultApiUrl = "https://api.deepseek.com";
 
         private const int DefaultTimeoutSeconds = 300;
 
@@ -150,19 +150,21 @@ namespace OneNoteCodeHelper.Services
 
         internal const string TypoFunctionName = "错别字修复";
 
-        internal const string DefaultModelId = "deepseek-v4.1-flash";
+        internal const string DefaultModelId = "deepseek-v4-flash";
 
         private const string RemoveBlankLinesAttribute = "removeExtraBlankLines";
 
-        private const string CombinedFunctionName = "错别字 + 排版";
+        internal const string SmartFunctionName = "智能校正";
 
-        /// <summary>「错别字修复」要改的几类错误，「错别字 + 排版」也用这一份。</summary>
+        private const string LegacyCombinedFunctionName = "错别字 + 排版";
+
+        /// <summary>「错别字修复」要改的几类错误，「智能校正」也用这一份。</summary>
         private const string TypoRules =
             "- 错别字、同音字和形近字误用（如「在/再」「的/地/得」用错）；\n" +
             "- 漏字、多字、重复的字词；\n" +
             "- 明显的标点错误，以及英文单词的拼写错误。\n";
 
-        /// <summary>「排版优化」的几条规则，「错别字 + 排版」也用这一份。</summary>
+        /// <summary>「排版优化」的几条规则，「智能校正」也用这一份。</summary>
         private const string LayoutRules =
             "- 中文与英文、中文与数字之间加一个半角空格；数字与单位按惯例处理（如 10 GB、20%）；\n" +
             "- 中文语境使用全角标点，英文句子内部使用半角标点；\n" +
@@ -204,9 +206,9 @@ namespace OneNoteCodeHelper.Services
             },
             new[]
             {
+                new AiFunction(SmartFunctionName, CombinedPrompt, removeExtraBlankLines: true),
                 new AiFunction(TypoFunctionName, TypoPrompt),
-                new AiFunction("排版优化", LayoutPrompt, removeExtraBlankLines: true),
-                new AiFunction(CombinedFunctionName, CombinedPrompt, removeExtraBlankLines: true)
+                new AiFunction("排版优化", LayoutPrompt, removeExtraBlankLines: true)
             });
 
         /// <summary>读配置。文件不存在或写坏了都退回默认值，不抛异常。</summary>
@@ -273,11 +275,13 @@ namespace OneNoteCodeHelper.Services
         {
             var name = Trim((string)element.Attribute("name"));
 
-            // 没写这个属性时和同名的内置功能一样，这样加这条规则之前生成的配置文件，
-            // 里面的「排版优化」不用改也会删空行；写了 false 就关掉。
+            // 没写这个属性时和同名的内置功能一样。旧配置中的「错别字 + 排版」
+            // 也继续删空行；写了 false 就关掉。
+            var defaultRemoveBlankLines = Default.Functions.FirstOrDefault(f => f.Name == name)?.RemoveExtraBlankLines
+                ?? string.Equals(name, LegacyCombinedFunctionName, StringComparison.Ordinal);
             var removeBlankLines = bool.TryParse(Trim((string)element.Attribute(RemoveBlankLinesAttribute)), out var value)
                 ? value
-                : Default.Functions.FirstOrDefault(f => f.Name == name)?.RemoveExtraBlankLines ?? false;
+                : defaultRemoveBlankLines;
 
             return new AiFunction(name, Trim((string)element.Element("Prompt")), removeBlankLines);
         }
@@ -310,7 +314,7 @@ namespace OneNoteCodeHelper.Services
                 new XComment(" OneNote 代码高亮 · AI 助手配置。改完保存即可，下次点「AI 优化」时生效。 "),
                 new XElement(
                     "AiConfig",
-                    new XComment(" OpenAI 兼容接口的地址，写到 /v1 为止 "),
+                    new XComment(" OpenAI 兼容接口的基础地址；插件会在后面加上 /chat/completions "),
                     new XElement("ApiUrl", config.ApiUrl),
                     new XElement("ApiKey", config.ApiKey),
                     new XComment(" 单次请求的超时（秒）。思考强度开得高、要处理的内容又多时可以调大 "),
