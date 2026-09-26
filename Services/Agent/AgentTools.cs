@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Xml.Linq;
+using OneNoteCodeHelper.Highlighting;
 
 namespace OneNoteCodeHelper.Services.Agent
 {
@@ -83,12 +84,14 @@ namespace OneNoteCodeHelper.Services.Agent
         private readonly AgentPageSnapshot _snapshot;
         private readonly AgentCommitter _committer;
         private readonly CancellationToken _cancellation;
+        /// <summary>代码框的主题、字体、字号等，取自功能区当前设置，和「高亮选中」一致。</summary>
+        private readonly AddInSettings _code;
         internal AgentReport Report { get; private set; }
         internal object[] Definitions => _tools.Select(t => (object)new { type = "function", function = new { name = t.Key, description = t.Value.Description, parameters = t.Value.Schema.Json() } }).ToArray();
 
-        internal AgentTools(AgentPageSnapshot snapshot, AgentCommitter committer, CancellationToken cancellation)
+        internal AgentTools(AgentPageSnapshot snapshot, AgentCommitter committer, CancellationToken cancellation, AddInSettings codeSettings = null)
         {
-            _snapshot = snapshot; _committer = committer; _cancellation = cancellation;
+            _snapshot = snapshot; _committer = committer; _cancellation = cancellation; _code = codeSettings ?? new AddInSettings();
             Register("get_page_overview", "获取当前固定页面的段落摘要、保护范围及样式。每页 100 项；通过 offset 翻页。", AgentSchema.Obj(new Dictionary<string, AgentSchema>
             { ["offset"] = AgentSchema.Num(0, 1000, true) }), Overview);
             Register("read_blocks", "完整读取段落正文及样式。修改前必须调用，不能修改受保护段落。", WithIds(), Read);
@@ -118,6 +121,15 @@ namespace OneNoteCodeHelper.Services.Agent
                     ["block_id"] = AgentSchema.Str(), ["quote"] = AgentSchema.Str(), ["occurrence"] = AgentSchema.Num(1, 1000, true), ["style"] = style
                 }, "block_id", "quote", "occurrence", "style"))
             }, "snapshot_id", "targets"), TextStyle);
+            if (snapshot.Options.EnableCodeHighlight)
+            {
+                var code = WithIds();
+                code.Properties["block_ids"].MaxItems = 1000;
+                code.Properties["language"] = AgentSchema.Str(Languages);
+                code.Required = new[] { "snapshot_id", "block_ids", "language" };
+                Register("highlight_code", "把同一文本块里连续的代码段落（含中间空行）整体换成插件的高亮代码框；先完整读取有文字的段落。" +
+                    "language 为 auto 时自动识别，识别不出会报错，可改用 text。已有代码框和行内代码不要转换。", code, HighlightCode);
+            }
             Register("get_pending_changes", "检查草稿修订号、改动和尚未读取的段落。", SnapshotOnly(), Pending);
             var finish = SnapshotOnly();
             finish.Properties["draft_revision"] = AgentSchema.Num(0, 10000, true);
@@ -125,6 +137,7 @@ namespace OneNoteCodeHelper.Services.Agent
             Register("finish_edit", "独立调用此工具提交草稿并验证结果；必须传入最新修订号。本任务之后不能继续编辑。", finish, Finish);
         }
 
+        private static string[] Languages => new[] { LanguageRegistry.AutoDetectId }.Concat(LanguageRegistry.All.Select(l => l.Id)).ToArray();
         private static AgentSchema SnapshotOnly() => AgentSchema.Obj(new Dictionary<string, AgentSchema> { ["snapshot_id"] = AgentSchema.Str() }, "snapshot_id");
         private static AgentSchema WithIds()
         {
@@ -150,10 +163,12 @@ namespace OneNoteCodeHelper.Services.Agent
             var offset = args.TryGetValue("offset", out var n) ? Convert.ToInt32(n) : 0;
             return new { snapshot_id = _snapshot.SnapshotId, page_title = _snapshot.Title, scope = _snapshot.SelectionOnly ? "selected_paragraphs" : "page",
                 draft_revision = _snapshot.Revision, presets = ParagraphStyles.Ids, native_headings = _snapshot.Options.EnableNativeHeadings,
-                paragraph_spacing = _snapshot.Options.EnableParagraphSpacing,
+                paragraph_spacing = _snapshot.Options.EnableParagraphSpacing, code_highlight = _snapshot.Options.EnableCodeHighlight,
+                languages = _snapshot.Options.EnableCodeHighlight ? Languages : null,
                 total = _snapshot.Blocks.Count, next_offset = offset + 100 < _snapshot.Blocks.Count ? (int?)(offset + 100) : null,
                 blocks = _snapshot.Blocks.Skip(offset).Take(100).Select(b => new { id = b.Id, container_id = b.ContainerId, parent_id = b.ParentId, depth = b.Depth,
-                    editable = b.Editable, reason = b.ProtectedReason, summary = b.Editable ? b.Text.Substring(0, Math.Min(80, b.Text.Length)) : null }).ToArray() };
+                    editable = b.Editable, reason = b.ProtectedReason,
+                    summary = b.Editable || b.CodeCandidate ? b.Text.Substring(0, Math.Min(80, b.Text.Length)) : null }).ToArray() };
         }
         private List<AgentBlock> Targets(IDictionary<string, object> args)
         {
@@ -164,7 +179,9 @@ namespace OneNoteCodeHelper.Services.Agent
         private AgentBlock Block(string id, bool writing)
         {
             var b = _snapshot.Blocks.FirstOrDefault(x => x.Id == id);
-            if (b == null || !b.Editable) throw new AiException("目标不存在或受到保护。");
+            if (writing && b != null && (b.CodeCandidate || b.Conversion != null)) throw new AiException("代码段落不能设置样式；用 highlight_code 转换为代码框。");
+            // 待高亮的代码可以读取，供判断范围和语言。
+            if (b == null || !(b.Editable || b.CodeCandidate)) throw new AiException("目标不存在或受到保护。");
             if (writing && !b.Read) throw new AiException("请先完整读取目标段落。");
             return b;
         }
@@ -173,7 +190,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var blocks = Targets(args);
             var page = _snapshot.CreateDraftPage();
             foreach (var b in blocks) b.Read = true;
-            return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, text = b.Text, depth = b.Depth,
+            return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.Text, depth = b.Depth,
                 container_id = b.ContainerId, parent_id = b.ParentId, style = Css.Effective(AgentCommitter.Find(page, b.ObjectId), page),
                 runs = b.Draft.Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() }).ToArray() };
         }
@@ -234,6 +251,37 @@ namespace OneNoteCodeHelper.Services.Agent
             return Publish(drafts);
         }
 
+        private object HighlightCode(IDictionary<string, object> args)
+        {
+            var ids = ((IList)args["block_ids"]).Cast<string>().ToList();
+            if (ids.Distinct().Count() != ids.Count) throw new AiException("目标段落重复。");
+            var blocks = ids.Select(id => _snapshot.Blocks.FirstOrDefault(b => b.Id == id) ?? throw new AiException("目标不存在。")).ToList();
+            var scheduled = blocks.Select(b => b.Conversion).Where(c => c != null).Distinct().ToList();
+            if (scheduled.Count == 1 && blocks.All(b => b.Conversion == scheduled[0]) && scheduled[0].Blocks.Count == blocks.Count)
+                return new { ok = true, draft_revision = _snapshot.Revision, changed = new string[0], noop = ids };
+            if (scheduled.Count > 0) throw new AiException("部分段落已排入另一个代码框。");
+            foreach (var b in blocks)
+            {
+                // 代码中间的空行一并放进代码框。
+                if (!(b.Editable || b.CodeCandidate || b.ProtectedReason == "empty")) throw new AiException("目标受到保护，不能转换为代码框。");
+                if (b.ProtectedReason != "empty" && !b.Read) throw new AiException("请先完整读取目标段落。");
+            }
+            // 先全部校验、生成代码框，再发布草稿；失败时这个工具没有副作用。
+            var selection = AgentCode.Select(_snapshot.Page, blocks.Select(b => b.ObjectId).ToList());
+            var language = LanguageRegistry.Resolve((string)args["language"], selection.Code)
+                ?? throw new AiException("无法自动识别代码语言。请用 language 指定语言；不确定时用 text。");
+            var table = CodeBlockBuilder.BuildTable(selection.Code, language, _code.Theme, _code);
+            var ordered = selection.Paragraphs.Select(oe => blocks.First(b => b.ObjectId == (string)oe.Attribute("objectID"))).ToList();
+            var conversion = new AgentCodeConversion { Blocks = ordered, LanguageId = language.Id, Code = selection.Code, Table = table };
+            // 转换后这些段落就不在了，之前给它们排的格式草稿作废。
+            var discarded = ordered.Where(b => b.Changed).Select(b => b.Id).ToArray();
+            foreach (var b in ordered) { b.Draft = new XElement(b.Original); b.Conversion = conversion; }
+            _snapshot.CodeConversions.Add(conversion);
+            _snapshot.Revision++;
+            return new { ok = true, draft_revision = _snapshot.Revision, changed = ordered.Select(b => b.Id).ToArray(), noop = new string[0],
+                language = language.Id, discarded_format = discarded };
+        }
+
         private object Publish(Dictionary<AgentBlock, XElement> drafts)
         {
             var changed = new List<string>();
@@ -253,8 +301,10 @@ namespace OneNoteCodeHelper.Services.Agent
         }
         private object Pending(IDictionary<string, object> args) => new { snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
             changed = _snapshot.Blocks.Where(b => b.Changed).Select(b => b.Id).ToArray(),
-            unread = _snapshot.Blocks.Where(b => b.Editable && !b.Read).Select(b => b.Id).ToArray(),
-            protected_count = _snapshot.Blocks.Count(b => !b.Editable) };
+            unread = _snapshot.Blocks.Where(b => b.Editable && !b.Read && b.Conversion == null).Select(b => b.Id).ToArray(),
+            code_blocks = _snapshot.CodeConversions.Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
+            unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
+            protected_count = _snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null) };
         private object Finish(IDictionary<string, object> args)
         {
             if (Convert.ToInt32(args["draft_revision"]) != _snapshot.Revision) throw new AiException("草稿修订号过期，请先检查待提交修改。");

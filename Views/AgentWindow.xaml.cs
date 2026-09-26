@@ -24,6 +24,8 @@ namespace OneNoteCodeHelper.Views
         private readonly AiConfig _config;
         private readonly string _model;
         private readonly string _effort;
+        /// <summary>代码框的主题、字号等，取自打开窗口时的功能区设置。</summary>
+        private readonly AddInSettings _codeSettings;
         private readonly CancellationTokenSource _lifetime = new CancellationTokenSource();
         private readonly Stopwatch _elapsed = new Stopwatch();
         private CancellationTokenSource _run;
@@ -34,10 +36,11 @@ namespace OneNoteCodeHelper.Views
         private bool _busy;
         private bool _closed;
 
-        internal AgentWindow(IOneNotePageAccess api, string pageId, string selectionXml, AiConfig config, string model, string effort, IntPtr owner)
+        internal AgentWindow(IOneNotePageAccess api, string pageId, string selectionXml, AiConfig config, string model, string effort,
+            AddInSettings codeSettings, IntPtr owner)
         {
             InitializeComponent();
-            _api = api; _pageId = pageId; _config = config; _model = model; _effort = effort;
+            _api = api; _pageId = pageId; _config = config; _model = model; _effort = effort; _codeSettings = codeSettings;
             var page = AgentPageSnapshot.ParsePage(selectionXml);
             _selection = AgentPageSnapshot.SelectedIds(page);
             PageText.Text = (string)page.Attribute("name") ?? "当前页";
@@ -81,11 +84,11 @@ namespace OneNoteCodeHelper.Views
             {
                 var xml = _api.GetPageContent(_pageId, Microsoft.Office.Interop.OneNote.PageInfo.piBasic);
                 var snapshot = new AgentPageSnapshot(xml, selection, _config.Agent);
-                if (!snapshot.Blocks.Any(b => b.Editable)) throw new AiException("目标范围没有可编辑文字，或所在文本框包含尚未启用的混合内容。");
+                if (!snapshot.Blocks.Any(b => b.Editable || b.CodeCandidate)) throw new AiException("目标范围没有可编辑文字，或所在文本框包含尚未启用的混合内容。");
                 if (!AgentTools.FontInstalled(_config.Agent.FontFamily))
                     _config.Agent.FontFamily = ParagraphStyles.Fonts.FirstOrDefault(AgentTools.FontInstalled)
                         ?? throw new AiException("Agent 默认字体未安装，请在 AI 配置的 Agent/FontFamily 中选择已安装字体。");
-                var runner = new AgentRunner(new AgentChatClient(_config, _model, _effort), new AgentCommitter(_api));
+                var runner = new AgentRunner(new AgentChatClient(_config, _model, _effort), new AgentCommitter(_api), _codeSettings);
                 return runner.RunAsync(snapshot, request, CreateProgress(), token);
             }, false);
         }
@@ -143,11 +146,11 @@ namespace OneNoteCodeHelper.Views
 
         private async void OnUndo(object sender, RoutedEventArgs e)
         {
-            if (_busy || _report == null || _report.Undo.Count == 0) return;
+            if (_busy || _report == null || !_report.CanUndo) return;
             var previous = _report;
             await StartJob(token => Task.FromResult(new AgentCommitter(_api).Undo(_pageId, previous, _config.Agent, token)), true);
             // 只撤销最近一次执行；不把撤销的逆操作继续暴露为撤销。
-            if (_report != null) _report.Undo.Clear();
+            if (_report != null) { _report.Undo.Clear(); _report.CodeUndo.Clear(); }
             if (!_closed) UndoButton.Visibility = Visibility.Collapsed;
         }
 
@@ -167,7 +170,7 @@ namespace OneNoteCodeHelper.Views
             ExecuteButton.IsEnabled = !value;
             CancelButton.IsEnabled = value;
             CancelButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
-            UndoButton.Visibility = !value && _report?.Undo.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            UndoButton.Visibility = !value && _report?.CanUndo == true ? Visibility.Visible : Visibility.Collapsed;
             RequestText.IsEnabled = !value;
             PageScope.IsEnabled = !value;
             SelectionScope.IsEnabled = !value && _selection.Count > 0;

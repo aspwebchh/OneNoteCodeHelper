@@ -240,25 +240,44 @@ namespace OneNoteCodeHelper.Services.Agent
             var runs = _oe.Elements(OneNoteApi.One + "T").ToList();
             foreach (var p in _pieces)
             {
-                var css = Css.Effective(runs[p.Run], page);
-                var link = "";
-                foreach (var tag in p.Path)
-                {
-                    // OneNote 的默认链接颜色独立于段落基础色；显式的内层颜色仍然覆盖它。
-                    if (tag.Name.LocalName == "a") css["color"] = "link-default";
-                    var key = ImplicitProperty(tag.Name.LocalName);
-                    if (key != null) css[key] = tag.Name.LocalName == "u" ? "underline" :
-                        tag.Name.LocalName == "s" || tag.Name.LocalName == "strike" ? "line-through" :
-                        key == "font-weight" ? "bold" : key == "font-style" ? "italic" : tag.Name.LocalName;
-                    Css.Merge(css, Css.Read((string)tag.Attribute("style")));
-                    if (tag.Name.LocalName == "a") link = (string)tag.Attribute("href") ?? "";
-                }
-                css.Remove("text-align"); // 回存时常把 alignment 冗余写进 style，单独校验段落对齐。
+                var css = PieceStyle(p, runs, page, out var link);
                 var style = includeStyles ? Css.Write(css) : "";
                 foreach (var ch in p.Text) result.Append((int)ch).Append(':').Append(link.Length).Append(':').Append(link)
                     .Append(':').Append(style.Length).Append(':').Append(style).Append(';');
             }
             return result.ToString();
+        }
+
+        /// <summary>非空白字符里有没有、是不是全部是等宽字体。整段等宽是待高亮的代码，部分等宽是行内代码。</summary>
+        internal (bool Any, bool All) Monospace(XElement page)
+        {
+            var runs = _oe.Elements(OneNoteApi.One + "T").ToList();
+            bool any = false, all = true;
+            foreach (var p in _pieces.Where(p => !string.IsNullOrWhiteSpace(p.Text)))
+            {
+                var mono = PieceStyle(p, runs, page, out _).TryGetValue("font-family", out var font) && Css.IsMonospace(font);
+                any |= mono; all &= mono;
+            }
+            return (any, any && all);
+        }
+
+        private static Dictionary<string, string> PieceStyle(Piece p, List<XElement> runs, XElement page, out string link)
+        {
+            var css = Css.Effective(runs[p.Run], page);
+            link = "";
+            foreach (var tag in p.Path)
+            {
+                // OneNote 的默认链接颜色独立于段落基础色；显式的内层颜色仍然覆盖它。
+                if (tag.Name.LocalName == "a") css["color"] = "link-default";
+                var key = ImplicitProperty(tag.Name.LocalName);
+                if (key != null) css[key] = tag.Name.LocalName == "u" ? "underline" :
+                    tag.Name.LocalName == "s" || tag.Name.LocalName == "strike" ? "line-through" :
+                    key == "font-weight" ? "bold" : key == "font-style" ? "italic" : tag.Name.LocalName;
+                Css.Merge(css, Css.Read((string)tag.Attribute("style")));
+                if (tag.Name.LocalName == "a") link = (string)tag.Attribute("href") ?? "";
+            }
+            css.Remove("text-align"); // 回存时常把 alignment 冗余写进 style，单独校验段落对齐。
+            return css;
         }
     }
 
@@ -282,6 +301,10 @@ namespace OneNoteCodeHelper.Services.Agent
                 CultureInfo.InvariantCulture, out var number)) return number.ToString("0.###", CultureInfo.InvariantCulture) + "pt";
             return value;
         }
+        private static readonly string[] MonospaceFonts =
+            { "consolas", "nsimsun", "新宋体", "courier new", "courier", "lucida console", "cascadia code", "cascadia mono" };
+        /// <summary>粘贴来的 HTML 可能带字体栈，OneNote 只认第一个字体。</summary>
+        internal static bool IsMonospace(string font) => MonospaceFonts.Contains(Normalize((font ?? "").Split(',')[0]));
         internal static string Write(IDictionary<string, string> values) => string.Join(";", values.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => k.Key + ":" + Normalize(k.Value)));
         internal static void Merge(IDictionary<string, string> target, IDictionary<string, string> source)
         { foreach (var item in source) target[item.Key] = item.Value; }

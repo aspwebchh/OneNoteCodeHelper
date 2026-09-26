@@ -133,8 +133,9 @@ namespace OneNoteCodeHelper.Services
         /// 代码框放在最外一层的第一个选中段落处：选区是连续的一段，最外一层的选中段落都是同一个 OEChildren
         /// 里挨着的兄弟，选区开头那几段更深的段落挂在前一个兄弟下面，所以放在这里上下文顺序不变。
         /// 选区在一个缩进块中间结束时，被删的段落下面还挂着没选中的段落，把它们提到代码框后面留着，不跟着删掉。
+        /// 返回装着代码框的那个新段落。
         /// </summary>
-        internal void ReplaceWith(XElement table)
+        internal XElement ReplaceWith(XElement table)
         {
             var baseLevel = _levels.Min();
             var anchor = Paragraphs[_levels.IndexOf(baseLevel)];
@@ -166,6 +167,8 @@ namespace OneNoteCodeHelper.Services
                     parent.Remove();
                 }
             }
+
+            return codeBlock;
         }
 
         private int IndentLevel(XElement oe)
@@ -273,7 +276,7 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>段落所在的文本块：最近的文本框、表格单元格或标题。</summary>
-        private static XElement TextBlockOf(XElement oe)
+        internal static XElement TextBlockOf(XElement oe)
         {
             return oe.Ancestors().FirstOrDefault(e =>
                 e.Name == One + "Outline" || e.Name == One + "Cell" || e.Name == One + "Title");

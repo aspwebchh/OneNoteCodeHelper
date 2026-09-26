@@ -41,6 +41,10 @@ internal static class Probe
                         new XElement(ns + "OE", new XElement(ns + "T", new XCData("&nbsp;先<b>备份</b>配置。<a href='https://example.com'>参考链接</a><br>第二行😀"))),
                         new XElement(ns + "OE", new XAttribute("style", "font-family:Consolas;font-size:11pt"), new XElement(ns + "T", new XCData("List&lt;String&gt; code;"))),
                         new XElement(ns + "OE", new XElement(ns + "T", "父段落"), new XElement(ns + "OEChildren", new XElement(ns + "OE", new XElement(ns + "T", "保留原样的子段落")))),
+                        // 当普通正文输入的代码，由 highlight_code 转为代码框。
+                        new XElement(ns + "OE", new XElement(ns + "T", new XCData("public class Demo {"))),
+                        new XElement(ns + "OE", new XElement(ns + "T", new XCData("&nbsp;&nbsp;&nbsp;&nbsp;int x = 1;"))),
+                        new XElement(ns + "OE", new XElement(ns + "T", new XCData("}"))),
                         new XElement(ns + "OE", new XElement(ns + "Table", new XAttribute("bordersVisible", "true"), new XAttribute("hasHeaderRow", "false"),
                             new XElement(ns + "Columns", new XElement(ns + "Column", new XAttribute("index", 0), new XAttribute("width", 200)),
                                 new XElement(ns + "Column", new XAttribute("index", 1), new XAttribute("width", 200), new XAttribute("isLocked", true))),
@@ -54,7 +58,8 @@ internal static class Probe
             foreach (var b in snapshot.Blocks) Console.WriteLine("Probe block " + b.Id + ": " + (b.ProtectedReason ?? "editable") + ", chars=" + b.Text.Length);
             var tools = new AgentTools(snapshot, new AgentCommitter(api), CancellationToken.None);
             var editable = snapshot.Blocks.Where(b => b.Editable).ToList();
-            Execute(tools, "read_blocks", new { snapshot_id = snapshot.SnapshotId, block_ids = editable.Select(b => b.Id).ToArray() });
+            var mono = snapshot.Blocks.Single(b => b.CodeCandidate);
+            Execute(tools, "read_blocks", new { snapshot_id = snapshot.SnapshotId, block_ids = editable.Select(b => b.Id).Concat(new[] { mono.Id }).ToArray() });
             var heading = editable.First(b => b.Text.Contains("部署前准备"));
             Execute(tools, "set_paragraph_style", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { heading.Id }, preset_id = "heading1", overrides = new { alignment = "center" } });
             var body = editable.First(b => b.Text.Contains("先"));
@@ -65,6 +70,9 @@ internal static class Probe
             Execute(tools, "set_paragraph_style", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { parent.Id }, preset_id = "heading2" });
             var cell = editable.First(b => b.Text == "表格内文字");
             Execute(tools, "set_paragraph_style", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { cell.Id }, preset_id = "body", overrides = new { alignment = "right" } });
+            Execute(tools, "highlight_code", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { mono.Id }, language = "java" });
+            var plain = editable.Where(b => b.Text.StartsWith("public class", StringComparison.Ordinal) || b.Text.Contains("int x") || b.Text == "}").Select(b => b.Id).ToArray();
+            Execute(tools, "highlight_code", new { snapshot_id = snapshot.SnapshotId, block_ids = plain, language = "auto" });
             var expected = new XElement(snapshot.Page);
             expected.Elements(ns + "QuickStyleDef").Remove();
             expected.AddFirst(snapshot.DraftStyles.Elements().Select(e => new XElement(e)));
@@ -74,6 +82,7 @@ internal static class Probe
             File.WriteAllText(Path.Combine(directory, "after.xml"), api.GetPageContent(pageId, PageInfo.piBasic));
             Console.WriteLine("Test section: " + path);
             Console.WriteLine("Result: " + tools.Report.Status + " " + tools.Report.Message);
+            Console.WriteLine("Code blocks: " + tools.Report.CodeBlocks);
             var actual = AgentPageSnapshot.ParsePage(api.GetPageContent(pageId, PageInfo.piBasic));
             foreach (var b in snapshot.Blocks.Where(b => b.Changed))
             {
@@ -90,7 +99,7 @@ internal static class Probe
             File.WriteAllText(Path.Combine(directory, "after-undo.xml"), api.GetPageContent(pageId, PageInfo.piBasic));
             Console.WriteLine("Undo: " + undo.Status + " " + undo.Message);
             Console.WriteLine("The new test page is kept for visual inspection. No existing page was edited.");
-            return tools.Report.Status == "Verified" && undo.Status == "Verified" ? 0 : 1;
+            return tools.Report.Status == "Verified" && undo.Status == "Verified" && tools.Report.CodeBlocks == 2 && undo.CodeBlocks == 2 ? 0 : 1;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
         finally { if (app != null && Marshal.IsComObject(app)) Marshal.FinalReleaseComObject(app); }

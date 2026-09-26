@@ -487,6 +487,8 @@ namespace OneNoteCodeHelper
                 var api = _api;
                 var modelId = _settings.AiModel;
                 var effort = AiEfforts.Normalize(_settings.AiEffort);
+                // 代码框按功能区当前的主题、字号等生成，和「高亮选中」一致。
+                var codeSettings = _settings.Clone();
                 RunInBackground("Agent", ApartmentState.STA, IntPtr.Zero, () =>
                 {
                     AgentWindow window = null;
@@ -497,7 +499,7 @@ namespace OneNoteCodeHelper
                         if (string.IsNullOrEmpty(pageId)) throw new AiException("请先打开一个 OneNote 页面。");
                         var xml = api.GetPageContent(pageId, PageInfo.piSelection);
                         var config = AiConfigStore.Load();
-                        window = new AgentWindow(api, pageId, xml, config, config.FindModel(modelId).Id, effort, api.GetMainWindowHandle());
+                        window = new AgentWindow(api, pageId, xml, config, config.FindModel(modelId).Id, effort, codeSettings, api.GetMainWindowHandle());
                         _agentWindow = window;
                         if (Volatile.Read(ref _disconnecting) == 0) window.ShowDialog();
                     }

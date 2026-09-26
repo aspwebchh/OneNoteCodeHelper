@@ -23,6 +23,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool EnableParagraphSpacing { get; set; } = true;
         internal bool EnableNativeHeadings { get; set; } = true;
         internal bool EnableMixedOutlines { get; set; } = true;
+        // 把未高亮的代码转换为插件代码框；关闭时整段等宽代码仍只保护。
+        internal bool EnableCodeHighlight { get; set; } = true;
         internal string FontFamily { get; set; } = "Microsoft YaHei";
 
         internal static AgentOptions Parse(XElement element)
@@ -40,6 +42,7 @@ namespace OneNoteCodeHelper.Services.Agent
             value.EnableParagraphSpacing = Boolean(element, "EnableParagraphSpacing", true);
             value.EnableNativeHeadings = Boolean(element, "EnableNativeHeadings", true);
             value.EnableMixedOutlines = Boolean(element, "EnableMixedOutlines", true);
+            value.EnableCodeHighlight = Boolean(element, "EnableCodeHighlight", true);
             var font = (string)element.Element("FontFamily");
             if (ParagraphStyles.Fonts.Contains(font)) value.FontFamily = font;
             return value;
@@ -63,7 +66,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string ParentId;
         internal int Depth;
         internal bool Read;
+        /// <summary>已排入草稿的代码框转换；这些段落不再接受样式修改。</summary>
+        internal AgentCodeConversion Conversion;
         internal bool Editable => ProtectedReason == null;
+        /// <summary>整段等宽、还没放进代码框的代码：可以读取并转换为代码框，不能设置样式。</summary>
+        internal bool CodeCandidate => ProtectedReason == "unhighlighted_code";
         internal bool Changed => !XNode.DeepEquals(Original, Draft);
     }
 
@@ -71,6 +78,9 @@ namespace OneNoteCodeHelper.Services.Agent
     {
         internal readonly string SnapshotId = Guid.NewGuid().ToString("N");
         internal readonly List<AgentBlock> Blocks = new List<AgentBlock>();
+        internal readonly List<AgentCodeConversion> CodeConversions = new List<AgentCodeConversion>();
+        /// <summary>撤销时要换回原段落的代码框。</summary>
+        internal readonly List<AgentCodeUndoItem> CodeRestores = new List<AgentCodeUndoItem>();
         internal readonly AgentOptions Options;
         internal readonly XElement Page;
         internal readonly XElement DraftStyles;
@@ -105,7 +115,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     var rich = new AgentRichText(oe);
                     text = rich.Text;
                     if (string.IsNullOrWhiteSpace(text)) reason = "empty";
-                    if (IsCode(oe, Page)) reason = "protected_code";
+                    var code = CodeKind(oe, rich, Page);
+                    if (code != null && (reason == null || code != "unhighlighted_code")) reason = code;
                 }
                 catch (Exception ex) when (ex is XmlException || ex is AiException || ex is ArgumentException)
                 { reason = "unsupported_html"; }
@@ -121,6 +132,9 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             if (Blocks.Sum(b => b.Editable ? b.Text.Length : 0) > options.MaxPageChars || Blocks.Count > 1000)
                 throw new AiException("页面内容超过 Agent 限额，请选择较小范围后重试。");
+            // 待高亮代码也要发给模型读。放不下时按原来的方式只保护，不让整页失败。
+            if (!options.EnableCodeHighlight || Blocks.Sum(b => b.Editable || b.CodeCandidate ? b.Text.Length : 0) > options.MaxPageChars)
+                foreach (var b in Blocks.Where(b => b.CodeCandidate)) b.ProtectedReason = "protected_code";
         }
 
         internal static XElement ParsePage(string xml)
@@ -149,14 +163,32 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         private static bool IsBinary(XElement e) => new[] { "Image", "InkDrawing", "InkWord", "InkParagraph", "InsertedFile", "MediaFile", "FutureObject", "HTMLBlock" }.Contains(e.Name.LocalName);
-        private static bool IsCode(XElement oe, XElement page)
+        /// <summary>
+        /// 代码段落分三种：已在代码框里（单格表格、格内全是等宽段落）的保护不动；整段等宽的待转换为代码框；
+        /// 只有部分文字等宽的是行内代码，保守保护整段。不是代码返回 null。
+        /// </summary>
+        private static string CodeKind(XElement oe, AgentRichText rich, XElement page)
         {
-            if (oe.AncestorsAndSelf(One + "OE").Any(PageEditor.IsCodeParagraph)) return true;
-            var style = Css.Effective(oe, page);
-            if (style.TryGetValue("font-family", out var font) && new[] { "consolas", "nsimsun", "courier new", "courier", "lucida console", "cascadia code", "cascadia mono" }.Contains(font)) return true;
-            // 单个等宽片段也保守保护整段，避免覆盖行内代码。
-            return oe.Elements(One + "T").Any(t => System.Text.RegularExpressions.Regex.IsMatch(t.Value,
-                @"font-family\s*:\s*['"" ]*(Consolas|NSimSun|Courier|Cascadia|Lucida Console)", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+            var cell = oe.Ancestors(One + "Cell").FirstOrDefault();
+            var table = cell?.Ancestors(One + "Table").FirstOrDefault();
+            if (table != null && table.Elements(One + "Row").Count() == 1 && table.Element(One + "Row").Elements(One + "Cell").Count() == 1 &&
+                cell.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).All(e => IsMonospaceParagraph(e, page))) return "highlighted_code";
+            var (any, all) = rich.Monospace(page);
+            if (all) return "unhighlighted_code";
+            if (any || (!string.IsNullOrWhiteSpace(rich.Text) && oe.AncestorsAndSelf(One + "OE").Any(PageEditor.IsCodeParagraph))) return "protected_code";
+            return null;
+        }
+        private static bool IsMonospaceParagraph(XElement oe, XElement page)
+        {
+            if (PageEditor.IsCodeParagraph(oe)) return true;
+            try
+            {
+                var rich = new AgentRichText(oe);
+                return string.IsNullOrWhiteSpace(rich.Text)
+                    ? Css.Effective(oe, page).TryGetValue("font-family", out var font) && Css.IsMonospace(font)
+                    : rich.Monospace(page).All;
+            }
+            catch (Exception ex) when (ex is XmlException || ex is AiException || ex is ArgumentException) { return false; }
         }
 
         internal static string Fingerprint(XElement oe, XElement page)

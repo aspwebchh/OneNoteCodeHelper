@@ -16,7 +16,7 @@ internal static class WindowPreview
         Directory.CreateDirectory(directory);
         var xml = "<one:Page xmlns:one='" + OneNoteApi.OneNs + "' ID='preview' name='项目记录与实施计划' lastModifiedTime='2026-09-26T00:00:00Z'>" +
             "<one:Outline><one:OEChildren><one:OE objectID='p1' selected='all'><one:T><![CDATA[示例段落]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>";
-        var window = new AgentWindow(new NoAccess(), "preview", xml, AiConfigStore.Default, "example-model", "medium", IntPtr.Zero);
+        var window = new AgentWindow(new NoAccess(), "preview", xml, AiConfigStore.Default, "example-model", "medium", new AddInSettings(), IntPtr.Zero);
         // 窗口固定宽度、高度随内容：客户区宽度约为窗口宽度减去 16px 边框，高度按内容量出来。
         var width = (int)window.Width - 16;
         var content = (FrameworkElement)window.Content;

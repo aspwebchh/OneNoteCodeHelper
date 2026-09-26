@@ -9,6 +9,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using Microsoft.Office.Interop.OneNote;
+using OneNoteCodeHelper.Highlighting;
+using OneNoteCodeHelper.Highlighting.Themes;
 using OneNoteCodeHelper.Services;
 using OneNoteCodeHelper.Services.Agent;
 
@@ -334,6 +336,116 @@ internal static class Program
             var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><MaxTurns>999</MaxTurns><ReplayReasoning>false</ReplayReasoning></Agent></AiConfig>"));
             Equal(30, c.Agent.MaxTurns); True(!c.Agent.ReplayReasoning); True(c.Agent.EnableMixedOutlines);
         });
+        Test("code classification: plain text, unhighlighted code, code box and inline code", () =>
+        {
+            var mono = Paragraph("m", "int x = 1;"); mono.SetAttributeValue("style", "font-family:Consolas");
+            var spans = Paragraph("s", "<span style='font-family:Consolas'>var</span><span style=\"font-family:'Courier New'\"> y;</span>");
+            var inline = Paragraph("i", "调用 <span style='font-family:Consolas'>Run()</span> 方法");
+            var box = new XElement(One + "OE", new XAttribute("objectID", "w"), CodeBlockBuilder.BuildTable("a = 1", LanguageRegistry.Find("python"), CodeThemes.Light, new AddInSettings()));
+            var n = 0; foreach (var e in box.Descendants().Where(e => e.Name.LocalName != "Columns" && e.Name.LocalName != "Column" && e.Name.LocalName != "OEChildren" && e.Name.LocalName != "T")) e.SetAttributeValue("objectID", "box" + n++);
+            var s = Snapshot(Page(Paragraph("a", "正文"), mono, spans, inline, box));
+            Equal(null, s.Blocks[0].ProtectedReason); Equal("unhighlighted_code", s.Blocks[1].ProtectedReason); Equal("unhighlighted_code", s.Blocks[2].ProtectedReason);
+            Equal("protected_code", s.Blocks[3].ProtectedReason); Equal("highlighted_code", s.Blocks[4].ProtectedReason);
+            var t = Tools(s);
+            Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" } });
+            Throws(() => Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, preset_id = "body" }));
+            Throws(() => Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p5" } }));
+        });
+        Test("code highlight disabled keeps whole monospace paragraphs protected", () =>
+        {
+            var mono = Paragraph("m", "int x = 1;"); mono.SetAttributeValue("style", "font-family:Consolas");
+            var s = new AgentPageSnapshot(Page(mono).ToString(), null, new AgentOptions { EnableCodeHighlight = false });
+            Equal("protected_code", s.Blocks[0].ProtectedReason);
+            True(!AgentChatClient.Serializer().Serialize(Tools(s).Definitions).Contains("highlight_code"));
+        });
+        Test("highlight_code converts contiguous paragraphs, verifies and records undo", () =>
+        {
+            var s = CodePrepared(); var api = new FakePage(s.Page);
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.CodeBlocks); Equal(1, api.Writes); Equal(1, r.CodeUndo.Count);
+            True(AgentCommitter.Find(api.Page, "c1") == null && AgentCommitter.Find(api.Page, "c3") == null);
+            var box = AgentCommitter.Find(api.Page, "a").ElementsAfterSelf().First();
+            var expected = CodeBlockBuilder.BuildTable("def f(x):\n\n    return x + 1", LanguageRegistry.Find("python"), CodeThemes.Light, new AddInSettings());
+            Equal(string.Join("|", expected.Descendants(One + "OE").Select(AgentCode.PlainText)), string.Join("|", box.Descendants(One + "OE").Select(AgentCode.PlainText)));
+            Equal("结尾", new AgentRichText(AgentCommitter.Find(api.Page, "b")).Text);
+        });
+        Test("highlight_code rejects invalid ranges without side effects", () =>
+        {
+            var parent = Paragraph("n1", "if x:"); parent.Add(new XElement(One + "OEChildren", Paragraph("n2", "print(x)")));
+            var listed = Paragraph("l", "SELECT 1;"); listed.AddFirst(new XElement(One + "List", new XElement(One + "Bullet", new XAttribute("bullet", "2"))));
+            var p = CodePage(); p.Descendants(One + "OEChildren").First().Add(parent, Paragraph("n3", "y = 2"), listed);
+            p.AddFirst(new XElement(One + "Title", Paragraph("title", "x = 1")));
+            var s = Snapshot(p); var t = Tools(s);
+            Rejects("请先完整读取", () => Code(t, s, "python", "p3", "p4", "p5"));
+            Read(t, s);
+            Rejects("必须连续", () => Code(t, s, "python", "p3", "p5"));
+            Rejects("页面标题", () => Code(t, s, "python", "p1"));
+            Rejects("无法自动识别", () => Code(t, s, "auto", "p2"));
+            Rejects("下级段落", () => Code(t, s, "python", "p7"));
+            Rejects("缩进更深", () => Code(t, s, "python", "p8", "p9"));
+            Rejects("项目符号", () => Code(t, s, "sql", "p10"));
+            Equal(0, s.Revision); True(s.Blocks.All(b => b.Conversion == null));
+        });
+        Test("conversion discards pending format and blocks later styling", () =>
+        {
+            var s = Snapshot(CodePage()); var t = Tools(s); Read(t, s);
+            Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, preset_id = "body" });
+            True(s.Blocks[1].Changed);
+            var result = AgentChatClient.Serializer().Serialize(Code(t, s, "python", "p2", "p3", "p4"));
+            True(result.Contains("discarded_format")); True(result.Contains("\"p2\""));
+            True(!s.Blocks[1].Changed); Equal(2, s.Revision);
+            Throws(() => Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, preset_id = "body" }));
+            Code(t, s, "python", "p4", "p3", "p2"); Equal(2, s.Revision);
+            Throws(() => Code(t, s, "python", "p2", "p3"));
+        });
+        Test("concurrent edit of source code paragraph skips the conversion", () =>
+        {
+            var s = CodePrepared(); var api = new FakePage(s.Page);
+            AgentCommitter.Find(api.Page, "c3").Element(One + "T").Value = "return 2";
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("NoChange", r.Status); Equal(3, r.Conflicts); Equal(0, api.Writes);
+        });
+        Test("paragraph format and code conversion commit together", () =>
+        {
+            var s = CodePrepared(); var t = Tools(s);
+            Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" });
+            var api = new FakePage(s.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.Applied); Equal(1, r.CodeBlocks); Equal(1, api.Writes); Equal(2, r.Undo.Count + r.CodeUndo.Count);
+        });
+        Test("undo turns the code box back into the original paragraphs", () =>
+        {
+            var s = CodePrepared(); var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(1, undo.CodeBlocks); Equal(2, api.Writes);
+            True(!api.Page.Descendants(One + "Table").Any());
+            Equal("示例：|def f(x):||    return x + 1|结尾", string.Join("|", api.Page.Descendants(One + "OE").Select(AgentCode.PlainText)));
+            Equal("font-size:9pt", (string)api.Page.Descendants(One + "OE").ElementAt(1).Attribute("style"));
+        });
+        Test("undo skips a code box edited afterwards", () =>
+        {
+            var s = CodePrepared(); var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            api.Page.Descendants(One + "Table").Single().Descendants(One + "T").First().Value = "def g(x):";
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal(1, undo.Conflicts); Equal(0, undo.CodeBlocks); Equal(1, api.Writes);
+        });
+        Test("indented code keeps nesting through conversion and undo", () =>
+        {
+            var parent = Paragraph("c1", "def f():"); parent.Add(new XElement(One + "OEChildren", Paragraph("c2", "return 1")));
+            var s = Snapshot(Page(Paragraph("a", "示例："), parent)); var t = Tools(s); Read(t, s);
+            Code(t, s, "python", "p2", "p3");
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status);
+            Equal("def f():|    return 1", string.Join("|", api.Page.Descendants(One + "Table").Single().Descendants(One + "OE").Select(AgentCode.PlainText)));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+            var restored = api.Page.Descendants(One + "OE").ElementAt(1);
+            Equal("def f():", AgentCode.PlainText(restored)); Equal("return 1", AgentCode.PlainText(restored.Element(One + "OEChildren").Element(One + "OE")));
+        });
+        Test("runner converts code through the highlight_code tool", () =>
+        {
+            var s = Snapshot(CodePage()); var api = new FakePage(s.Page); var model = new CodeScriptClient(s);
+            var r = new AgentRunner(model, new AgentCommitter(api), new AddInSettings()).RunAsync(s, "排版", null, CancellationToken.None).GetAwaiter().GetResult();
+            Equal("Verified", r.Status); Equal(1, r.CodeBlocks); Equal(1, api.Writes); True(model.SawCodeTool);
+        });
         Console.WriteLine($"Agent: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
     }
@@ -351,6 +463,16 @@ internal static class Program
     private static void Read(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = s.Blocks.Where(b => b.Editable).Select(b => b.Id).ToArray() });
     private static void Style(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" });
     private static AgentPageSnapshot Prepared(XElement page = null) { var s = Snapshot(page); var t = Tools(s); Read(t, s); Style(t, s); return s; }
+    /// <summary>正文、三行代码（中间一个空行）、正文。代码段落 p2–p4。</summary>
+    private static XElement CodePage()
+    {
+        var indented = Paragraph("c3", "&nbsp;&nbsp;&nbsp;&nbsp;return x + 1"); indented.SetAttributeValue("style", "font-size:9pt");
+        var first = Paragraph("c1", "def f(x):"); first.SetAttributeValue("style", "font-size:9pt");
+        return Page(Paragraph("a", "示例："), first, Paragraph("c2", ""), indented, Paragraph("b", "结尾"));
+    }
+    private static object Code(AgentTools tools, AgentPageSnapshot s, string language, params string[] ids) =>
+        Invoke(tools, "highlight_code", new { snapshot_id = s.SnapshotId, block_ids = ids, language });
+    private static AgentPageSnapshot CodePrepared() { var s = Snapshot(CodePage()); var t = Tools(s); Read(t, s); Code(t, s, "python", "p2", "p3", "p4"); return s; }
     private static void Conflict(Action<XElement> mutate)
     {
         var s = Prepared(); var api = new FakePage(s.Page); mutate(api.Page);
@@ -371,6 +493,11 @@ internal static class Program
     internal static void True(bool condition) { if (!condition) throw new Exception("Assertion failed"); }
     internal static void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception("Expected " + expected + "; actual " + actual); }
     private static void Throws(Action body) => Throws<AiException>(body);
+    private static void Rejects(string reason, Action body)
+    {
+        try { body(); } catch (AiException ex) { if (ex.Message.Contains(reason)) return; throw new Exception("Expected '" + reason + "'; actual " + ex.Message); }
+        throw new Exception("Expected AiException");
+    }
     private static void Throws<T>(Action body) where T : Exception
     { try { body(); } catch (T) { return; } throw new Exception("Expected " + typeof(T).Name); }
 
@@ -380,6 +507,7 @@ internal static class Program
         internal int Attempts, Writes, ConflictsRemaining;
         internal bool ThrowAfterSave, FailReadAfterSave;
         internal Action OnConflict, AfterSave;
+        private int _ids;
         internal FakePage(XElement page) { Page = new XElement(page); }
         public string GetPageContent(string id, PageInfo info)
         { if (FailReadAfterSave && Writes > 0) throw new Exception("read failed"); return Page.ToString(); }
@@ -389,6 +517,9 @@ internal static class Program
             if (ConflictsRemaining-- > 0) { OnConflict?.Invoke(); throw new COMException("conflict", unchecked((int)0x80042010)); }
             foreach (var c in XElement.Parse(xml).Elements())
             {
+                // OneNote 给新建的段落、表格分配 ID。
+                foreach (var e in c.DescendantsAndSelf().Where(e => new[] { "OE", "Table", "Row", "Cell" }.Contains(e.Name.LocalName) && e.Attribute("objectID") == null))
+                    e.SetAttributeValue("objectID", "new-" + ++_ids);
                 var identity = c.Name == One + "QuickStyleDef" ? "index" : "objectID";
                 var current = Page.Elements(c.Name).FirstOrDefault(e => (string)e.Attribute(identity) == (string)c.Attribute(identity));
                 if (current == null) Page.Add(new XElement(c)); else current.ReplaceWith(new XElement(c));
@@ -414,6 +545,26 @@ internal static class Program
     {
         public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<string> progress, CancellationToken cancellation) =>
             Task.FromResult(new AgentReply { Content = "已完成", FinishReason = "stop" });
+    }
+    private sealed class CodeScriptClient : IAgentChatClient
+    {
+        private readonly AgentPageSnapshot _s; private int _turn;
+        internal bool SawCodeTool;
+        internal CodeScriptClient(AgentPageSnapshot s) { _s = s; }
+        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<string> progress, CancellationToken cancellation)
+        {
+            SawCodeTool |= AgentChatClient.Serializer().Serialize(tools).Contains("highlight_code");
+            string name; object args;
+            switch (_turn++)
+            {
+                case 0: name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1", "p2", "p4", "p5" } }; break;
+                case 1: name = "highlight_code"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p2", "p3", "p4" }, language = "auto" }; break;
+                default: name = "finish_edit"; args = new { snapshot_id = _s.SnapshotId, draft_revision = _s.Revision }; break;
+            }
+            var reply = new AgentReply { FinishReason = "tool_calls" };
+            reply.Calls.Add(0, new AgentToolCall { Id = "k" + _turn, Name = name, Arguments = AgentChatClient.Serializer().Serialize(args) });
+            return Task.FromResult(reply);
+        }
     }
     private sealed class ScriptedClient : IAgentChatClient
     {
