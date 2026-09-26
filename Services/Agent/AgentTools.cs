@@ -21,9 +21,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal double Max = 100000;
         internal int MinItems;
         internal int MaxItems = 100;
+        internal int MaxLength = 40000;
         internal bool NonEmpty;
         internal static AgentSchema Obj(Dictionary<string, AgentSchema> props, params string[] required) => new AgentSchema { Type = "object", Properties = props, Required = required };
         internal static AgentSchema Str(params string[] values) => new AgentSchema { Type = "string", Enum = values.Length == 0 ? null : values };
+        internal static AgentSchema Short(int maxLength) => new AgentSchema { Type = "string", MaxLength = maxLength };
         internal static AgentSchema Num(double min, double max, bool integer = false) => new AgentSchema { Type = integer ? "integer" : "number", Min = min, Max = max };
         internal static AgentSchema Array(AgentSchema item) => new AgentSchema { Type = "array", Items = item, MinItems = 1 };
 
@@ -40,7 +42,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (Items != null) { value["items"] = Items.Json(); value["minItems"] = MinItems; value["maxItems"] = MaxItems; }
             if (Enum != null) value["enum"] = Enum;
             if (Type == "number" || Type == "integer") { value["minimum"] = Min; value["maximum"] = Max; }
-            if (Type == "string") { value["minLength"] = 1; value["maxLength"] = 40000; }
+            if (Type == "string") { value["minLength"] = 1; value["maxLength"] = MaxLength; }
             return value;
         }
 
@@ -58,7 +60,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     foreach (var item in list) Items.Validate(item, path + "[]");
                     return;
                 case "string":
-                    if (!(value is string s) || s.Length == 0 || s.Length > 40000 || (Enum != null && !Enum.Contains(s))) throw new AiException(path + " 的字符串无效。");
+                    if (!(value is string s) || s.Length == 0 || s.Length > MaxLength || (Enum != null && !Enum.Contains(s))) throw new AiException(path + " 的字符串无效。");
                     return;
                 case "boolean":
                     if (!(value is bool)) throw new AiException(path + " 必须是布尔值。");
@@ -121,6 +123,17 @@ namespace OneNoteCodeHelper.Services.Agent
                     ["block_id"] = AgentSchema.Str(), ["quote"] = AgentSchema.Str(), ["occurrence"] = AgentSchema.Num(1, 1000, true), ["style"] = style
                 }, "block_id", "quote", "occurrence", "style"))
             }, "snapshot_id", "targets"), TextStyle);
+            Register("fix_text", $"修正错别字、同音字、形近字和明显的标点误用：把段落里第 occurrence 处（从1开始）精确原文 quote 换成 replacement。" +
+                $"quote 取出错处连同前后一两个字，两者都不超过 {MaxFixChars} 字、不含换行；同一段的多处修正按顺序应用。只改出错的字，不润色、不改写，保留原有格式和链接。",
+                AgentSchema.Obj(new Dictionary<string, AgentSchema>
+                {
+                    ["snapshot_id"] = AgentSchema.Str(),
+                    ["fixes"] = AgentSchema.Array(AgentSchema.Obj(new Dictionary<string, AgentSchema>
+                    {
+                        ["block_id"] = AgentSchema.Str(), ["quote"] = AgentSchema.Short(MaxFixChars), ["occurrence"] = AgentSchema.Num(1, 1000, true),
+                        ["replacement"] = AgentSchema.Short(MaxFixChars)
+                    }, "block_id", "quote", "occurrence", "replacement"))
+                }, "snapshot_id", "fixes"), FixText);
             if (snapshot.Options.EnableCodeHighlight)
             {
                 var code = WithIds();
@@ -137,6 +150,9 @@ namespace OneNoteCodeHelper.Services.Agent
             Register("finish_edit", "独立调用此工具提交草稿并验证结果；必须传入最新修订号。本任务之后不能继续编辑。", finish, Finish);
         }
 
+        /// <summary>fix_text 每处原文和改后文字的字数上限：够放下错字和前后一两个字，放不下整句改写。</summary>
+        internal const int MaxFixChars = 30;
+
         private static string[] Languages => new[] { LanguageRegistry.AutoDetectId }.Concat(LanguageRegistry.All.Select(l => l.Id)).ToArray();
 
         /// <summary>工具在进度和步骤列表里的中文名。</summary>
@@ -148,6 +164,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "read_blocks": return "读取段落";
                 case "set_paragraph_style": return "设置段落样式";
                 case "set_text_style": return "设置重点文字样式";
+                case "fix_text": return "修正错别字";
                 case "highlight_code": return "高亮代码";
                 case "get_pending_changes": return "检查格式草稿";
                 case "finish_edit": return "写回并验证";
@@ -178,6 +195,9 @@ namespace OneNoteCodeHelper.Services.Agent
                     break;
                 case "set_text_style":
                     detail = AiClient.Get(args, "targets") is IList targets ? $"{targets.Count} 处" : null;
+                    break;
+                case "fix_text":
+                    detail = AiClient.Get(args, "fixes") is IList fixes ? $"{fixes.Count} 处" : null;
                     break;
                 case "highlight_code":
                     detail = JoinDetail(LanguageName(AiClient.Get(outcome, "language") as string ?? AiClient.Get(args, "language") as string),
@@ -245,7 +265,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 total = _snapshot.Blocks.Count, next_offset = offset + 100 < _snapshot.Blocks.Count ? (int?)(offset + 100) : null,
                 blocks = _snapshot.Blocks.Skip(offset).Take(100).Select(b => new { id = b.Id, container_id = b.ContainerId, parent_id = b.ParentId, depth = b.Depth,
                     editable = b.Editable, reason = b.ProtectedReason,
-                    summary = b.Editable || b.CodeCandidate ? b.Text.Substring(0, Math.Min(80, b.Text.Length)) : null }).ToArray() };
+                    summary = b.Editable || b.CodeCandidate ? b.CurrentText.Substring(0, Math.Min(80, b.CurrentText.Length)) : null }).ToArray() };
         }
         private List<AgentBlock> Targets(IDictionary<string, object> args)
         {
@@ -256,7 +276,7 @@ namespace OneNoteCodeHelper.Services.Agent
         private AgentBlock Block(string id, bool writing)
         {
             var b = _snapshot.Blocks.FirstOrDefault(x => x.Id == id);
-            if (writing && b != null && (b.CodeCandidate || b.Conversion != null)) throw new AiException("代码段落不能设置样式；用 highlight_code 转换为代码框。");
+            if (writing && b != null && (b.CodeCandidate || b.Conversion != null)) throw new AiException("代码段落不能设置样式或修改文字；用 highlight_code 转换为代码框。");
             // 待高亮的代码可以读取，供判断范围和语言。
             if (b == null || !(b.Editable || b.CodeCandidate)) throw new AiException("目标不存在或受到保护。");
             if (writing && !b.Read) throw new AiException("请先完整读取目标段落。");
@@ -267,7 +287,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var blocks = Targets(args);
             var page = _snapshot.CreateDraftPage();
             foreach (var b in blocks) b.Read = true;
-            return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.Text, depth = b.Depth,
+            return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.CurrentText, depth = b.Depth,
                 container_id = b.ContainerId, parent_id = b.ParentId, style = Css.Effective(AgentCommitter.Find(page, b.ObjectId), page),
                 runs = b.Draft.Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() }).ToArray() };
         }
@@ -306,12 +326,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (!drafts.TryGetValue(b, out var draft)) drafts[b] = draft = new XElement(b.Draft);
                 var rich = new AgentRichText(draft);
                 var quote = (string)item["quote"];
-                var start = -quote.Length;
-                for (var i = 0; i < Convert.ToInt32(item["occurrence"]); i++)
-                {
-                    start = rich.Text.IndexOf(quote, start + quote.Length, StringComparison.Ordinal);
-                    if (start < 0) throw new AiException("找不到指定文字或出现序号。");
-                }
+                var start = Locate(rich.Text, quote, Convert.ToInt32(item["occurrence"]));
                 var css = new Dictionary<string, string>();
                 foreach (var style in (IDictionary<string, object>)item["style"])
                 {
@@ -326,6 +341,50 @@ namespace OneNoteCodeHelper.Services.Agent
                 rich.Format(start, quote.Length, css);
             }
             return Publish(drafts);
+        }
+
+        /// <summary>quote 第 occurrence 次（从 1 开始，不重叠计数）出现的位置。</summary>
+        private static int Locate(string text, string quote, int occurrence)
+        {
+            var start = -quote.Length;
+            for (var i = 0; i < occurrence; i++)
+            {
+                start = text.IndexOf(quote, start + quote.Length, StringComparison.Ordinal);
+                if (start < 0) throw new AiException("找不到指定文字或出现序号。");
+            }
+            return start;
+        }
+
+        private static readonly char[] LineBreaks = { '\n', '\r' };
+
+        /// <summary>
+        /// 唯一能改文字的工具，只做字词级的小修正：每处原文和改后文字都有字数上限，不能动换行，代码段落不能改。
+        /// 和格式工具一样只改草稿，写回时照常检查冲突、回读核验，撤销时把文字一起还原。
+        /// </summary>
+        private object FixText(IDictionary<string, object> args)
+        {
+            var drafts = new Dictionary<AgentBlock, XElement>();
+            var fixes = new Dictionary<AgentBlock, List<string>>();
+            foreach (IDictionary<string, object> item in (IList)args["fixes"])
+            {
+                var b = Block((string)item["block_id"], true);
+                var quote = (string)item["quote"];
+                var replacement = (string)item["replacement"];
+                if (quote == replacement) throw new AiException("replacement 与 quote 相同，没有要修正的文字。");
+                if (quote.IndexOfAny(LineBreaks) >= 0 || replacement.IndexOfAny(LineBreaks) >= 0) throw new AiException("修正的文字不能包含换行。");
+                if (!drafts.TryGetValue(b, out var draft)) { drafts[b] = draft = new XElement(b.Draft); fixes[b] = new List<string>(); }
+                var text = new AgentRichText(draft).Text;
+                var start = Locate(text, quote, Convert.ToInt32(item["occurrence"]));
+                new AgentRichText(draft).Replace(start, quote.Length, replacement);
+                if (new AgentRichText(draft).Text != text.Substring(0, start) + replacement + text.Substring(start + quote.Length))
+                    throw new AiException("修正后的文字与预期不一致。");
+                fixes[b].Add($"「{quote}」→「{replacement}」");
+            }
+            // 全部校验通过后才发布，失败时这个工具没有副作用。
+            foreach (var pair in drafts) { pair.Key.Draft = pair.Value; pair.Key.TextFixes.AddRange(fixes[pair.Key]); }
+            _snapshot.Revision++;
+            return new { ok = true, draft_revision = _snapshot.Revision, changed = drafts.Keys.Select(b => b.Id).ToArray(),
+                blocks = drafts.Keys.Select(b => new { id = b.Id, text = b.CurrentText }).ToArray() };
         }
 
         private object HighlightCode(IDictionary<string, object> args)
@@ -352,7 +411,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var conversion = new AgentCodeConversion { Blocks = ordered, LanguageId = language.Id, Code = selection.Code, Table = table };
             // 转换后这些段落就不在了，之前给它们排的格式草稿作废。
             var discarded = ordered.Where(b => b.Changed).Select(b => b.Id).ToArray();
-            foreach (var b in ordered) { b.Draft = new XElement(b.Original); b.Conversion = conversion; }
+            foreach (var b in ordered) { b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.Conversion = conversion; }
             _snapshot.CodeConversions.Add(conversion);
             _snapshot.Revision++;
             return new { ok = true, draft_revision = _snapshot.Revision, changed = ordered.Select(b => b.Id).ToArray(), noop = new string[0],
@@ -378,6 +437,7 @@ namespace OneNoteCodeHelper.Services.Agent
         }
         private object Pending(IDictionary<string, object> args) => new { snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
             changed = _snapshot.Blocks.Where(b => b.Changed).Select(b => b.Id).ToArray(),
+            text_fixes = _snapshot.Blocks.Where(b => b.TextFixes.Count > 0).Select(b => new { id = b.Id, fixes = b.TextFixes.ToArray() }).ToArray(),
             unread = _snapshot.Blocks.Where(b => b.Editable && !b.Read && b.Conversion == null).Select(b => b.Id).ToArray(),
             code_blocks = _snapshot.CodeConversions.Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
             unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),

@@ -11,7 +11,8 @@ using OneNoteCodeHelper.Views;
 internal static class WindowPreview
 {
     // 只渲染内存中的窗口内容，不启动 OneNote、不调用接口、不显示原生窗口。
-    // 出三张图：Agent 自定义排版、选了第一个文字功能、模拟处理中；窗口高度固定，三张应一样高。
+    // 出几张图：Agent 自定义排版、选了第一个文字功能、模拟处理中（摘录框超过三行、只有一行、还没有输出三种）；
+    // 窗口高度固定，几张应一样高。
     internal static int Render(string directory)
     {
         Directory.CreateDirectory(directory);
@@ -19,12 +20,16 @@ internal static class WindowPreview
             "<one:Outline><one:OEChildren><one:OE objectID='p1' selected='all'><one:T><![CDATA[示例段落]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>";
         RenderOne(directory, "agent-window.png", xml, null);
         RenderOne(directory, "agent-window-text.png", xml, window => window.FunctionPicker.SelectedIndex = 1);
-        RenderOne(directory, "agent-window-running.png", xml, SimulateRunning);
+        RenderOne(directory, "agent-window-running.png", xml, window => SimulateRunning(window,
+            "…正文统一为 11 磅微软雅黑，段后 6 磅。二级标题目前只是加粗的正文，需要改成原生二级标题，\n" +
+            "接下来先读取第 4 到第 12 段的格式，确认列表缩进不受影响。最后检查草稿再提交。"));
+        RenderOne(directory, "agent-window-running-short.png", xml, window => SimulateRunning(window, "先读取页面概况，看看有哪些段落。"));
+        RenderOne(directory, "agent-window-running-empty.png", xml, window => SimulateRunning(window, null));
         return 0;
     }
 
-    /// <summary>只摆出处理中各块的样子（思考摘录、步骤），不真的执行。</summary>
-    private static void SimulateRunning(AgentWindow window)
+    /// <summary>只摆出处理中各块的样子（思考摘录、步骤），不真的执行。thinking 为 null 时摆出占位文字。</summary>
+    private static void SimulateRunning(AgentWindow window, string thinking)
     {
         window.InfoIcon.Visibility = Visibility.Collapsed;
         window.SpinnerIcon.Visibility = Visibility.Visible;
@@ -32,7 +37,8 @@ internal static class WindowPreview
         window.DetailText.Text = "第 3 轮 · 已用时 42 秒";
         window.IntroText.Visibility = Visibility.Collapsed;
         window.ThinkingBox.Visibility = Visibility.Visible;
-        window.ThinkingText.Text = "…正文统一为 11 磅微软雅黑，段后 6 磅。二级标题目前只是加粗的正文，需要改成原生二级标题，\n接下来先读取第 4 到第 12 段的格式，确认列表缩进不受影响。";
+        window.ThinkingText.Text = thinking ?? "等待模型输出…";
+        if (thinking == null) window.ThinkingText.Foreground = (Brush)window.FindResource("Faint");
         var done = new SolidColorBrush(Color.FromRgb(0x16, 0xA3, 0x4A));
         var running = new SolidColorBrush(Color.FromRgb(0x25, 0x63, 0xEB));
         window.StepsList.ItemsSource = new[]

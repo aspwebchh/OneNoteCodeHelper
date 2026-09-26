@@ -60,7 +60,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal XElement Original;
         internal XElement Draft;
         internal string Fingerprint;
+        /// <summary>快照时的文字。修正过错别字后，草稿里的文字见 <see cref="CurrentText"/>。</summary>
         internal string Text;
+        /// <summary>草稿里已排的文字修正，每项形如「原文」→「改后」。写回核验通过后进入结果，撤销时一起还原。</summary>
+        internal readonly List<string> TextFixes = new List<string>();
+        internal string CurrentText => TextFixes.Count == 0 ? Text : new AgentRichText(Draft).Text;
         internal string ProtectedReason;
         internal string ContainerId;
         internal string ParentId;

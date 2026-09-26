@@ -346,7 +346,7 @@
                              TextWrapping="Wrap"
                              VerticalScrollBarVisibility="Auto"
                              MaxLength="8000"
-                             Text="将该页面上的内容排版下，要美观。统一正文格式，突出标题和重点。" />
+                             Text="将该页面上的内容排版下，要美观。统一正文格式，突出标题，修正错别字。" />
                     <TextBox x:Name="PromptText"
                              Style="{StaticResource InputBox}"
                              IsReadOnly="True"
@@ -435,8 +435,9 @@
                 </Grid>
 
                 <!--
-                  处理中：模型思考或回复原文的最后几行。文字贴底，最新的一行总在最下面，旧的从顶上裁掉；
-                  行高 16、内容区 48，正好三整行。从开始到出结果一直占着位置，没有文字时显示占位。
+                  处理中：模型思考或回复原文的最后几行。行高 16、内容区 48，正好三整行。
+                  文字块贴底、最小高度等于内容区：不满三行时从顶上开始排，不留一片空白；超过三行时最新的一行在最下面，旧的从顶上裁掉。
+                  从开始到出结果一直占着位置，没有文字时显示占位。
                 -->
                 <Border x:Name="ThinkingBox"
                         Grid.Row="1"
@@ -450,6 +451,7 @@
                         CornerRadius="6"
                         Visibility="Collapsed">
                     <TextBlock x:Name="ThinkingText"
+                               MinHeight="48"
                                VerticalAlignment="Bottom"
                                LineHeight="16"
                                LineStackingStrategy="BlockLineHeight"

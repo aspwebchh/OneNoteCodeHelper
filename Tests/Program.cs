@@ -254,6 +254,79 @@ internal static class Program
             var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None); Equal(1, r.Applied);
             api.AfterSave = null; Equal(1, c.Undo(s.PageId, r, s.Options, CancellationToken.None).Applied);
         });
+        Test("text replacement keeps formatting and links of untouched characters", () =>
+        {
+            var oe = Paragraph("a", "我们<b>按装</b>了&nbsp;<a href='https://example.com'>链结</a>", "尾巴");
+            new AgentRichText(oe).Replace(2, 2, "安装");
+            new AgentRichText(oe).Replace(6, 2, "链接");
+            var rich = new AgentRichText(oe);
+            Equal("我们安装了 链接尾巴", rich.Text);
+            var html = oe.Element(One + "T").Value;
+            True(html.Contains("<b>安装</b>")); True(html.Contains("href=\"https://example.com\">链接</a>")); True(html.Contains("&nbsp;"));
+            Equal(2, oe.Elements(One + "T").Count()); Equal("尾巴", oe.Elements(One + "T").Last().Value);
+            // 纯删除（「的的」改「的」）和跨格式边界的修正：没变的字保留各自的格式。
+            var mixed = Paragraph("b", "<b>重要</b>的的事");
+            new AgentRichText(mixed).Replace(1, 3, "要的");
+            Equal("重要的事", new AgentRichText(mixed).Text); True(mixed.Element(One + "T").Value.StartsWith("<b>重要</b>的", StringComparison.Ordinal));
+            Throws(() => new AgentRichText(Paragraph("c", "第一<br>第二")).Replace(1, 2, "一 第"));
+        });
+        Test("fix_text rejects bad targets without side effects", () =>
+        {
+            var mono = Paragraph("m", "int x = 1;"); mono.SetAttributeValue("style", "font-family:Consolas");
+            var s = Snapshot(Page(Paragraph("a", "我们按装了软件"), mono)); var t = Tools(s);
+            Rejects("请先完整读取", () => Fix(t, s, "p1", "按装", "安装"));
+            Read(t, s); Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" } });
+            Rejects("找不到", () => Fix(t, s, "p1", "安装", "按装"));
+            Rejects("相同", () => Fix(t, s, "p1", "按装", "按装"));
+            Rejects("换行", () => Fix(t, s, "p1", "按装", "安\n装"));
+            Rejects("代码段落", () => Fix(t, s, "p2", "int", "var"));
+            Rejects("字符串无效", () => Fix(t, s, "p1", "按装", new string('安', AgentTools.MaxFixChars + 1)));
+            Rejects("找不到", () => Invoke(t, "fix_text", new { snapshot_id = s.SnapshotId, fixes = new object[] {
+                new { block_id = "p1", quote = "按装", occurrence = 1, replacement = "安装" },
+                new { block_id = "p1", quote = "软体", occurrence = 1, replacement = "软件" } } }));
+            Equal(0, s.Revision); True(s.Blocks.All(b => !b.Changed && b.TextFixes.Count == 0));
+        });
+        Test("fix_text commits verified text, combines with styles and undo restores it", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "我们按装了软件"), Paragraph("b", "第二段"))); var t = Tools(s); Read(t, s);
+            var result = AgentChatClient.Serializer().Serialize(Fix(t, s, "p1", "按装", "安装"));
+            True(result.Contains("我们安装了软件")); Equal(1, s.Revision);
+            // 修正后读到的、局部格式定位用的都是改过的文字。
+            True(AgentChatClient.Serializer().Serialize(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" } })).Contains("我们安装了软件"));
+            Invoke(t, "set_text_style", new { snapshot_id = s.SnapshotId, targets = new[] { new { block_id = "p1", quote = "安装", occurrence = 1, style = new { bold = true } } } });
+            Style(t, s);
+            True(AgentChatClient.Serializer().Serialize(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId })).Contains("「按装」→「安装」"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.Applied); Equal(1, api.Writes); True(r.Message.Contains("修正文字 1 处"));
+            Equal("「按装」→「安装」", r.TextFixes.Single());
+            var written = AgentCommitter.Find(api.Page, "a");
+            Equal("我们安装了软件", new AgentRichText(written).Text); True(written.Attribute("style").Value.Contains("16pt"));
+            Equal("第二段", new AgentRichText(AgentCommitter.Find(api.Page, "b")).Text);
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); True(undo.Message.Contains("还原文字 1 处"));
+            Equal("我们按装了软件", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+            Equal((string)AgentCommitter.Find(s.Page, "a").Attribute("style"), (string)AgentCommitter.Find(api.Page, "a").Attribute("style"));
+        });
+        Test("fixed paragraph edited during processing is skipped", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "我们按装了软件"))); var t = Tools(s); Read(t, s); Fix(t, s, "p1", "按装", "安装");
+            var api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "a").Element(One + "T").Value = "我们按装了软件，用户又补了一句";
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal(1, r.Conflicts); Equal(0, api.Writes); Equal(0, r.TextFixes.Count);
+        });
+        Test("text changed outside fix_text is blocked at commit", () =>
+        {
+            var s = Prepared(); s.Blocks[0].Draft.Element(One + "T").Value = "偷改的文字";
+            var api = new FakePage(s.Page);
+            Rejects("改变了正文", () => new AgentCommitter(api).Commit(s, CancellationToken.None)); Equal(0, api.Writes);
+        });
+        Test("code conversion discards pending text fixes", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "示例："), Paragraph("c", "x = 1 # 按装"))); var t = Tools(s); Read(t, s);
+            Fix(t, s, "p2", "按装", "安装"); True(s.Blocks[1].TextFixes.Count == 1);
+            Code(t, s, "python", "p2");
+            Equal(0, s.Blocks[1].TextFixes.Count); Equal("x = 1 # 按装", s.Blocks[1].CurrentText);
+        });
         Test("stream interleaved tool argument fragments", StreamTest);
         Test("DONE without finish reason cannot execute", () =>
         {
@@ -290,6 +363,7 @@ internal static class Program
         {
             Equal(("读取段落 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("read_blocks", "{\"block_ids\":[\"a\",\"b\"]}", "{}"));
             Equal(("设置重点文字样式 · 2 处", AgentStepState.Done), AgentTools.DescribeStep("set_text_style", "{\"targets\":[{},{}]}", "{\"ok\":true}"));
+            Equal(("修正错别字 · 3 处", AgentStepState.Done), AgentTools.DescribeStep("fix_text", "{\"fixes\":[{},{},{}]}", "{\"ok\":true}"));
             Equal(("高亮代码 · " + LanguageRegistry.Find("python").DisplayName + " · 3 段", AgentStepState.Done),
                 AgentTools.DescribeStep("highlight_code", "{\"block_ids\":[\"a\",\"b\",\"c\"],\"language\":\"auto\"}", "{\"ok\":true,\"language\":\"python\"}"));
             Equal(("高亮代码 · 自动识别 · 1 段：无法自动识别代码语言。", AgentStepState.Failed),
@@ -501,6 +575,8 @@ internal static class Program
     private static void Read(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = s.Blocks.Where(b => b.Editable).Select(b => b.Id).ToArray() });
     private static void Style(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" });
     private static AgentPageSnapshot Prepared(XElement page = null) { var s = Snapshot(page); var t = Tools(s); Read(t, s); Style(t, s); return s; }
+    private static object Fix(AgentTools tools, AgentPageSnapshot s, string id, string quote, string replacement) =>
+        Invoke(tools, "fix_text", new { snapshot_id = s.SnapshotId, fixes = new[] { new { block_id = id, quote, occurrence = 1, replacement } } });
     /// <summary>正文、三行代码（中间一个空行）、正文。代码段落 p2–p4。</summary>
     private static XElement CodePage()
     {

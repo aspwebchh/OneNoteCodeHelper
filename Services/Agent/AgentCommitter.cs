@@ -19,6 +19,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string ObjectId;
         internal XElement Before;
         internal string AfterFingerprint;
+        /// <summary>这段写入时修正的文字；撤销时文字也一起还原。</summary>
+        internal List<string> TextFixes = new List<string>();
     }
 
     internal sealed class AgentReport
@@ -34,8 +36,10 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<AgentUndoItem> Undo = new List<AgentUndoItem>();
         internal readonly List<AgentCodeUndoItem> CodeUndo = new List<AgentCodeUndoItem>();
         internal readonly List<string> ConflictIds = new List<string>();
+        /// <summary>已核验写入的文字修正，每项形如「原文」→「改后」。含笔记正文，只在窗口里显示，不写日志。</summary>
+        internal readonly List<string> TextFixes = new List<string>();
         internal bool CanUndo => Undo.Count + CodeUndo.Count > 0;
-        internal object ToToolResult() => new { status = Status, applied = Applied, code_blocks = CodeBlocks, skipped_conflict = ConflictIds,
+        internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, code_blocks = CodeBlocks, skipped_conflict = ConflictIds,
             unverified = Unverified, protected_count = Protected, message = Message };
     }
 
@@ -74,13 +78,16 @@ namespace OneNoteCodeHelper.Services.Agent
                         if (target == null || !fingerprints.TryGetValue(block.ObjectId, out var fingerprint) || fingerprint != block.Fingerprint)
                         { report.ConflictIds.Add(block.Id); continue; }
                         var before = new XElement(target);
-                        var originalContent = new AgentRichText(target).Signature(page, false);
+                        // 只有 fix_text 排过修正的段落可以改文字，而且只能改成草稿里的样子。
+                        var expectedContent = new AgentRichText(block.Draft).Signature(page, false);
+                        if (block.TextFixes.Count == 0 && expectedContent != new AgentRichText(target).Signature(page, false))
+                            throw new AiException("格式修改改变了正文或链接，已阻止写入。");
                         AgentPageSnapshot.CopyFormat(block.Draft, target);
                         var styleId = (string)block.Draft.Attribute("quickStyleIndex");
                         var definition = styleId == null ? null : snapshot.DraftStyles.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == styleId);
                         if (definition != null) target.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(page, definition));
-                        if (new AgentRichText(target).Signature(page, false) != originalContent)
-                            throw new AiException("格式修改改变了正文或链接，已阻止写入。");
+                        if (new AgentRichText(target).Signature(page, false) != expectedContent)
+                            throw new AiException("写入的正文与草稿不一致，已阻止写入。");
                         planned.Add((block, before, new XElement(target)));
                         untouched.Remove(block.ObjectId);
                         containers.Add(target.Ancestors().First(e => e.Parent == page));
@@ -144,8 +151,9 @@ namespace OneNoteCodeHelper.Services.Agent
                             if (written == null || AgentPageSnapshot.SemanticFormat(written, actual) != DesiredSignature(item.Desired, page, item.Block.ObjectId))
                             { report.Unverified++; continue; }
                             report.Applied++;
+                            report.TextFixes.AddRange(item.Block.TextFixes);
                             report.Undo.Add(new AgentUndoItem { ObjectId = item.Block.ObjectId, Before = item.Before,
-                                AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual) });
+                                AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual), TextFixes = item.Block.TextFixes.ToList() });
                         }
                         catch (Exception) { report.Unverified++; }
                     }
@@ -179,7 +187,8 @@ namespace OneNoteCodeHelper.Services.Agent
                         if (same) report.CodeBlocks++; else report.Unverified++;
                     }
                     report.Status = report.Unverified > 0 || report.Conflicts > 0 ? "PartiallyApplied" : "Verified";
-                    report.Message = $"已验证修改 {report.Applied} 段；" + (codes.Count > 0 ? $"高亮代码 {report.CodeBlocks} 处；" : "") +
+                    report.Message = $"已验证修改 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"修正文字 {report.TextFixes.Count} 处；" : "") +
+                        (codes.Count > 0 ? $"高亮代码 {report.CodeBlocks} 处；" : "") +
                         $"冲突跳过 {report.Conflicts} 段；未验证 {report.Unverified} 段；保护 {report.Protected} 段。";
                     if (uncertain && report.Applied + report.CodeBlocks == 0) report.Message = "写回未得到确认，请检查页面。" + report.Message;
                     return report;
@@ -210,12 +219,15 @@ namespace OneNoteCodeHelper.Services.Agent
                     if (block == null || !block.Editable || block.Fingerprint != item.AfterFingerprint)
                     { skipped.Add(item.ObjectId); continue; }
                     AgentPageSnapshot.CopyFormat(item.Before, block.Draft);
+                    // 把修正过的文字改回去，提交时按改文字的段落核验。
+                    block.TextFixes.AddRange(item.TextFixes);
                 }
                 var report = Commit(snapshot, cancellation);
                 report.Conflicts += skipped.Count;
                 report.ConflictIds.AddRange(skipped);
                 if (report.Status == "Verified" && report.Conflicts > 0) report.Status = "PartiallyApplied";
-                report.Message = $"撤销已验证恢复 {report.Applied} 段；" + (previous.CodeUndo.Count > 0 ? $"恢复代码 {report.CodeBlocks} 处；" : "") +
+                report.Message = $"撤销已验证恢复 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"还原文字 {report.TextFixes.Count} 处；" : "") +
+                    (previous.CodeUndo.Count > 0 ? $"恢复代码 {report.CodeBlocks} 处；" : "") +
                     $"跳过 {report.Conflicts} 处；未验证 {report.Unverified} 处。";
                 return report;
             }

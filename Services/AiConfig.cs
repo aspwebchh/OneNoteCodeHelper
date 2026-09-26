@@ -159,7 +159,7 @@ namespace OneNoteCodeHelper.Services
         internal const string SmartFunctionName = "智能校正";
 
         /// <summary>
-        /// Agent 窗口「功能」下拉的第一项：按需求调用格式工具，不是配置里的文字功能。
+        /// Agent 窗口「功能」下拉的第一项：按需求调用格式和改错别字的工具，不是配置里的文字功能。
         /// 配置里要是有同名的 Function，窗口里跳过那一项。
         /// </summary>
         internal const string AgentFunctionName = "自定义排版（Agent）";

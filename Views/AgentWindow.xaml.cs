@@ -31,7 +31,7 @@ namespace OneNoteCodeHelper.Views
         private const string ThinkingPlaceholder = "等待模型输出…";
 
         private const string AgentIntro =
-            "Agent 会读取所选范围并调用格式工具调整字体、标题、间距等，完成后显示回读核验的结果；本窗口内可以撤销最近一次修改。";
+            "Agent 会读取所选范围，调整字体、标题、间距等格式，需求里提到时也会修正错别字。完成后显示回读核验的结果，本窗口内可以撤销最近一次修改。";
 
         private readonly IOneNotePageAccess _api;
         private readonly string _pageId;
@@ -190,7 +190,7 @@ namespace OneNoteCodeHelper.Views
             PromptText.Visibility = function == null ? Visibility.Collapsed : Visibility.Visible;
             PromptText.Text = function?.Prompt ?? string.Empty;
             RequestLabel.Text = function == null ? "需求" : "提示词";
-            RequestHint.Text = function == null ? "只调整格式，保留正文、代码和段落结构" : "在「AI 配置」中修改";
+            RequestHint.Text = function == null ? "调整格式、修正错别字，保留代码和段落结构" : "在「AI 配置」中修改";
             IntroText.Text = function == null
                 ? AgentIntro
                 : "AI 按「" + function.Name + "」逐段修改文字，结果直接写回并列出改动清单" +
@@ -497,7 +497,9 @@ namespace OneNoteCodeHelper.Views
                     break;
             }
 
-            ShowResult("结果", report.Message);
+            // 执行时列出核验写入的文字修正；撤销时这些修正已经还原，消息里的计数就够了。
+            ShowResult("结果", undo || report.TextFixes.Count == 0 ? report.Message
+                : report.Message + "\n修正的文字：\n" + string.Join("\n", report.TextFixes.Select(f => "• " + f)));
         }
 
         private void ShowAiReport(AiReport report)

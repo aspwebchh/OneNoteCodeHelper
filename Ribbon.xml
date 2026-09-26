@@ -93,7 +93,7 @@
                   size="large"
                   image="Agent"
                   screentip="用 AI 整理页面格式、校对文字"
-                  supertip="打开 Agent 窗口，选择功能、模型和思考强度后处理当前页或选中段落：自定义排版按需求调整格式；智能校正、错别字修复、排版优化直接修改文字。代码框不会交给 AI。"
+                  supertip="打开 Agent 窗口，选择功能、模型和思考强度后处理当前页或选中段落：自定义排版按需求调整格式、修正错别字，可以撤销；智能校正、错别字修复、排版优化直接改写文字。代码框不会交给 AI。"
                   onAction="OnShowAgentWindow" />
 
           <button id="OncAiConfig"

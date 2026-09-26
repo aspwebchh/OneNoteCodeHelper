@@ -6,14 +6,14 @@
 
 1. 「开始 → AI 助手 → Agent」通过 `AddIn.OnShowAgentWindow` 启动独立 STA 窗口，固定当前页及打开窗口时的选区。
 2. 用户选择整页或选中段落并输入需求。后台读取固定页面，构建短 ID、保护范围、内容和格式指纹。
-3. `AgentRunner` 把模型原生 `tool_calls` 映射到七个本地函数，完整读取后才能修改段落。模型的文字声明不能触发写回。
-4. 格式工具只更新内存草稿。每个批量调用全部校验通过后才发布，返回修订号；参数错误不会留下半个工具调用的修改。
+3. `AgentRunner` 把模型原生 `tool_calls` 映射到八个本地函数，完整读取后才能修改段落。模型的文字声明不能触发写回。
+4. 格式和改字工具只更新内存草稿。每个批量调用全部校验通过后才发布，返回修订号；参数错误不会留下半个工具调用的修改。
 5. 模型独立调用 `finish_edit` 后，提交器在页面锁内重读、识别冲突、重建完整的受影响容器、带时间戳提交，并回读核验。
 6. UI 展示实际核验结果，保存本次已确认段落的撤销记录。撤销再次校验指纹，避免覆盖后来编辑的内容。
 
 页面正文作为数据传给模型，不作为系统指令。工具不接受任意 XML、HTML、外部页面 ID、文件路径或脚本。修改范围不能超出快照；图片二进制、代码和受保护对象不传入模型。模型能读取的正文和富文本格式会发送给用户配置的模型接口。
 
-## 七个工具
+## 八个工具
 
 本地校验和 JSON Schema 共用 `AgentSchema` 定义；所有对象拒绝未知字段，限制数组长度、数值、枚举和字符串长度。
 
@@ -23,12 +23,16 @@
 | `read_blocks` | `snapshot_id`、`block_ids`；最多 100 段，返回完整文字、富文本 runs、当前草稿样式；读取受保护段落会拒绝 |
 | `set_paragraph_style` | `snapshot_id`、`block_ids`、`preset_id`、可选 `overrides`；预设为 page_title/heading1/heading2/body/quote，page_title 只用于原标题 |
 | `set_text_style` | `snapshot_id`、`targets`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、`style`；支持 bold/italic/underline/color |
+| `fix_text` | `snapshot_id`、`fixes`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、改后文字 `replacement`，两者各 1–30 字、不含换行，同一段的多处按顺序应用；代码段落拒绝。唯一能改文字的工具，系统提示词要求只在用户要求时修正错别字 |
 | `highlight_code` | `snapshot_id`、`block_ids`（最多 1000）、`language`（`auto` 或已支持的语言 id）；把连续的代码段落排入草稿，提交时换成高亮代码框。`Agent/EnableCodeHighlight=false` 时不注册 |
-| `get_pending_changes` | `snapshot_id`；返回草稿修订号、修改段落 ID、未完整读取的可编辑段落 ID、已排入的代码框、尚未转换的等宽代码及保护计数 |
+| `get_pending_changes` | `snapshot_id`；返回草稿修订号、修改段落 ID、已排的文字修正、未完整读取的可编辑段落 ID、已排入的代码框、尚未转换的等宽代码及保护计数 |
 | `finish_edit` | `snapshot_id`、`draft_revision`；必须是当轮唯一工具，修订号匹配后冻结草稿，只提交一次 |
 
 段落 overrides：`alignment` 为 left/center/right；`font_family` 为 Microsoft YaHei/Calibri/Arial 且需已安装；字号 8–32 pt；段前后间距 0–36 pt；颜色限于 `#1F4E79`、`#365F91`、`#222222`、`#666666`。
 局部文字按精确匹配定位，重复短语的出现序号按不重叠匹配计数。切开代理对、组合字符或常见 emoji 序列的请求会拒绝。
+
+`fix_text` 在原文和改后文字之间逐字比对：没变的字连同格式、链接原样保留，新字沿用被替换的字（纯插入时沿用前一个字）的格式。修正后 `read_blocks`、概况摘要和局部格式定位都按草稿里的新文字。
+提交时只有排过文字修正的段落可以改正文，而且必须和草稿一致；其他段落仍要求正文和链接不变。冲突检测、回读核验照旧，撤销记录带上修正，撤销时文字一起还原。修正清单只进窗口里的结果，日志只记条数。
 
 ## 代码框转换
 
@@ -48,7 +52,7 @@
 | `Views/AgentWindow.xaml(.cs)` | 功能（Agent 或文字功能）、模型、思考强度、范围、需求、进度（轮次、思考摘录、执行步骤）、取消、结果、会话撤销；窗口高度固定 |
 | `Services/Agent/AgentRunner.cs` | 模型循环、历史消息、工具分派、调用幂等和预算 |
 | `Services/Agent/AgentChatClient.cs` | Chat Completions、HTTP/SSE、工具片段聚合、消息 DTO |
-| `Services/Agent/AgentTools.cs` | 六个工具、Schema 与本地校验、草稿发布 |
+| `Services/Agent/AgentTools.cs` | 八个工具、Schema 与本地校验、草稿发布 |
 | `Services/Agent/AgentFormatting.cs` | 富文本解析与局部样式、等宽判定、CSS 归一化、预设、QuickStyleDef 管理 |
 | `Services/Agent/AgentCode.cs` | 代码框转换的范围校验、原段落记录、代码框指纹和撤销还原 |
 | `Services/Agent/AgentPageSnapshot.cs` | 范围、短 ID、保护对象、指纹、配置和语义投影 |

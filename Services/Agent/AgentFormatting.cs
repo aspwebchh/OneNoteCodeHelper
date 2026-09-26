@@ -128,12 +128,58 @@ namespace OneNoteCodeHelper.Services.Agent
             }
         }
 
-        internal void Format(int start, int length, IDictionary<string, string> properties, bool removeOnly = false)
+        private void CheckRange(int start, int length)
         {
             if (start < 0 || length < 0 || start + length > Text.Length) throw new AiException("文字范围无效。");
             var boundaries = new HashSet<int>(StringInfo.ParseCombiningCharacters(Text)) { Text.Length };
             if (!boundaries.Contains(start) || !boundaries.Contains(start + length) || !EmojiBoundary(Text, start) || !EmojiBoundary(Text, start + length))
                 throw new AiException("文字范围不能切开 Unicode 字符。");
+        }
+
+        /// <summary>
+        /// 把 [start, start + length) 的文字换成 replacement。逐字比对：没变的字连同格式、链接原样保留；
+        /// 新字沿用被它替换的那个字的格式，纯插入时沿用前一个字的，和在编辑器里改字一样。范围内不能有换行。
+        /// </summary>
+        internal void Replace(int start, int length, string replacement)
+        {
+            CheckRange(start, length);
+            if (length == 0) throw new AiException("文字范围无效。");
+            var chars = new List<Piece>();
+            foreach (var p in _pieces)
+            {
+                if (p.Break) chars.Add(p);
+                else chars.AddRange(p.Text.Select(ch => Copy(p, ch.ToString(), p.Path)));
+            }
+            var segment = chars.GetRange(start, length);
+            if (segment.Any(p => p.Break)) throw new AiException("修正的文字不能跨越换行。");
+            var output = chars.Take(start).ToList();
+            Piece replaced = null;
+            foreach (var op in TextDiff.Compute(string.Concat(segment.Select(p => p.Text)), replacement))
+            {
+                switch (op.Kind)
+                {
+                    case DiffKind.Keep:
+                        output.Add(segment[op.OldIndex]);
+                        replaced = null;
+                        break;
+                    case DiffKind.Delete:
+                        replaced = replaced ?? segment[op.OldIndex];
+                        break;
+                    default:
+                        var template = replaced ?? (output.Count > start ? output[output.Count - 1] : null) ?? (start > 0 && !chars[start - 1].Break ? chars[start - 1] : segment[0]);
+                        output.Add(new Piece { Run = template.Run, Text = op.NewChar.ToString(), Path = template.Path });
+                        break;
+                }
+            }
+            output.AddRange(chars.Skip(start + length));
+            _pieces.Clear();
+            _pieces.AddRange(output);
+            Save();
+        }
+
+        internal void Format(int start, int length, IDictionary<string, string> properties, bool removeOnly = false)
+        {
+            CheckRange(start, length);
             var output = new List<Piece>();
             var offset = 0;
             foreach (var p in _pieces)
