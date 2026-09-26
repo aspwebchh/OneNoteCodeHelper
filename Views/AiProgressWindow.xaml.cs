@@ -293,8 +293,8 @@ namespace OneNoteCodeHelper.Views
             CancelButton.IsEnabled = false;
         }
 
-        /// <summary>读嵌入资源里的图标（和功能区用的是同一张），找不到就不显示。</summary>
-        private static ImageSource LoadIcon(string name)
+        /// <summary>读嵌入资源里的图标（和功能区用的是同一张），找不到就不显示。Agent 窗口也用这个。</summary>
+        internal static ImageSource LoadIcon(string name)
         {
             try
             {
