@@ -16,20 +16,26 @@ namespace OneNoteCodeHelper.Services.Agent
     {
         internal string Id = "";
         internal string Name = "";
-        internal string Arguments = "";
+        internal readonly StringBuilder ArgumentsBuffer = new StringBuilder();
+        internal string Arguments { get => ArgumentsBuffer.ToString(); set { ArgumentsBuffer.Clear(); ArgumentsBuffer.Append(value ?? ""); } }
+        internal int ArgumentsLength => ArgumentsBuffer.Length;
         internal object ToMessage() => new { id = Id, type = "function", function = new { name = Name, arguments = Arguments } };
     }
 
     internal sealed class AgentReply
     {
-        internal string Content = "";
-        internal string Reasoning = "";
+        internal readonly StringBuilder ContentBuffer = new StringBuilder();
+        internal readonly StringBuilder ReasoningBuffer = new StringBuilder();
+        internal string Content { get => ContentBuffer.ToString(); set { ContentBuffer.Clear(); ContentBuffer.Append(value ?? ""); } }
+        internal string Reasoning { get => ReasoningBuffer.ToString(); set { ReasoningBuffer.Clear(); ReasoningBuffer.Append(value ?? ""); } }
+        internal int ContentLength => ContentBuffer.Length;
+        internal int ReasoningLength => ReasoningBuffer.Length;
         internal string FinishReason;
         internal bool Done;
         internal readonly SortedDictionary<int, AgentToolCall> Calls = new SortedDictionary<int, AgentToolCall>();
         internal object ToMessage(bool replayReasoning)
         {
-            var message = new Dictionary<string, object> { ["role"] = "assistant", ["content"] = Content.Length == 0 ? null : Content };
+            var message = new Dictionary<string, object> { ["role"] = "assistant", ["content"] = ContentLength == 0 ? null : Content };
             if (Calls.Count > 0) message["tool_calls"] = Calls.Values.Select(c => c.ToMessage()).ToArray();
             if (replayReasoning) message["reasoning_content"] = Reasoning;
             return message;
@@ -51,6 +57,10 @@ namespace OneNoteCodeHelper.Services.Agent
 
     internal sealed class AgentChatClient : IAgentChatClient
     {
+        // SSE 每个小片段都会重复 JSON 字段名；传输字数不能当成模型输出字数。
+        internal const int MaxStreamWireChars = 8 * 1024 * 1024;
+        internal const int MaxReplyChars = 500000;
+        internal const int MaxToolArgumentsChars = 64000;
         private readonly AiConfig _config;
         private readonly string _model;
         private readonly string _effort;
@@ -99,17 +109,19 @@ namespace OneNoteCodeHelper.Services.Agent
                                 {
                                     idle.CancelAfter(TimeSpan.FromSeconds(AiClient.IdleTimeoutSeconds));
                                     received += line.Length;
-                                    if (received > 600000) throw new AiException("Agent 响应超过大小限制。");
+                                    if (received > MaxStreamWireChars)
+                                        throw new AiException("Agent 流式传输超过 8 MB，未执行本轮工具。请缩小处理范围或降低思考强度。");
                                     if (line.Length == 0)
                                     {
                                         if (eventData.Length > 0) AbsorbEvent(eventData.ToString(), reply);
                                         eventData.Clear();
-                                        progress?.Report($"模型处理中：已接收 {reply.Reasoning.Length} 个思考字符，{reply.Content.Length + reply.Calls.Values.Sum(c => c.Arguments.Length)} 个输出字符");
+                                        progress?.Report($"模型处理中：已接收 {reply.ReasoningLength} 个思考字符，{reply.ContentLength + reply.Calls.Values.Sum(c => c.ArgumentsLength)} 个输出字符");
                                     }
                                     else if (line.StartsWith("data:", StringComparison.Ordinal))
                                     {
                                         if (eventData.Length > 0) eventData.Append('\n');
                                         eventData.Append(line.Substring(5).TrimStart());
+                                        if (eventData.Length > 600000) throw new AiException("Agent 单条流事件超过大小限制，未执行本轮工具。");
                                     }
                                 }
                                 if (eventData.Length > 0 && !reply.Done) AbsorbEvent(eventData.ToString(), reply);
@@ -123,7 +135,7 @@ namespace OneNoteCodeHelper.Services.Agent
                                 {
                                     idle.CancelAfter(TimeSpan.FromSeconds(AiClient.IdleTimeoutSeconds));
                                     text.Append(buffer, 0, count);
-                                    if (text.Length > 600000) throw new AiException("Agent 响应超过大小限制。");
+                                    if (text.Length > 600000) throw new AiException("Agent 非流式响应超过大小限制，未执行本轮工具。");
                                 }
                                 AbsorbWhole(Parse(text.ToString()), reply);
                             }
@@ -152,8 +164,8 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 if (Convert.ToInt32(AiClient.Get(choice, "index") ?? 0) != 0) throw new AiException("Agent 只接受一个模型候选结果。");
                 var delta = AiClient.Get(choice, "delta");
-                reply.Content += AiClient.Get(delta, "content") as string ?? "";
-                reply.Reasoning += AiClient.Get(delta, "reasoning_content") as string ?? "";
+                AppendReply(reply.ContentBuffer, AiClient.Get(delta, "content") as string, reply);
+                AppendReply(reply.ReasoningBuffer, AiClient.Get(delta, "reasoning_content") as string, reply);
                 reply.FinishReason = AiClient.Get(choice, "finish_reason") as string ?? reply.FinishReason;
                 if (!(AiClient.Get(delta, "tool_calls") is IList calls)) continue;
                 foreach (var call in calls)
@@ -167,10 +179,18 @@ namespace OneNoteCodeHelper.Services.Agent
                     if (name != null) { if (value.Name.Length > 0 && value.Name != name) throw new AiException("工具名称在流中改变。"); value.Name = name; }
                     var type = AiClient.Get(call, "type") as string;
                     if (type != null && type != "function") throw new AiException("未知工具类型。");
-                    value.Arguments += AiClient.Get(AiClient.Get(call, "function"), "arguments") as string ?? "";
-                    if (value.Arguments.Length > 64000) throw new AiException("工具参数过大。");
+                    AppendReply(value.ArgumentsBuffer, AiClient.Get(AiClient.Get(call, "function"), "arguments") as string, reply);
+                    if (value.ArgumentsLength > MaxToolArgumentsChars) throw new AiException("工具参数过大。");
                 }
             }
+        }
+        private static void AppendReply(StringBuilder target, string fragment, AgentReply reply)
+        {
+            if (string.IsNullOrEmpty(fragment)) return;
+            var current = reply.ContentLength + reply.ReasoningLength + reply.Calls.Values.Sum(c => c.ArgumentsLength);
+            if (current + fragment.Length > MaxReplyChars)
+                throw new AiException("Agent 本轮有效输出超过 50 万字符，未执行本轮工具。请缩小处理范围或降低思考强度。");
+            target.Append(fragment);
         }
         private static void AbsorbWhole(object root, AgentReply reply)
         {
@@ -183,6 +203,9 @@ namespace OneNoteCodeHelper.Services.Agent
                 foreach (var c in calls) reply.Calls.Add(reply.Calls.Count, new AgentToolCall
                 { Id = AiClient.Get(c, "id") as string, Name = AiClient.Get(AiClient.Get(c, "function"), "name") as string,
                     Arguments = AiClient.Get(AiClient.Get(c, "function"), "arguments") as string });
+            if (reply.ContentLength + reply.ReasoningLength + reply.Calls.Values.Sum(c => c.ArgumentsLength) > MaxReplyChars)
+                throw new AiException("Agent 本轮有效输出超过 50 万字符，未执行本轮工具。请缩小处理范围或降低思考强度。");
+            if (reply.Calls.Values.Any(c => c.ArgumentsLength > MaxToolArgumentsChars)) throw new AiException("工具参数过大。");
             reply.Done = true;
         }
     }

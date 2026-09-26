@@ -292,6 +292,33 @@ internal static class Program
                 True(handler.Body.Contains("tool_choice"));
             }
         });
+        Test("SSE wrapper overhead above former 600K limit preserves complete tool call", () =>
+        {
+            var events = new System.Text.StringBuilder();
+            for (var i = 0; i < 12000; i++)
+                events.Append("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"x\"}}]}\n\n");
+            events.Append("data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"last\",\"function\":{\"name\":\"get_page_overview\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n");
+            True(events.Length > 600000);
+            var handler = new StubHttp(events.ToString(), "text/event-stream");
+            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://test.invalid</ApiUrl><ApiKey>test</ApiKey></AiConfig>"));
+            using (var http = new HttpClient(handler))
+            {
+                var reply = new AgentChatClient(c, "test", "medium", http).CompleteAsync(new List<object>(), new object[0], null, CancellationToken.None).GetAwaiter().GetResult();
+                Equal(12000, reply.Reasoning.Length); Equal("get_page_overview", reply.Calls[0].Name);
+                Equal(reply.Reasoning, (string)((IDictionary<string, object>)reply.ToMessage(true))["reasoning_content"]);
+            }
+        });
+        Test("oversized useful SSE output still stops before tools execute", () =>
+        {
+            var chunk = new string('x', 300000);
+            var sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"" + chunk + "\"}}]}\n\n" +
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"" + chunk + "\"}}]}\n\n" +
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+            var handler = new StubHttp(sse, "text/event-stream");
+            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://test.invalid</ApiUrl><ApiKey>test</ApiKey></AiConfig>"));
+            using (var http = new HttpClient(handler))
+                Throws(() => new AgentChatClient(c, "test", "medium", http).CompleteAsync(new List<object>(), new object[0], null, CancellationToken.None).GetAwaiter().GetResult());
+        });
         Test("HTTP 400 does not echo upstream private data", () =>
         {
             var handler = new StubHttp("PRIVATE_PAGE_CONTENT", "text/plain") { Status = HttpStatusCode.BadRequest };
