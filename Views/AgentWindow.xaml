@@ -1,0 +1,39 @@
+<Window x:Class="OneNoteCodeHelper.Views.AgentWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="OneNote · Agent" Width="640" Height="590" MinWidth="520" MinHeight="560"
+        Background="#F7F8FA" FontFamily="Microsoft YaHei" FontSize="13"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="160"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="让 Agent 整理页面格式" FontSize="21" FontWeight="SemiBold" Foreground="#1F4E79"/>
+            <TextBlock x:Name="PageText" Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/>
+            <TextBlock x:Name="ModelText" Margin="0,4,0,0" FontSize="11" Foreground="#667085"/>
+        </StackPanel>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,18,0,12">
+            <TextBlock Text="处理范围" VerticalAlignment="Center" Margin="0,0,14,0"/>
+            <RadioButton x:Name="PageScope" Content="当前页" IsChecked="True" VerticalAlignment="Center" Margin="0,0,20,0"/>
+            <RadioButton x:Name="SelectionScope" Content="选中段落" VerticalAlignment="Center"/>
+        </StackPanel>
+        <TextBlock Grid.Row="2" Text="输入需求（只调整格式，保留正文、代码和段落结构）" Foreground="#475467" Margin="0,0,0,8"/>
+        <TextBox x:Name="RequestText" Grid.Row="3" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                 MaxLength="8000" Padding="12" BorderBrush="#CDD5DF" Background="White"
+                 Text="将该页面上的内容排版下，要美观。统一正文格式，突出标题和重点。"/>
+        <TextBlock x:Name="StatusText" Grid.Row="4" Margin="0,16,0,8" Text="准备就绪" Foreground="#1F4E79" TextWrapping="Wrap"/>
+        <Border Grid.Row="5" Background="White" CornerRadius="6" Padding="12" BorderBrush="#E4E7EC" BorderThickness="1">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="ResultText" TextWrapping="Wrap" Foreground="#344054"
+                           Text="Agent 将读取所选范围并调用格式工具。完成后会显示实际写入结果；本次窗口内可以撤销已验证的修改。"/>
+            </ScrollViewer>
+        </Border>
+        <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button x:Name="UndoButton" Content="撤销本次" Click="OnUndo" IsEnabled="False" Padding="14,7" Margin="0,0,10,0"/>
+            <Button x:Name="CancelButton" Content="取消" Click="OnCancel" IsEnabled="False" Padding="14,7" Margin="0,0,10,0"/>
+            <Button x:Name="ExecuteButton" Content="执行" Click="OnExecute" Padding="24,7" Background="#1F4E79" Foreground="White"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>OneNoteCodeHelper.AgentTests</AssemblyName>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\OneNoteCodeHelper.snk</AssemblyOriginatorKeyFile>
+    <AgentDllPath Condition="'$(AgentDllPath)' == ''">..\bin\Release\net48\OneNoteCodeHelper.dll</AgentDllPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="OneNoteCodeHelper"><HintPath>$(AgentDllPath)</HintPath></Reference>
+    <Reference Include="Microsoft.Office.Interop.OneNote"><HintPath>..\lib\Microsoft.Office.Interop.OneNote.dll</HintPath><EmbedInteropTypes>false</EmbedInteropTypes></Reference>
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Web" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+</Project>

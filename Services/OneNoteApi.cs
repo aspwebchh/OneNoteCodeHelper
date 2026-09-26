@@ -1,6 +1,8 @@
 using System;
 using System.Linq;
 using System.Xml.Linq;
+using System.Threading;
+using OneNoteCodeHelper.Services.Agent;
 using Microsoft.Office.Interop.OneNote;
 
 namespace OneNoteCodeHelper.Services
@@ -13,7 +15,7 @@ namespace OneNoteCodeHelper.Services
     /// PowerShell 的原生晚绑定却是好的，说明 COM 对象本身没问题）。早绑定直接按接口 IID
     /// 做 QI，不碰类型库，因此可用。
     /// </summary>
-    internal sealed class OneNoteApi
+    internal sealed class OneNoteApi : IOneNotePageAccess
     {
         /// <summary>OneNote 页面 XML 的命名空间（当前桌面版返回的就是 2013 架构）。</summary>
         internal const string OneNs = "http://schemas.microsoft.com/office/onenote/2013/onenote";
@@ -22,6 +24,32 @@ namespace OneNoteCodeHelper.Services
 
         /// <summary>生命周期归 AddIn 管：断开时由它连同宿主对象一起释放。</summary>
         private readonly IApplication _app;
+        private readonly object _calls = new object();
+        private volatile bool _stopping;
+
+        private T Call<T>(Func<T> action)
+        {
+            lock (_calls)
+            {
+                if (_stopping) throw new AiException("OneNote 正在断开连接，操作已停止。");
+                return action();
+            }
+        }
+
+        internal void Stop() { _stopping = true; }
+
+        internal void Disconnect(Action release)
+        {
+            _stopping = true;
+            if (Monitor.TryEnter(_calls))
+            {
+                try { release(); } finally { Monitor.Exit(_calls); }
+            }
+            else ThreadPool.QueueUserWorkItem(_ => { lock (_calls) release(); });
+        }
+
+        string IOneNotePageAccess.GetPageContent(string pageId, PageInfo info) => GetPageContent(pageId, info);
+        void IOneNotePageAccess.UpdatePageContent(string xml, DateTime expectedLastModified) => UpdatePageContent(xml, expectedLastModified);
 
         internal OneNoteApi(IApplication application)
         {
@@ -30,24 +58,22 @@ namespace OneNoteCodeHelper.Services
 
         internal string GetHierarchy(string startNodeId, HierarchyScope scope)
         {
-            _app.GetHierarchy(startNodeId, scope, out string xml);
-            return xml;
+            return Call(() => { _app.GetHierarchy(startNodeId, scope, out string xml, XMLSchema.xs2013); return xml; });
         }
 
         internal string GetPageContent(string pageId, PageInfo info)
         {
-            _app.GetPageContent(pageId, out string xml, info);
-            return xml;
+            return Call(() => { _app.GetPageContent(pageId, out string xml, info, XMLSchema.xs2013); return xml; });
         }
 
         internal void UpdatePageContent(string pageChangesXml, DateTime expectedLastModified)
         {
-            _app.UpdatePageContent(pageChangesXml, expectedLastModified);
+            Call(() => { _app.UpdatePageContent(pageChangesXml, expectedLastModified, XMLSchema.xs2013, false); return true; });
         }
 
         internal void NavigateTo(string hierarchyObjectId, string objectId)
         {
-            _app.NavigateTo(hierarchyObjectId, objectId, false);
+            Call(() => { _app.NavigateTo(hierarchyObjectId, objectId, false); return true; });
         }
 
         /// <summary>
@@ -93,7 +119,7 @@ namespace OneNoteCodeHelper.Services
         {
             try
             {
-                var handle = _app.Windows.CurrentWindow?.WindowHandle ?? 0;
+                var handle = Call(() => _app.Windows.CurrentWindow?.WindowHandle ?? 0);
                 return new IntPtr((long)handle);
             }
             catch (Exception ex)

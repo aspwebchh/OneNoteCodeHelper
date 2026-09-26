@@ -53,6 +53,10 @@ namespace OneNoteCodeHelper
         private int _aiRunning;
         private volatile AiProgressWindow _aiWindow;
 
+        private int _agentWindowOpen;
+        private volatile AgentWindow _agentWindow;
+        private int _disconnecting;
+
         // ai-settings.xml 的内容。点「AI 优化」时、文件被改过之后都会重新读。
         private volatile AiConfig _aiConfig;
 
@@ -122,6 +126,7 @@ namespace OneNoteCodeHelper
                 AddInLog.Info($"OnConnection 开始，connectMode={connectMode}");
 
                 _hostApplication = application;
+                Interlocked.Exchange(ref _disconnecting, 0);
                 _hostAddIn = addInInst;
                 _settings = SettingsStore.Load();
                 _aiConfig = AiConfigStore.Load();
@@ -160,9 +165,13 @@ namespace OneNoteCodeHelper
             {
                 AddInLog.Info($"OnDisconnection，removeMode={removeMode}");
                 StopWatchingAiConfig();
+                Interlocked.Exchange(ref _disconnecting, 1);
+                _agentWindow?.CancelForShutdown();
                 _editor = null;
+                var api = _api;
                 _api = null;
-                ReleaseHostReferences();
+                if (api != null) api.Disconnect(DetachHostReferences());
+                else ReleaseHostReferences();
                 AddInLog.Info("已释放全部 OneNote COM 引用。");
             }
             catch (Exception ex)
@@ -181,6 +190,13 @@ namespace OneNoteCodeHelper
 
         public void OnBeginShutdown(ref Array custom)
         {
+            try
+            {
+                Interlocked.Exchange(ref _disconnecting, 1);
+                _agentWindow?.CancelForShutdown();
+                _api?.Stop();
+            }
+            catch (Exception ex) { AddInLog.Warn("停止 Agent 时发生异常。", ex); }
         }
 
         #endregion
@@ -454,6 +470,44 @@ namespace OneNoteCodeHelper
                 _settings.ShowBorders = pressed;
                 SettingsStore.Save(_settings);
                 AddInLog.Info("代码框边框" + (pressed ? "开启" : "关闭"));
+            });
+        }
+
+        public void OnShowAgentWindow(object control)
+        {
+            Guard("Agent", () =>
+            {
+                if (Volatile.Read(ref _disconnecting) != 0) return;
+                if (Interlocked.CompareExchange(ref _agentWindowOpen, 1, 0) != 0)
+                {
+                    var existing = _agentWindow;
+                    existing?.Dispatcher.BeginInvoke(new Action(() => existing.Activate()));
+                    return;
+                }
+                var api = _api;
+                var modelId = _settings.AiModel;
+                var effort = AiEfforts.Normalize(_settings.AiEffort);
+                RunInBackground("Agent", ApartmentState.STA, IntPtr.Zero, () =>
+                {
+                    AgentWindow window = null;
+                    try
+                    {
+                        if (api == null || Volatile.Read(ref _disconnecting) != 0) return;
+                        var pageId = api.GetCurrentPageId();
+                        if (string.IsNullOrEmpty(pageId)) throw new AiException("请先打开一个 OneNote 页面。");
+                        var xml = api.GetPageContent(pageId, PageInfo.piSelection);
+                        var config = AiConfigStore.Load();
+                        window = new AgentWindow(api, pageId, xml, config, config.FindModel(modelId).Id, effort, api.GetMainWindowHandle());
+                        _agentWindow = window;
+                        if (Volatile.Read(ref _disconnecting) == 0) window.ShowDialog();
+                    }
+                    finally
+                    {
+                        window?.WaitForJob();
+                        _agentWindow = null;
+                        Dispatcher.CurrentDispatcher.InvokeShutdown();
+                    }
+                }, () => Interlocked.Exchange(ref _agentWindowOpen, 0));
             });
         }
 
@@ -886,16 +940,30 @@ namespace OneNoteCodeHelper
         /// </summary>
         private void ReleaseHostReferences()
         {
-            FinalRelease(ref _ribbon);
-            FinalRelease(ref _hostAddIn);
-            FinalRelease(ref _hostApplication);
+            DetachHostReferences()();
+        }
 
-            // 功能区回调的 control 参数、Windows 集合之类的临时 RCW 没有字段指着，
-            // 只能靠 GC。代理进程马上就要退出，不会再有机会跑终结器，所以在这里同步收掉。
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
+        private Action DetachHostReferences()
+        {
+            var ribbon = _ribbon;
+            var addIn = _hostAddIn;
+            var application = _hostApplication;
+            _ribbon = null;
+            _hostAddIn = null;
+            _hostApplication = null;
+            return () =>
+            {
+                FinalRelease(ref ribbon);
+                FinalRelease(ref addIn);
+                FinalRelease(ref application);
+
+                // 功能区回调的 control 参数、Windows 集合之类的临时 RCW 没有字段指着，
+                // 只能靠 GC。代理进程马上就要退出，不会再有机会跑终结器，所以在这里同步收掉。
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            };
         }
 
         private static void FinalRelease<T>(ref T reference) where T : class

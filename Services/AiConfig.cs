@@ -105,6 +105,8 @@ namespace OneNoteCodeHelper.Services
 
         internal IReadOnlyList<AiFunction> Functions { get; }
 
+        internal Agent.AgentOptions Agent { get; set; } = new Agent.AgentOptions();
+
         /// <summary>按 id 找模型，找不到（比如配置里删掉了）就用第一个。</summary>
         internal AiModel FindModel(string id)
         {
@@ -268,7 +270,8 @@ namespace OneNoteCodeHelper.Services
                 ReadInt(root.Element("TimeoutSeconds"), DefaultTimeoutSeconds, 10, 3600),
                 ReadInt(root.Element("MaxTokens"), DefaultMaxTokens, 0, 1024 * 1024),
                 models?.Count > 0 ? models : Default.Models,
-                functions?.Count > 0 ? functions : Default.Functions);
+                functions?.Count > 0 ? functions : Default.Functions)
+            { Agent = Agent.AgentOptions.Parse(root.Element("Agent")) };
         }
 
         private static AiFunction ReadFunction(XElement element)
@@ -311,7 +314,7 @@ namespace OneNoteCodeHelper.Services
 
             return new XDocument(
                 new XDeclaration("1.0", "utf-8", null),
-                new XComment(" OneNote 代码高亮 · AI 助手配置。改完保存即可，下次点「AI 优化」时生效。 "),
+                new XComment(" OneNote 代码高亮 · AI 助手配置。改完保存即可，下次点「AI 优化」或重新打开 Agent 窗口时生效。 "),
                 new XElement(
                     "AiConfig",
                     new XComment(" OpenAI 兼容接口的基础地址；插件会在后面加上 /chat/completions "),
@@ -321,6 +324,14 @@ namespace OneNoteCodeHelper.Services
                     new XElement("TimeoutSeconds", config.TimeoutSeconds),
                     new XComment(" 单次请求最多输出多少 token（含思考过程）。0 表示用接口的默认值 "),
                     new XElement("MaxTokens", config.MaxTokens),
+                    new XComment(" Agent 工具调用：默认启用已验证的标题、段间距和图文容器。若接口不接受思考参数，可把 SendThinking 设为 false。旧配置不写此节点也可使用默认值。 "),
+                    new XElement("Agent",
+                        new XElement("MaxTurns", 12), new XElement("MaxToolCalls", 48),
+                        new XElement("TimeoutSeconds", 600), new XElement("MaxPageChars", 40000),
+                        new XElement("MaxRequestChars", 120000), new XElement("FontFamily", "Microsoft YaHei"),
+                        new XElement("SendThinking", true), new XElement("ReplayReasoning", true),
+                        new XElement("StreamUsage", true), new XElement("EnableNativeHeadings", true),
+                        new XElement("EnableParagraphSpacing", true), new XElement("EnableMixedOutlines", true)),
                     new XComment(" 功能区「模型」下拉里的选项：id 是接口的模型名，下拉里直接显示它 "),
                     new XElement(
                         "Models",

@@ -469,32 +469,23 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>
-        /// 提交改动。先带 lastModifiedTime 做冲突检测；若因为期间 OneNote 自己又保存了一次而失败，
-        /// 退回不校验重试一次——这种情况下页面内容是我们刚读到的，覆盖是安全的。
+        /// 提交改动。始终校验读取时的时间戳，冲突时由调用者重新读取，不能重发旧 XML。
         /// </summary>
         private EditResult Submit(string pageId, XElement page, string changesXml, string successMessage)
         {
             var lastModified = ParseLastModified(page);
 
+            if (lastModified == DateTime.MinValue)
+                return EditResult.Fail("无法读取页面修改时间，没有写回。请重新打开页面后重试。");
+
             try
             {
-                _api.UpdatePageContent(changesXml, lastModified);
+                lock (PageEditCoordinator.ForPage(pageId)) _api.UpdatePageContent(changesXml, lastModified);
                 return EditResult.Ok(successMessage);
             }
-            catch (Exception ex) when (lastModified != DateTime.MinValue)
+            catch (System.Runtime.InteropServices.COMException ex) when (ex.ErrorCode == unchecked((int)0x80042010))
             {
-                AddInLog.Warn("带时间戳回写失败，退回不校验重试。", ex);
-
-                try
-                {
-                    _api.UpdatePageContent(changesXml, DateTime.MinValue);
-                    return EditResult.Ok(successMessage);
-                }
-                catch (Exception retryEx)
-                {
-                    AddInLog.Error("回写页面失败。pageId=" + pageId, retryEx);
-                    return EditResult.Fail("写回 OneNote 失败：" + retryEx.Message);
-                }
+                return EditResult.Fail("页面在读取后发生变化，没有覆盖新内容。请重新执行操作。");
             }
             catch (Exception ex)
             {

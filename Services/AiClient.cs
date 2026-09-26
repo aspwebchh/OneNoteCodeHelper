@@ -58,6 +58,8 @@ namespace OneNoteCodeHelper.Services
 
         private static readonly HttpClient Http;
 
+        internal static HttpClient Transport => Http;
+
         static AiClient()
         {
             // 插件跑在 dllhost 里，AppDomain 拿不到目标框架信息，.NET 会按老规矩只开 SSL3/TLS1.0，
@@ -318,7 +320,7 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>在配置的基础地址后补上 /chat/completions；已写全的地址直接使用。</summary>
-        private static string BuildEndpoint(string apiUrl)
+        internal static string BuildEndpoint(string apiUrl)
         {
             var url = (apiUrl ?? string.Empty).Trim().TrimEnd('/');
             return url.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase)

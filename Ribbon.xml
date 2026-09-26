@@ -88,6 +88,11 @@
 
         <group id="OneNoteAiGroup" label="AI 助手">
 
+          <button id="OncAgent" label="Agent" size="large" image="AiOptimize"
+                  screentip="用自然语言整理页面格式"
+                  supertip="输入需求，由 Agent 调用格式工具整理当前页或选中段落。保留正文、代码与段落结构。"
+                  onAction="OnShowAgentWindow" />
+
           <button id="OncAiOptimize"
                   label="AI 优化"
                   size="large"

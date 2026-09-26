@@ -15,17 +15,18 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 | 字体（插入窗口内） | 默认 Consolas。代码里有中文时改选「NSimSun」新宋体，中英文才能对齐 |
 | 诊断日志 | 打开日志文件 |
 
-旁边还有一个「AI 助手」组，用大模型改笔记里的文字：
+旁边还有一个「AI 助手」组，用大模型处理笔记文字和格式：
 
 | 控件 | 作用 |
 |---|---|
+| Agent | 打开需求输入窗口，通过模型工具调用整理当前页或选中段落的格式；支持取消、结果核验和本次撤销 |
 | AI 优化 | 选中文字后点它，按「功能」里选的方式修改并**直接写回**；什么都不选则处理整页（含标题）。弹一个进度小窗，可以取消 |
 | 功能 | 默认有「智能校正」（同时校对和排版）「错别字修复」「排版优化」三项，初次使用选中「智能校正」；选项和提示词都来自配置文件，可以自己加 |
 | 模型 | 直接显示发给接口的模型名，默认 `deepseek-v4-flash` / `deepseek-v4-pro`，来自配置文件 |
 | 思考 | 思考强度 `none` / `low` / `medium` / `high` / `max`，参数和 opencode 配置里 deepseek 的 variants 一致：`none` 传 `"thinking":{"type":"disabled"}`；其余传 `"thinking":{"type":"enabled"}` 加 `"reasoning_effort":"<变体名>"` |
 | AI 配置 | 用系统默认的程序（.xml 关联的编辑器）打开配置文件，保存后自动重新读取，下拉随即刷新 |
 
-几点行为：
+「AI 优化」的行为：
 
 - 只改段内文字，不合并、不拆分段落。改动按字符合并回原段落，**加粗、颜色、链接、列表和缩进都保留**；
   改错字时新字沿用被替换字的格式，排版时补的空格不会跟进加粗或链接。
@@ -40,6 +41,29 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 - 请求走流式，进度窗实时显示「已思考 / 已输出多少字」和已用时间。连续 60 秒一点数据都没收到
   （接口或网络卡住）会直接报错，不会干等到 `TimeoutSeconds`。
 
+### Agent 页面排版
+
+在「AI 配置」中填写接口地址和 Key，选一个支持 Chat Completions `tools` 的模型，然后点击「Agent」。
+窗口固定打开时的页面；之后切换 OneNote 页面，Agent 仍处理窗口里显示的目标页。
+输入需求并点击「执行」，例如：
+
+> 将该页面上的内容排版下，要美观。统一正文格式，突出标题和重点。
+
+也可以输入「一级标题居中，正文统一 11 磅，关键结论加粗」。模型通过六个受限工具读取段落、调整草稿、提交修改，
+界面显示执行进度，最终结果以插件回读 OneNote 后核验的数据为准。
+
+- 范围默认「当前页」，包括原标题。打开窗口前选中文字，可以切换到「选中段落」；这个范围包含选中文字所在的**完整段落**，不只选中的几个字。选区在打开窗口时固定，重新选择需要重开窗口。
+- 支持页面标题、一级/二级标题、正文、引用预设；字体、字号、四种主题文字颜色、左/中/右对齐、段前后间距，以及局部加粗、斜体、下划线和文字颜色。
+- 保留文字、段落数量、顺序、嵌套关系、列表、待办状态、链接和表格结构。不改写文字、不删空行、不移动图片；这些不属于本版 Agent 的工具范围。
+- 表格中可以调整普通文字的格式，锁定列宽保持不变；未锁定列仍由 OneNote 根据字体自动计算宽度。
+- 等宽字体代码段、行内等宽代码所在段落、空段落和无法解析的 HTML 会受保护。含图片的文本框可以整理文字；含墨迹、附件、媒体或未知对象的整个文本框跳过。
+- 修改先保存在内存草稿中，模型调用 `finish_edit` 后统一写回。写回前重新读取页面；处理期间用户改动的目标段落会跳过，其他段落继续提交。时间戳持续冲突时停止，不强制覆盖。
+- 「取消」或关闭窗口会丢弃未提交草稿。如果 OneNote 已开始写入，则先回读确认实际结果；无法确认时会明确提示检查页面，不把模型的“完成”当作成功。
+- 「撤销本次」只在当前窗口中保留最近一次执行的已核验修改。撤销会跳过后来又编辑过的段落。关闭窗口或启动下一次执行后不保留上一次撤销记录。
+- Agent 使用功能区选中的模型、思考强度以及打开窗口时读取的 AI 配置，不使用「功能」下拉里的文字改写提示词。
+
+工具协议和实现位置见 [Agent 实施说明](docs/agent-implementation.md)，完整设计见 [技术设计](docs/agent-design.md)。
+
 ### AI 配置文件
 
 `%APPDATA%\OneNoteCodeHelper\ai-settings.xml`，第一次点「AI 配置」时生成，里面每一项都有注释：
@@ -52,6 +76,7 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 | `MaxTokens` | 单次请求最多输出多少 token（含思考过程），默认 16384，0 表示用接口默认值 |
 | `Models/Model` | 「模型」下拉的选项，`id` 是接口的模型名，下拉里直接显示它 |
 | `Functions/Function` | 「功能」下拉的选项，`name` 显示名、`Prompt` 提示词。`removeExtraBlankLines="true"` 表示顺带删多余的空行；不写时和同名的内置功能一致（「智能校正」「排版优化」默认开，旧配置里的「错别字 + 排版」也继续默认开），写 `false` 关掉 |
+| `Agent` | 可选的 Agent 配置；旧文件没有此节点也能使用默认值，不会自动重写已有配置 |
 
 提示词只需写清楚要做什么。输入输出的 JSON 格式、只返回改动的段落、每段附一份改动说明、不许合并拆分段落、
 代码网址保持原样这些约定由插件自动接在后面（见 `AiOptimizer.Protocol`），改提示词不会把格式弄坏。
@@ -60,6 +85,35 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 手改的 Key、提示词放在那里会被覆盖。插件只在文件不存在时写一次默认值，之后只读。
 所以以后新增的内置功能（比如「智能校正」）不会自动进旧的配置文件：自己在 `Functions` 里加一项，
 或者把文件删掉让插件重新生成（Key 要重填）。
+
+Agent 可在 `AiConfig` 根节点内增加下列配置。改完后重开 Agent 窗口生效：
+
+```xml
+<Agent>
+  <MaxTurns>12</MaxTurns>
+  <MaxToolCalls>48</MaxToolCalls>
+  <TimeoutSeconds>600</TimeoutSeconds>
+  <MaxPageChars>40000</MaxPageChars>
+  <MaxRequestChars>120000</MaxRequestChars>
+  <FontFamily>Microsoft YaHei</FontFamily>
+  <SendThinking>true</SendThinking>
+  <ReplayReasoning>true</ReplayReasoning>
+  <StreamUsage>true</StreamUsage>
+  <EnableNativeHeadings>true</EnableNativeHeadings>
+  <EnableParagraphSpacing>true</EnableParagraphSpacing>
+  <EnableMixedOutlines>true</EnableMixedOutlines>
+</Agent>
+```
+
+`Agent/TimeoutSeconds` 是整个任务的总时限，根节点的 `TimeoutSeconds` 仍是每次 HTTP 请求时限。
+`MaxPageChars` 限制处理范围内的可编辑文字；`MaxRequestChars` 限制每轮包含工具定义和历史的请求体字符数。
+超限会停止并丢弃未提交草稿，可以缩小范围再执行。另有固定的 1000 段上限。
+
+默认字体可选 `Microsoft YaHei`、`Calibri`、`Arial`；未安装时选择其中已安装的一种。
+三个 `Enable...` 开关默认开启，已有本机 Office16 回存验证；其他 Office 构建如有兼容问题，可分别关闭原生标题、段间距或图文混排支持。
+`EnableMixedOutlines` 只允许图片和文字混排，不开启墨迹或附件编辑。
+如果兼容接口不接受扩展参数，按其文档关闭 `SendThinking`（不发送 thinking/reasoning_effort）、
+`ReplayReasoning`（不回传 reasoning_content）或 `StreamUsage`（不发送 stream_options）。模型本身仍必须支持工具调用。
 
 ## 环境要求
 
@@ -145,6 +199,8 @@ Services/
   RichParagraph.cs          把 AI 改过的纯文本按字符合并回带格式的 one:T
   TextDiff.cs               逐字符 diff（公共前后缀 + LCS）
   BlankLines.cs             排版优化附带的删多余空行（空行段落、段内连续 <br>），不经过 AI
+  PageEditCoordinator.cs    按页面串行提交，防止插件自身交叉写回
+  Agent/                   工具协议、模型循环、格式编辑、快照、冲突核验和撤销
 Highlighting/
   TokenKind / Token / ILanguage / LexerCursor / LanguageRegistry
   DetectionSample.cs        自动识别的样本：原文开头一段 + 去掉注释和字符串内容的同长文本
@@ -158,6 +214,7 @@ Views/
   InsertCodeWindow.xaml     插入代码窗口
   CodePreviewRenderer.cs    用同一套 token 流渲染 WPF 预览
   AiProgressWindow.xaml     AI 优化的进度小窗
+  AgentWindow.xaml          Agent 需求、范围、进度和撤销窗口
 install.ps1                 一键构建 + 安装 / 卸载
 uninstall.ps1               一键卸载入口
 Tools/register.ps1          只做注册这一步
@@ -165,7 +222,30 @@ Tools/unregister.ps1        只做注销这一步
 Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-samples/<语言 id>/ 下
 Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出解析；加 -Live 用本机配置真调一次接口
 Tools/highlight-selection-test.ps1  「高亮选中」回归测试：认选区、缩进的段落、换成代码框
+Tools/agent-test.ps1        Agent 离线回归，不调用真实接口或 OneNote
+Tools/agent-format-probe.ps1  显式创建专用测试分区和测试页，验证真实 OneNote 格式往返
+Tests/                    独立签名的 net48 测试程序及页面/HTTP 模拟器
 ```
+
+### 回归验证
+
+```powershell
+dotnet build OneNoteCodeHelper.sln -c Release
+powershell -ExecutionPolicy Bypass -File Tools\detect-test.ps1
+powershell -ExecutionPolicy Bypass -File Tools\ai-merge-test.ps1
+powershell -ExecutionPolicy Bypass -File Tools\highlight-selection-test.ps1
+powershell -ExecutionPolicy Bypass -File Tools\agent-test.ps1
+```
+
+这些回归不需要运行中的 OneNote，也不使用真实 API Key。脚本支持 `-DllPath` 指定待测 DLL。
+需要验证 Office 回存时，先构建并运行 Agent 离线测试，再**单独**执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Tools\agent-format-probe.ps1 -OutputDirectory D:\temp\onenote-agent-probe
+```
+
+该探针会通过 COM 打开 OneNote，在指定目录新建专用 `.one` 测试分区及合成测试页，验证格式提交与撤销，
+保存前后 XML，并保留测试分区供检查；不会编辑已有笔记。普通回归不运行这个探针或安装/注册脚本。
 
 ## 加一种语言
 
