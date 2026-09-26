@@ -169,7 +169,9 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 powershell -ExecutionPolicy Bypass -File uninstall.ps1
 ```
 
-卸载脚本也支持 `-Force` 和 `-NoRestart`。卸载只清理注册表项，保留设置和日志。
+卸载脚本也支持 `-Force` 和 `-NoRestart`。关闭 OneNote 后，脚本会等待本插件的
+`dllhost.exe` 代理进程退出；5 秒后仍在运行时，只结束当前会话中 AppID 与本插件匹配的进程。
+无法确认代理进程已退出时会停止卸载并报错。卸载保留设置和日志。
 
 也可以只跑注册这一步（前提：**管理员身份的 PowerShell**、OneNote 已关闭、且已经构建过）：
 

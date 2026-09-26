@@ -208,6 +208,12 @@ try {
     Write-Step '关闭 OneNote'
     $oneNotePath = Stop-OneNote
 
+    if ($Uninstall) {
+        Write-Step '清理插件 COM 代理进程'
+        . (Join-Path $PSScriptRoot 'Tools\addin-surrogate.ps1')
+        Stop-AddInSurrogates
+    }
+
     # --- 2. 构建 ---
     if (-not $Uninstall -and -not $SkipBuild) {
         Write-Step "构建（$Configuration）"
