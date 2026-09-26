@@ -189,6 +189,7 @@ namespace OneNoteCodeHelper.Views
             StatusText.Text = progress.Message;
             _detail = progress.Detail;
             ShowDetail();
+            ShowThinking(progress.Thinking);
 
             // 比例只在分了好几批、而且已经做完一些时才有意义。只有一批时是 0/1 一步跳到 1/1，
             // 一直空着的进度条看着像卡死了，这时只靠转圈表示还在跑。
@@ -216,13 +217,21 @@ namespace OneNoteCodeHelper.Views
             DetailText.Visibility = Visibility.Visible;
         }
 
-        /// <summary>有结果了（或窗口关了）：停掉计时、转圈，藏起进度条和取消按钮。</summary>
+        /// <summary>思考摘录，为 null 时收起摘录框。</summary>
+        private void ShowThinking(string text)
+        {
+            ThinkingText.Text = text ?? string.Empty;
+            ThinkingBox.Visibility = text == null ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        /// <summary>有结果了（或窗口关了）：停掉计时、转圈，藏起思考摘录、进度条和取消按钮。</summary>
         private void StopRunning()
         {
             _ticker?.Stop();
             _elapsed.Stop();
             _detail = null;
             SpinnerRotation.BeginAnimation(RotateTransform.AngleProperty, null);
+            ShowThinking(null);
             ProgressMeter.Visibility = Visibility.Collapsed;
             CancelButton.Visibility = Visibility.Collapsed;
         }
@@ -289,6 +298,7 @@ namespace OneNoteCodeHelper.Views
             _cancellation.Cancel();
             _detail = null;
             ShowDetail();
+            ShowThinking(null);
             StatusText.Text = "正在取消…";
             CancelButton.IsEnabled = false;
         }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -52,7 +53,7 @@ namespace OneNoteCodeHelper.Services.Agent
 
     internal interface IAgentChatClient
     {
-        Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<string> progress, CancellationToken cancellation);
+        Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation);
     }
 
     internal sealed class AgentChatClient : IAgentChatClient
@@ -61,6 +62,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal const int MaxStreamWireChars = 8 * 1024 * 1024;
         internal const int MaxReplyChars = 500000;
         internal const int MaxToolArgumentsChars = 64000;
+        /// <summary>流式进度最多每隔这么久（毫秒）报告一次，免得把界面线程的消息队列塞满。</summary>
+        private const int ReportIntervalMs = 200;
         private readonly AiConfig _config;
         private readonly string _model;
         private readonly string _effort;
@@ -74,7 +77,7 @@ namespace OneNoteCodeHelper.Services.Agent
             catch (Exception) { throw new AiException("Agent 返回了无效或超限的 JSON。"); }
         }
 
-        public async Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<string> progress, CancellationToken cancellation)
+        public async Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
             var body = new Dictionary<string, object> { ["model"] = _model, ["messages"] = messages, ["tools"] = tools,
                 ["tool_choice"] = "auto", ["stream"] = true };
@@ -104,6 +107,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             {
                                 var eventData = new StringBuilder();
                                 var received = 0;
+                                Stopwatch sinceReport = null;
                                 string line;
                                 while (!reply.Done && (line = await reader.ReadLineAsync().ConfigureAwait(false)) != null)
                                 {
@@ -115,7 +119,11 @@ namespace OneNoteCodeHelper.Services.Agent
                                     {
                                         if (eventData.Length > 0) AbsorbEvent(eventData.ToString(), reply);
                                         eventData.Clear();
-                                        progress?.Report($"模型处理中：已接收 {reply.ReasoningLength} 个思考字符，{reply.ContentLength + reply.Calls.Values.Sum(c => c.ArgumentsLength)} 个输出字符");
+                                        if (progress != null && (sinceReport == null || sinceReport.ElapsedMilliseconds >= ReportIntervalMs))
+                                        {
+                                            progress.Report(DescribeStream(reply));
+                                            sinceReport = Stopwatch.StartNew();
+                                        }
                                     }
                                     else if (line.StartsWith("data:", StringComparison.Ordinal))
                                     {
@@ -125,6 +133,8 @@ namespace OneNoteCodeHelper.Services.Agent
                                     }
                                 }
                                 if (eventData.Length > 0 && !reply.Done) AbsorbEvent(eventData.ToString(), reply);
+                                // 限频可能吞掉最后几段，收完再报一次最终状态。
+                                progress?.Report(DescribeStream(reply));
                             }
                             else
                             {
@@ -152,6 +162,20 @@ namespace OneNoteCodeHelper.Services.Agent
                 catch (HttpRequestException) { throw new AiException("无法连接 Agent 接口，未提交草稿。"); }
                 catch (IOException) { throw new AiException("Agent 连接中断，未提交草稿。"); }
             }
+        }
+
+        /// <summary>
+        /// 流式返回期间的进度：模型在准备哪个工具、在回复还是在思考，以及回复（没有时是思考）原文的最后几行。
+        /// </summary>
+        internal static AgentProgress DescribeStream(AgentReply reply)
+        {
+            var call = reply.Calls.Values.LastOrDefault(c => !string.IsNullOrEmpty(c.Name));
+            var status = call != null ? "模型正在准备：" + AgentTools.DisplayName(call.Name)
+                : reply.ContentLength > 0 ? "模型正在回复…"
+                : reply.ReasoningLength > 0 ? "模型正在思考…"
+                : "等待模型响应…";
+            var thinking = LiveText.Excerpt(reply.ContentLength > 0 ? reply.ContentBuffer : reply.ReasoningBuffer);
+            return new AgentProgress { Status = status, Thinking = thinking ?? "" };
         }
 
         internal static void AbsorbEvent(string data, AgentReply reply)

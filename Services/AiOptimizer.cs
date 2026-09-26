@@ -13,16 +13,18 @@ namespace OneNoteCodeHelper.Services
 {
     /// <summary>
     /// 进度：一句话说明 + 已完成 / 总批数，Total 为 0 表示眼下没法给出比例。
-    /// Detail 是等 AI 时的实时情况（已思考、已输出多少字），不在等 AI 时为 null。
+    /// Detail 是等 AI 时的实时情况（在思考、在输出、已返回几段修改），不在等 AI 时为 null。
+    /// Thinking 是 AI 思考原文的最后几行，没有时为 null。
     /// </summary>
     internal sealed class AiProgress
     {
-        internal AiProgress(string message, int done = 0, int total = 0, string detail = null)
+        internal AiProgress(string message, int done = 0, int total = 0, string detail = null, string thinking = null)
         {
             Message = message;
             Done = done;
             Total = total;
             Detail = detail;
+            Thinking = thinking;
         }
 
         internal string Message { get; }
@@ -32,6 +34,8 @@ namespace OneNoteCodeHelper.Services
         internal int Total { get; }
 
         internal string Detail { get; }
+
+        internal string Thinking { get; }
     }
 
     /// <summary>
@@ -242,21 +246,38 @@ namespace OneNoteCodeHelper.Services
             var results = new Dictionary<int, AiParagraphReply>();
             var sync = new object();
             var done = 0;
-            var reasoningChars = 0;
-            var contentChars = 0;
+            var lives = batches.Select(_ => new BatchLive()).ToArray();
+            string lastChange = null;
             var sinceReport = Stopwatch.StartNew();
 
             // 流式返回的每一段都会调到这里（几批同时在跑时来自不同线程）。段很碎，
             // 除了一批做完，其余的限一下频率，免得把界面线程的消息队列塞满。
-            void Update(int reasoning, int content, bool batchDone)
+            void Update(int batch, string reasoning, string content, bool batchDone)
             {
                 AiProgress snapshot;
                 lock (sync)
                 {
-                    reasoningChars += reasoning;
-                    contentChars += content;
+                    var live = lives[batch];
+                    if (!string.IsNullOrEmpty(reasoning))
+                    {
+                        live.Reasoning.Append(reasoning);
+                        LiveText.KeepTail(live.Reasoning);
+                    }
+
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        live.ContentChars += content.Length;
+                        var changes = live.Peek.Changes;
+                        live.Peek.Feed(content);
+                        if (live.Peek.Changes != changes)
+                        {
+                            lastChange = live.Peek.LastChange;
+                        }
+                    }
+
                     if (batchDone)
                     {
+                        live.Done = true;
                         done++;
                     }
                     else if (sinceReport.ElapsedMilliseconds < ReportIntervalMs)
@@ -269,19 +290,22 @@ namespace OneNoteCodeHelper.Services
                         done == 0
                             ? $"正在请 AI {_function.Name}：{scope} {paragraphs.Count} 段…"
                             : $"正在请 AI {_function.Name}：已完成 {done} / {batches.Count} 批…",
-                        done, batches.Count, DescribeLive(reasoningChars, contentChars));
+                        done, batches.Count,
+                        DescribeLive(lives.Any(l => l.HasData), lives.Any(l => l.ContentChars > 0),
+                            lives.Sum(l => l.Peek.Paragraphs), lastChange),
+                        FocusThinking(lives));
                 }
 
                 progress.Report(snapshot);
             }
 
             progress.Report(new AiProgress($"正在请 AI {_function.Name}：{scope} {paragraphs.Count} 段…",
-                0, batches.Count, DescribeLive(0, 0)));
+                0, batches.Count, DescribeLive(false, false, 0, null)));
 
             using (var gate = new SemaphoreSlim(MaxConcurrency))
             using (var failFast = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
             {
-                var tasks = batches.Select(async batch =>
+                var tasks = batches.Select(async (batch, batchIndex) =>
                 {
                     await gate.WaitAsync(failFast.Token).ConfigureAwait(false);
                     try
@@ -290,7 +314,7 @@ namespace OneNoteCodeHelper.Services
                         var content = await AiClient.CompleteAsync(
                             _config, _model.Id, _effort, systemPrompt,
                             BuildUserMessage(batch.Select((index, n) => (n + 1, paragraphs[index].Text))),
-                            (reasoning, text) => Update(reasoning, text, false),
+                            (reasoning, text) => Update(batchIndex, reasoning, text, false),
                             failFast.Token).ConfigureAwait(false);
 
                         var reply = ParseReply(content);
@@ -302,7 +326,7 @@ namespace OneNoteCodeHelper.Services
                             }
                         }
 
-                        Update(0, 0, true);
+                        Update(batchIndex, null, null, true);
                     }
                     catch
                     {
@@ -368,26 +392,67 @@ namespace OneNoteCodeHelper.Services
             return batches;
         }
 
-        /// <summary>等 AI 时显示的实时情况：思考、输出各收到了多少字。</summary>
-        internal static string DescribeLive(int reasoningChars, int contentChars)
+        /// <summary>
+        /// 等 AI 时显示的实时情况：还没收到东西、在思考、在输出，或者已经返回了几段修改和最新一条改动说明。
+        /// </summary>
+        internal static string DescribeLive(bool started, bool outputting, int returned, string lastChange)
         {
-            if (reasoningChars == 0 && contentChars == 0)
+            if (!started)
             {
                 return "等待 AI 响应";
             }
 
-            var parts = new List<string>();
-            if (reasoningChars > 0)
+            var text = returned > 0 ? $"AI 已返回 {returned} 段修改"
+                : outputting ? "AI 正在输出结果"
+                : "AI 正在思考";
+
+            return string.IsNullOrWhiteSpace(lastChange) ? text : text + "，最新：" + Shorten(lastChange, 24);
+        }
+
+        /// <summary>改动说明放在一行里显示：换行压成空格，太长截断。</summary>
+        private static string Shorten(string text, int maxChars)
+        {
+            text = string.Join(" ", text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries));
+            if (text.Length <= maxChars)
             {
-                parts.Add($"已思考 {reasoningChars} 字");
+                return text;
             }
 
-            if (contentChars > 0)
+            var cut = char.IsHighSurrogate(text[maxChars - 1]) ? maxChars - 1 : maxChars;
+            return text.Substring(0, cut) + "…";
+        }
+
+        /// <summary>
+        /// 几批同时在跑时，思考摘录只跟一批，不然每次刷新都换一批的内容，根本看不清。
+        /// 优先跟下标最小、还在思考的那批；都在输出了就跟下标最小、没做完的那批；全做完了就不显示。
+        /// </summary>
+        private static string FocusThinking(BatchLive[] lives)
+        {
+            var focus = lives.FirstOrDefault(l => !l.Done && l.Reasoning.Length > 0 && l.ContentChars == 0)
+                        ?? lives.FirstOrDefault(l => !l.Done && l.Reasoning.Length > 0);
+
+            // 一批刚做完、下一批还没开始思考时，先留着上一批的，免得摘录框一闪一闪。
+            if (focus == null && lives.Any(l => !l.Done))
             {
-                parts.Add($"已输出 {contentChars} 字");
+                focus = lives.LastOrDefault(l => l.Done && l.Reasoning.Length > 0);
             }
 
-            return "AI 正在处理：" + string.Join("，", parts);
+            return focus == null ? null : LiveText.Excerpt(focus.Reasoning);
+        }
+
+        /// <summary>一批请求在流式返回期间的实时情况。只在 AskInBatchesAsync 的锁里读写。</summary>
+        private sealed class BatchLive
+        {
+            /// <summary>思考原文，只留末尾一段（见 <see cref="LiveText.KeepTail"/>）。</summary>
+            internal readonly StringBuilder Reasoning = new StringBuilder();
+
+            internal readonly ReplyPeek Peek = new ReplyPeek();
+
+            internal int ContentChars;
+
+            internal bool Done;
+
+            internal bool HasData => Reasoning.Length > 0 || ContentChars > 0;
         }
 
         internal static string BuildSystemPrompt(string taskPrompt)

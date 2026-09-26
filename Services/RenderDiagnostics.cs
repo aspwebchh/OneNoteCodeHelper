@@ -183,9 +183,30 @@ namespace OneNoteCodeHelper.Services
                    (reply.IsComplete ? "complete" : "incomplete");
         }
 
-        internal static string DescribeAiLive(int reasoningChars, int contentChars)
+        internal static string DescribeAiLive(bool started, bool outputting, int returned, string lastChange)
         {
-            return AiOptimizer.DescribeLive(reasoningChars, contentChars);
+            return AiOptimizer.DescribeLive(started, outputting, returned, lastChange);
+        }
+
+        /// <summary>
+        /// 把 AI 返回的正文按片段（用 \u001F 隔开）逐段交给 <see cref="ReplyPeek"/>，
+        /// 返回 "已返回段数|最新改动说明"。
+        /// </summary>
+        internal static string PeekAiReply(string fragments)
+        {
+            var peek = new ReplyPeek();
+            foreach (var fragment in fragments.Split('\u001F'))
+            {
+                peek.Feed(fragment);
+            }
+
+            return $"{peek.Paragraphs}|{peek.LastChange}";
+        }
+
+        /// <summary>思考摘录，null 返回空串。</summary>
+        internal static string LiveTextExcerpt(string text, int maxChars)
+        {
+            return LiveText.Excerpt(new System.Text.StringBuilder(text), maxChars) ?? string.Empty;
         }
 
         internal static string CollapseBlankLinesInText(string text)

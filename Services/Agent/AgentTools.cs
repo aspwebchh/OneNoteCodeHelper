@@ -138,6 +138,83 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         private static string[] Languages => new[] { LanguageRegistry.AutoDetectId }.Concat(LanguageRegistry.All.Select(l => l.Id)).ToArray();
+
+        /// <summary>工具在进度和步骤列表里的中文名。</summary>
+        internal static string DisplayName(string name)
+        {
+            switch (name)
+            {
+                case "get_page_overview": return "读取页面概况";
+                case "read_blocks": return "读取段落";
+                case "set_paragraph_style": return "设置段落样式";
+                case "set_text_style": return "设置重点文字样式";
+                case "highlight_code": return "高亮代码";
+                case "get_pending_changes": return "检查格式草稿";
+                case "finish_edit": return "写回并验证";
+                default: return "校验工具请求";
+            }
+        }
+
+        /// <summary>
+        /// 步骤列表里的一行：工具名加上从参数和结果里摘出的要点（段数、样式、语言）。
+        /// 结果 ok 为 false 时算失败，附上工具返回的错误说明（插件自己写的中文，不含笔记正文）。
+        /// 参数或结果解析不了时只显示工具名。
+        /// </summary>
+        internal static (string Text, AgentStepState State) DescribeStep(string name, string arguments, string result)
+        {
+            var args = TryParse(arguments);
+            var outcome = TryParse(result);
+            string detail = null;
+            switch (name)
+            {
+                case "get_page_overview":
+                    detail = AiClient.Get(outcome, "total") is int total ? $"共 {total} 段" : null;
+                    break;
+                case "read_blocks":
+                    detail = CountOf(args, "block_ids");
+                    break;
+                case "set_paragraph_style":
+                    detail = JoinDetail(PresetName(AiClient.Get(args, "preset_id") as string), CountOf(args, "block_ids"));
+                    break;
+                case "set_text_style":
+                    detail = AiClient.Get(args, "targets") is IList targets ? $"{targets.Count} 处" : null;
+                    break;
+                case "highlight_code":
+                    detail = JoinDetail(LanguageName(AiClient.Get(outcome, "language") as string ?? AiClient.Get(args, "language") as string),
+                        CountOf(args, "block_ids"));
+                    break;
+            }
+            var text = detail == null ? DisplayName(name) : DisplayName(name) + " · " + detail;
+            if (Equals(AiClient.Get(outcome, "ok"), false))
+                return (text + "：" + (AiClient.Get(outcome, "error") as string ?? "失败"), AgentStepState.Failed);
+            return (text, AgentStepState.Done);
+        }
+
+        private static object TryParse(string json)
+        {
+            try { return string.IsNullOrWhiteSpace(json) ? null : AgentChatClient.Parse(json); }
+            catch (AiException) { return null; }
+        }
+        private static string CountOf(object args, string key) => AiClient.Get(args, key) is IList items ? $"{items.Count} 段" : null;
+        private static string JoinDetail(string a, string b) => a == null ? b : b == null ? a : a + " · " + b;
+        private static string PresetName(string preset)
+        {
+            switch (preset)
+            {
+                case "page_title": return "页面标题";
+                case "heading1": return "一级标题";
+                case "heading2": return "二级标题";
+                case "body": return "正文";
+                case "quote": return "引用";
+                default: return null;
+            }
+        }
+        private static string LanguageName(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            if (string.Equals(id, LanguageRegistry.AutoDetectId, StringComparison.OrdinalIgnoreCase)) return "自动识别";
+            return LanguageRegistry.Find(id)?.DisplayName ?? id;
+        }
         private static AgentSchema SnapshotOnly() => AgentSchema.Obj(new Dictionary<string, AgentSchema> { ["snapshot_id"] = AgentSchema.Str() }, "snapshot_id");
         private static AgentSchema WithIds()
         {

@@ -85,8 +85,8 @@ namespace OneNoteCodeHelper.Services
         /// <summary>
         /// 发一次请求，返回模型输出的正文（message.content）。
         ///
-        /// 走流式：思考和输出是一段段边生成边到的，每到一段回调一次 onChunk（这一段的思考字数、正文字数），
-        /// 进度窗靠它显示「已思考 / 已输出多少字」，用户能看出 AI 在干活。
+        /// 走流式：思考和输出是一段段边生成边到的，每到一段回调一次 onChunk（这一段的思考原文、正文原文），
+        /// 进度窗靠它显示 AI 在想什么、已经返回了几段修改，用户能看出 AI 在干活。
         /// 不走流式的话，整个结果生成完才会有第一个字节，思考得久一点进度窗就一动不动，
         /// 接口卡住时也只能干等到总超时；而网关（One API）的日志要等请求结束才记，那段时间在后台也查不到这个请求。
         ///
@@ -94,7 +94,7 @@ namespace OneNoteCodeHelper.Services
         /// 失败一律抛 <see cref="AiException"/>；用户取消抛 <see cref="OperationCanceledException"/>。
         /// </summary>
         internal static async Task<string> CompleteAsync(AiConfig config, string modelId, string effort,
-            string systemPrompt, string userContent, Action<int, int> onChunk, CancellationToken cancellation)
+            string systemPrompt, string userContent, Action<string, string> onChunk, CancellationToken cancellation)
         {
             var body = BuildRequestBody(config, modelId, effort, systemPrompt, userContent);
             var serializer = CreateSerializer();
@@ -199,7 +199,7 @@ namespace OneNoteCodeHelper.Services
         /// 逐行读流式返回（SSE），直到收到 [DONE] 或连接关闭。收到任何一行（包括保活的注释行）都把「卡住」的计时清零。
         /// </summary>
         private static async Task ReadEventStreamAsync(HttpResponseMessage response, JavaScriptSerializer serializer,
-            AiReply reply, CancellationTokenSource idle, Stopwatch watch, Action<int, int> onChunk)
+            AiReply reply, CancellationTokenSource idle, Stopwatch watch, Action<string, string> onChunk)
         {
             using (var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
             using (var reader = new StreamReader(stream, Encoding.UTF8))
@@ -215,7 +215,7 @@ namespace OneNoteCodeHelper.Services
                         reply.FirstDataSeconds = watch.Elapsed.TotalSeconds;
                     }
 
-                    if (reasoning + content > 0)
+                    if (reasoning.Length + content.Length > 0)
                     {
                         onChunk?.Invoke(reasoning, content);
                     }
@@ -230,22 +230,22 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>
-        /// 处理流式返回的一行，返回这一行带来的思考字数和正文字数。
+        /// 处理流式返回的一行，返回这一行带来的思考和正文（没有时为空串）。
         /// 注释行（: keep-alive）、空行、解析不了的行都忽略；接口在流里报错时抛 <see cref="AiException"/>。
         /// </summary>
-        internal static (int Reasoning, int Content) AbsorbStreamLine(string line, JavaScriptSerializer serializer,
+        internal static (string Reasoning, string Content) AbsorbStreamLine(string line, JavaScriptSerializer serializer,
             AiReply reply)
         {
             if (line == null || !line.StartsWith("data:", StringComparison.Ordinal))
             {
-                return (0, 0);
+                return (string.Empty, string.Empty);
             }
 
             var data = line.Substring(5).Trim();
             if (data == "[DONE]")
             {
                 reply.Done = true;
-                return (0, 0);
+                return (string.Empty, string.Empty);
             }
 
             var chunk = TryDeserialize(serializer, data);
@@ -265,7 +265,7 @@ namespace OneNoteCodeHelper.Services
             reply.FinishReason = Get(choice, "finish_reason") as string ?? reply.FinishReason;
             reply.Usage = Get(chunk, "usage") ?? reply.Usage;
 
-            return (reasoning.Length, content.Length);
+            return (reasoning, content);
         }
 
         private static void AbsorbWholeReply(object root, AiReply reply)

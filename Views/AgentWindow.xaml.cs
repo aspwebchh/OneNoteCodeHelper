@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -33,6 +34,10 @@ namespace OneNoteCodeHelper.Views
         private AgentReport _report;
         /// <summary>处理期间每秒刷新一次「已用时」。</summary>
         private DispatcherTimer _ticker;
+        /// <summary>本次执行的步骤列表，下一次执行或撤销开始时清空。</summary>
+        private readonly ObservableCollection<StepRow> _steps = new ObservableCollection<StepRow>();
+        /// <summary>模型当前是第几轮，0 表示还没开始。</summary>
+        private int _turn;
         private bool _busy;
         private bool _closed;
 
@@ -46,6 +51,7 @@ namespace OneNoteCodeHelper.Views
             PageText.Text = (string)page.Attribute("name") ?? "当前页";
             ModelText.Text = model + " · 思考 " + effort;
             SelectionScope.IsEnabled = _selection.Count > 0;
+            StepsList.ItemsSource = _steps;
             AppIcon.Source = AiProgressWindow.LoadIcon("Agent");
             // 不设的话标题栏上是宿主进程（dllhost）的图标。
             if (AppIcon.Source != null) Icon = AppIcon.Source;
@@ -93,27 +99,99 @@ namespace OneNoteCodeHelper.Views
             }, false);
         }
 
-        private IProgress<string> CreateProgress()
+        private IProgress<AgentProgress> CreateProgress()
         {
-            // 在后台调用此工厂也只通过 Dispatcher 更新 UI，不捕获线程池上下文。
-            var last = Stopwatch.StartNew();
+            // 在后台调用此工厂也只通过 Dispatcher 更新 UI，不捕获线程池上下文。流式进度已在 AgentChatClient 里限频。
             var run = _run;
-            return new DirectProgress(text =>
+            return new DirectProgress(progress =>
             {
-                if (_closed || (text.StartsWith("模型处理中", StringComparison.Ordinal) && last.ElapsedMilliseconds < 200)) return;
-                last.Restart();
+                if (_closed) return;
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    if (!_closed && _busy && ReferenceEquals(_run, run)) StatusText.Text = text;
+                    if (!_closed && _busy && ReferenceEquals(_run, run)) ShowProgress(progress, run.IsCancellationRequested);
                 }));
             });
         }
 
-        private sealed class DirectProgress : IProgress<string>
+        private sealed class DirectProgress : IProgress<AgentProgress>
         {
-            private readonly Action<string> _report;
-            internal DirectProgress(Action<string> report) { _report = report; }
-            public void Report(string value) => _report(value);
+            private readonly Action<AgentProgress> _report;
+            internal DirectProgress(Action<AgentProgress> report) { _report = report; }
+            public void Report(AgentProgress value) => _report(value);
+        }
+
+        private void ShowProgress(AgentProgress progress, bool cancelling)
+        {
+            // 已点取消：状态行和说明留给「正在取消…」，步骤照常更新，写回中的那步要显示出结果。
+            if (progress.Step != null) ShowStep(progress.Step);
+            if (cancelling) return;
+            if (progress.Turn > 0) { _turn = progress.Turn; ShowElapsed(); }
+            if (progress.Status != null) StatusText.Text = progress.Status;
+            if (progress.Thinking != null) ShowThinking(progress.Thinking);
+        }
+
+        /// <summary>思考摘录，空串收起摘录框。</summary>
+        private void ShowThinking(string text)
+        {
+            ThinkingText.Text = text;
+            ThinkingBox.Visibility = text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        /// <summary>按 Id 新增或替换一行步骤；新增时滚到最下面。</summary>
+        private void ShowStep(AgentStep step)
+        {
+            var row = new StepRow(step.Id, step.Text, step.State, StepBrush(step.State));
+            for (var i = 0; i < _steps.Count; i++)
+            {
+                if (_steps[i].Id != step.Id) continue;
+                _steps[i] = row;
+                return;
+            }
+            _steps.Add(row);
+            StepsPanel.Visibility = Visibility.Visible;
+            StepsScroll.ScrollToEnd();
+        }
+
+        /// <summary>任务没做完就结束了（失败或取消）：还显示「执行中」的步骤改成失败。</summary>
+        private void InterruptSteps()
+        {
+            for (var i = 0; i < _steps.Count; i++)
+                if (_steps[i].State == AgentStepState.Running)
+                    _steps[i] = new StepRow(_steps[i].Id, _steps[i].Text, AgentStepState.Failed, StepBrush(AgentStepState.Failed));
+        }
+
+        private Brush StepBrush(AgentStepState state)
+        {
+            switch (state)
+            {
+                case AgentStepState.Done: return (Brush)FindResource("Success");
+                case AgentStepState.Failed: return (Brush)FindResource("Danger");
+                case AgentStepState.Note: return (Brush)FindResource("Faint");
+                default: return (Brush)FindResource("Primary");
+            }
+        }
+
+        /// <summary>步骤列表里的一行，只读；状态变了就整行替换，不用属性通知。</summary>
+        private sealed class StepRow
+        {
+            internal StepRow(int id, string text, AgentStepState state, Brush brush) { Id = id; Text = text; State = state; Brush = brush; }
+            public int Id { get; }
+            public string Text { get; }
+            public AgentStepState State { get; }
+            public Brush Brush { get; }
+            public string Glyph
+            {
+                get
+                {
+                    switch (State)
+                    {
+                        case AgentStepState.Done: return "✓";
+                        case AgentStepState.Failed: return "✕";
+                        case AgentStepState.Note: return "·";
+                        default: return "…";
+                    }
+                }
+            }
         }
 
         private async Task StartJob(Func<CancellationToken, Task<AgentReport>> job, bool undo)
@@ -132,12 +210,12 @@ namespace OneNoteCodeHelper.Views
             catch (OperationCanceledException)
             {
                 _report = null;
-                if (!_closed) ShowOutcome(InfoIcon, "已取消", "未提交本次草稿。");
+                if (!_closed) { InterruptSteps(); ShowOutcome(InfoIcon, "已取消", "未提交本次草稿。"); }
             }
             catch (Exception ex)
             {
                 _report = null;
-                if (!_closed) ShowFailure(ex is AiException ? ex.Message : "处理失败。请检查页面状态后重试。");
+                if (!_closed) { InterruptSteps(); ShowFailure(ex is AiException ? ex.Message : "处理失败。请检查页面状态后重试。"); }
                 // 不记录模型原文、工具参数或笔记内容。
                 AddInLog.Info("Agent 失败，类型=" + ex.GetType().Name);
             }
@@ -159,6 +237,7 @@ namespace OneNoteCodeHelper.Views
             _run?.Cancel();
             // 停掉「已用时」刷新，免得盖掉下面这行说明；总用时照常计。
             _ticker?.Stop();
+            ShowThinking("");
             StatusText.Text = "正在取消…";
             ShowDetail("如果已开始写回，将先核对实际结果。");
             CancelButton.IsEnabled = false;
@@ -176,13 +255,17 @@ namespace OneNoteCodeHelper.Views
             SelectionScope.IsEnabled = !value && _selection.Count > 0;
         }
 
-        /// <summary>开始转圈和计时，收起上一次的结果。</summary>
+        /// <summary>开始转圈和计时，收起上一次的结果和步骤。</summary>
         private void StartRunning(string status)
         {
             ShowIcon(SpinnerIcon);
             StatusText.Text = status;
             ResultPanel.Visibility = Visibility.Collapsed;
             ErrorBox.Visibility = Visibility.Collapsed;
+            _steps.Clear();
+            StepsPanel.Visibility = Visibility.Collapsed;
+            ShowThinking("");
+            _turn = 0;
             _elapsed.Restart();
             ShowElapsed();
             if (_ticker == null)
@@ -233,18 +316,19 @@ namespace OneNoteCodeHelper.Views
             ErrorBox.Visibility = Visibility.Visible;
         }
 
-        /// <summary>停掉转圈，换成结果图标和标题；结果框和错误框先收起，由调用方按需打开。</summary>
+        /// <summary>停掉转圈，换成结果图标和标题；结果框和错误框先收起，由调用方按需打开。步骤列表保留。</summary>
         private void ShowOutcome(FrameworkElement icon, string status, string detail)
         {
             StopRunning();
             ShowIcon(icon);
             StatusText.Text = status;
             ShowDetail(detail);
+            ShowThinking("");
             ResultPanel.Visibility = Visibility.Collapsed;
             ErrorBox.Visibility = Visibility.Collapsed;
         }
 
-        private void ShowElapsed() => ShowDetail($"已用时 {(int)_elapsed.Elapsed.TotalSeconds} 秒");
+        private void ShowElapsed() => ShowDetail((_turn > 0 ? $"第 {_turn} 轮 · " : "") + $"已用时 {(int)_elapsed.Elapsed.TotalSeconds} 秒");
 
         private void ShowDetail(string text)
         {

@@ -271,6 +271,32 @@ internal static class Program
             var r = new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
             Equal("Verified", r.Status); Equal(1, api.Writes); True(model.SawToolResult); True(model.SawReasoning);
         });
+        Test("runner reports turns and one summarized step per tool", () =>
+        {
+            var s = Snapshot(); var api = new FakePage(s.Page); var log = new ProgressLog();
+            var r = new AgentRunner(new ScriptedClient(s), new AgentCommitter(api)).RunAsync(s, "美化", log, CancellationToken.None).GetAwaiter().GetResult();
+            Equal("Verified", r.Status);
+            Equal(5, log.Items.Max(p => p.Turn));
+            Equal(5, log.Items.Count(p => p.Step?.State == AgentStepState.Running));
+            var finished = log.Items.Where(p => p.Step != null && p.Step.State != AgentStepState.Running).Select(p => p.Step).ToList();
+            Equal(5, finished.Count); True(finished.All(step => step.State == AgentStepState.Done));
+            Equal("读取页面概况 · 共 " + s.Blocks.Count + " 段", finished[0].Text);
+            Equal("读取段落 · 1 段", finished[1].Text);
+            Equal("设置段落样式 · 一级标题 · 1 段", finished[2].Text);
+            Equal("检查格式草稿", finished[3].Text);
+            Equal("写回并验证", finished[4].Text);
+        });
+        Test("step descriptions summarize arguments, results and failures", () =>
+        {
+            Equal(("读取段落 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("read_blocks", "{\"block_ids\":[\"a\",\"b\"]}", "{}"));
+            Equal(("设置重点文字样式 · 2 处", AgentStepState.Done), AgentTools.DescribeStep("set_text_style", "{\"targets\":[{},{}]}", "{\"ok\":true}"));
+            Equal(("高亮代码 · " + LanguageRegistry.Find("python").DisplayName + " · 3 段", AgentStepState.Done),
+                AgentTools.DescribeStep("highlight_code", "{\"block_ids\":[\"a\",\"b\",\"c\"],\"language\":\"auto\"}", "{\"ok\":true,\"language\":\"python\"}"));
+            Equal(("高亮代码 · 自动识别 · 1 段：无法自动识别代码语言。", AgentStepState.Failed),
+                AgentTools.DescribeStep("highlight_code", "{\"block_ids\":[\"a\"],\"language\":\"auto\"}", "{\"ok\":false,\"error\":\"无法自动识别代码语言。\"}"));
+            Equal(("读取段落", AgentStepState.Done), AgentTools.DescribeStep("read_blocks", "{broken", null));
+            Equal(("校验工具请求：未知工具。", AgentStepState.Failed), AgentTools.DescribeStep("no_such_tool", "{}", "{\"ok\":false,\"error\":\"未知工具。\"}"));
+        });
         Test("runner text-only claim is not reported as success", () =>
         {
             var s = Snapshot(); var api = new FakePage(s.Page);
@@ -293,6 +319,18 @@ internal static class Program
                 Equal("get_page_overview", reply.Calls[0].Name); True(!handler.Body.Contains("response_format"));
                 True(handler.Body.Contains("tool_choice"));
             }
+        });
+        Test("HTTP stream progress shows reasoning excerpt and the tool being prepared", () =>
+        {
+            var handler = new StubHttp("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"先读取段落\\n\\n再定标题\"}}]}\n\n" +
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"x\",\"function\":{\"name\":\"read_blocks\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n", "text/event-stream");
+            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://test.invalid</ApiUrl><ApiKey>test</ApiKey></AiConfig>"));
+            var log = new ProgressLog();
+            using (var http = new HttpClient(handler))
+                new AgentChatClient(c, "test", "medium", http).CompleteAsync(new List<object>(), new object[0], log, CancellationToken.None).GetAwaiter().GetResult();
+            // 第一段立即报告；后面的被限频吞掉，收完再报一次最终状态。
+            Equal("模型正在思考…", log.Items[0].Status); Equal("先读取段落\n再定标题", log.Items[0].Thinking);
+            Equal("模型正在准备：读取段落", log.Items.Last().Status);
         });
         Test("SSE wrapper overhead above former 600K limit preserves complete tool call", () =>
         {
@@ -541,9 +579,15 @@ internal static class Program
             return new HttpResponseMessage(Status) { Content = new StringContent(_response, System.Text.Encoding.UTF8, _media) };
         }
     }
+    /// <summary>同步记下每条进度；Progress&lt;T&gt; 会投递到同步上下文，测试里看不到顺序。</summary>
+    private sealed class ProgressLog : IProgress<AgentProgress>
+    {
+        internal readonly List<AgentProgress> Items = new List<AgentProgress>();
+        public void Report(AgentProgress value) { lock (Items) Items.Add(value); }
+    }
     private sealed class TextOnlyClient : IAgentChatClient
     {
-        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<string> progress, CancellationToken cancellation) =>
+        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation) =>
             Task.FromResult(new AgentReply { Content = "已完成", FinishReason = "stop" });
     }
     private sealed class CodeScriptClient : IAgentChatClient
@@ -551,7 +595,7 @@ internal static class Program
         private readonly AgentPageSnapshot _s; private int _turn;
         internal bool SawCodeTool;
         internal CodeScriptClient(AgentPageSnapshot s) { _s = s; }
-        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<string> progress, CancellationToken cancellation)
+        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
             SawCodeTool |= AgentChatClient.Serializer().Serialize(tools).Contains("highlight_code");
             string name; object args;
@@ -571,7 +615,7 @@ internal static class Program
         private readonly AgentPageSnapshot _s; private int _turn;
         internal bool SawToolResult, SawReasoning;
         internal ScriptedClient(AgentPageSnapshot s) { _s = s; }
-        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<string> progress, CancellationToken cancellation)
+        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
             var json = AgentChatClient.Serializer().Serialize(messages);
             SawToolResult |= json.Contains("tool_call_id"); SawReasoning |= json.Contains("reasoning_content");

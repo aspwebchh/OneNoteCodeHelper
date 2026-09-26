@@ -175,7 +175,7 @@
                                    FontWeight="SemiBold"
                                    TextWrapping="Wrap"
                                    Text="准备中…" />
-                        <!-- 处理中：实时情况和已用时，每秒刷新；做完：范围和用时 -->
+                        <!-- 处理中：AI 在思考 / 输出 / 已返回几段修改，以及已用时，每秒刷新；做完：范围和用时 -->
                         <TextBlock x:Name="DetailText"
                                    Margin="0,3,0,0"
                                    FontSize="12"
@@ -184,6 +184,26 @@
                                    Visibility="Collapsed" />
                     </StackPanel>
                 </Grid>
+
+                <!-- 处理中：AI 思考原文的最后几行。文字贴底，最新的一行总在最下面，旧的从顶上裁掉；行高 16、内容区 48，正好三整行 -->
+                <Border x:Name="ThinkingBox"
+                        Margin="0,12,0,0"
+                        Padding="10,6"
+                        Height="62"
+                        ClipToBounds="True"
+                        Background="#F8FAFC"
+                        BorderBrush="{StaticResource CardBorder}"
+                        BorderThickness="1"
+                        CornerRadius="6"
+                        Visibility="Collapsed">
+                    <TextBlock x:Name="ThinkingText"
+                               VerticalAlignment="Bottom"
+                               LineHeight="16"
+                               LineStackingStrategy="BlockLineHeight"
+                               FontSize="12"
+                               Foreground="{StaticResource Muted}"
+                               TextWrapping="Wrap" />
+                </Border>
 
                 <ProgressBar x:Name="ProgressMeter"
                              Style="{StaticResource SlimProgress}"

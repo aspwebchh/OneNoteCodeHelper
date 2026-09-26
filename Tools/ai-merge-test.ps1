@@ -213,9 +213,37 @@ Assert-Equal '只有 [DONE] 也算完整' (Invoke-Diag 'ParseAiStream' @("data: 
 Assert-Equal '流里报错' (Invoke-Diag 'ParseAiStream' @('data: {"error":{"message":"upstream timeout","type":"new_api_error"}}')) `
     'ERROR: AI 接口返回错误：upstream timeout'
 
-Assert-Equal '进度：还没收到东西' (Invoke-Diag 'DescribeAiLive' @(0, 0)) '等待 AI 响应'
-Assert-Equal '进度：思考中' (Invoke-Diag 'DescribeAiLive' @(120, 0)) 'AI 正在处理：已思考 120 字'
-Assert-Equal '进度：开始输出' (Invoke-Diag 'DescribeAiLive' @(120, 35)) 'AI 正在处理：已思考 120 字，已输出 35 字'
+Assert-Equal '进度：还没收到东西' (Invoke-Diag 'DescribeAiLive' @($false, $false, 0, $null)) '等待 AI 响应'
+Assert-Equal '进度：思考中' (Invoke-Diag 'DescribeAiLive' @($true, $false, 0, $null)) 'AI 正在思考'
+Assert-Equal '进度：开始输出' (Invoke-Diag 'DescribeAiLive' @($true, $true, 0, $null)) 'AI 正在输出结果'
+Assert-Equal '进度：已返回修改和最新说明' (Invoke-Diag 'DescribeAiLive' @($true, $true, 3, '帐号 → 账号')) `
+    'AI 已返回 3 段修改，最新：帐号 → 账号'
+Assert-Equal '进度：说明太长截断、换行压成空格' `
+    (Invoke-Diag 'DescribeAiLive' @($true, $true, 1, "一二三四五六七八九十`n一二三四五六七八九十一二三四五六")) `
+    'AI 已返回 1 段修改，最新：一二三四五六七八九十 一二三四五六七八九十一二三…'
+
+Write-Host ''
+Write-Host '边收边看 AI 的返回（进度窗显示用）：'
+
+# 片段之间用 \u001F 隔开，模拟流式返回一段段到
+$us = [string][char]31
+function Invoke-Peek([string[]]$parts) { Invoke-Diag 'PeekAiReply' @($parts -join $us) }
+
+Assert-Equal '键名、说明都可能断在片段中间；字符串里的括号不算' (Invoke-Peek @(
+    '{"paragraphs":[{"id":1,"text":"帐号', '和密码","chan', 'ges":["帐号 → 账号"]},{"id":2,"te',
+    'xt":"a{b]c","changes":["加', '空格"]}]}')) '2|加空格'
+Assert-Equal '段落对象还没收完：说明已经能看到' (Invoke-Peek @('{"paragraphs":[{"id":1,"text":"x","changes":["第一条"')) '0|第一条'
+Assert-Equal '转义跨片段' (Invoke-Peek @(
+    '{"paragraphs":[{"id":1,"text":"say \', '"hi\"","changes":["\u8d', '26号"]}]}')) '1|账号'
+Assert-Equal '外包代码块、直接给数组、changes 写成单个字符串' `
+    (Invoke-Peek @('```json' + "`n" + '[{"id":3,"text":"t","changes":"单条说明"}]' + "`n" + '```')) '1|单条说明'
+Assert-Equal '没有修改' (Invoke-Peek @('{"paragraphs":[]}')) '0|'
+
+Assert-Equal '摘录：空行去掉，行尾空白去掉' (Invoke-Diag 'LiveTextExcerpt' @("第一行`n`n  `n第二行  ", 160)) "第一行`n第二行"
+Assert-Equal '摘录：截断后从空白后开始，加省略号' (Invoke-Diag 'LiveTextExcerpt' @('abc def ghi jkl', 9)) '…ghi jkl'
+Assert-Equal '摘录：找不到断点就直接截' (Invoke-Diag 'LiveTextExcerpt' @('一二三四五六七八九十', 4)) '…七八九十'
+Assert-Equal '摘录：很长的思考只看末尾，从标点后开始' (Invoke-Diag 'LiveTextExcerpt' @((('x' * 1000) + '。结尾'), 10)) '…结尾'
+Assert-Equal '摘录：只有空白时不显示' (Invoke-Diag 'LiveTextExcerpt' @("  `n `n", 160)) ''
 
 Write-Host ''
 Write-Host '删多余的空行（排版优化）：'

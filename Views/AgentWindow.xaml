@@ -263,7 +263,7 @@
                                    FontWeight="SemiBold"
                                    TextWrapping="Wrap"
                                    Text="准备就绪" />
-                        <!-- 处理中：已用时，每秒刷新；做完：用时 -->
+                        <!-- 处理中：第几轮和已用时，每秒刷新；做完：用时 -->
                         <TextBlock x:Name="DetailText"
                                    Margin="0,3,0,0"
                                    FontSize="12"
@@ -272,6 +272,60 @@
                                    Text="Agent 会读取所选范围并调用格式工具，完成后显示回读核验的结果；本窗口内可以撤销最近一次修改。" />
                     </StackPanel>
                 </Grid>
+
+                <!-- 处理中：模型思考或回复原文的最后几行。文字贴底，最新的一行总在最下面，旧的从顶上裁掉；行高 16、内容区 48，正好三整行 -->
+                <Border x:Name="ThinkingBox"
+                        Margin="0,12,0,0"
+                        Padding="10,6"
+                        Height="62"
+                        ClipToBounds="True"
+                        Background="#F8FAFC"
+                        BorderBrush="{StaticResource CardBorder}"
+                        BorderThickness="1"
+                        CornerRadius="6"
+                        Visibility="Collapsed">
+                    <TextBlock x:Name="ThinkingText"
+                               VerticalAlignment="Bottom"
+                               LineHeight="16"
+                               LineStackingStrategy="BlockLineHeight"
+                               FontSize="12"
+                               Foreground="{StaticResource Muted}"
+                               TextWrapping="Wrap" />
+                </Border>
+
+                <!-- 本次执行调用过的工具，做完也保留，方便看 Agent 做了什么。多了就在框里滚 -->
+                <StackPanel x:Name="StepsPanel" Margin="0,16,0,0" Visibility="Collapsed">
+                    <TextBlock Text="执行步骤" FontSize="12" Foreground="{StaticResource Muted}" />
+                    <Border Margin="0,6,0,0"
+                            Padding="12,6"
+                            Background="#F8FAFC"
+                            BorderBrush="{StaticResource CardBorder}"
+                            BorderThickness="1"
+                            CornerRadius="8">
+                        <ScrollViewer x:Name="StepsScroll" MaxHeight="140" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="StepsList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,2,0,2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="18" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock FontSize="12"
+                                                       FontWeight="Bold"
+                                                       Foreground="{Binding Brush}"
+                                                       Text="{Binding Glyph}" />
+                                            <TextBlock Grid.Column="1"
+                                                       FontSize="12"
+                                                       TextWrapping="Wrap"
+                                                       Text="{Binding Text}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Border>
+                </StackPanel>
 
                 <!-- 执行或撤销的核验结果。多了就在框里滚，不把窗口撑高 -->
                 <StackPanel x:Name="ResultPanel" Margin="0,16,0,0" Visibility="Collapsed">

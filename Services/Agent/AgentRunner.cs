@@ -26,7 +26,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal AgentRunner(IAgentChatClient client, AgentCommitter committer, AddInSettings codeSettings = null)
         { _client = client; _committer = committer; _codeSettings = codeSettings; }
 
-        internal async Task<AgentReport> RunAsync(AgentPageSnapshot snapshot, string request, IProgress<string> progress, CancellationToken cancellation)
+        internal async Task<AgentReport> RunAsync(AgentPageSnapshot snapshot, string request, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
             if (string.IsNullOrWhiteSpace(request) || request.Length > 8000) throw new AiException("请输入 1–8000 字的需求。");
             using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(snapshot.Options.TimeoutSeconds)))
@@ -37,13 +37,14 @@ namespace OneNoteCodeHelper.Services.Agent
                 var messages = new List<object> { new { role = "system", content = prompt }, new { role = "user", content = request } };
                 var cached = new Dictionary<string, (string Name, string Arguments, string Result)>();
                 var count = 0;
+                var steps = 0;
                 var reminded = false;
                 try
                 {
                     for (var turn = 0; turn < snapshot.Options.MaxTurns; turn++)
                     {
                         linked.Token.ThrowIfCancellationRequested();
-                        progress?.Report($"正在分析页面（第 {turn + 1} 轮）…");
+                        progress?.Report(new AgentProgress { Turn = turn + 1, Status = "模型正在分析页面…", Thinking = "" });
                         if (AgentChatClient.Serializer().Serialize(messages).Length > snapshot.Options.MaxRequestChars) throw new AiException("Agent 上下文预算已用完，没有提交草稿。");
                         var reply = await _client.CompleteAsync(messages, tools.Definitions, progress, linked.Token).ConfigureAwait(false);
                         reply.Validate();
@@ -54,6 +55,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             {
                                 reminded = true;
                                 messages.Add(new { role = "user", content = "尚未应用任何修改。请通过工具完成需求并 finish_edit；不支持则说明原因。" });
+                                progress?.Report(new AgentProgress { Step = new AgentStep { Id = ++steps, Text = "模型没有调用工具，已提醒继续", State = AgentStepState.Note } });
                                 continue;
                             }
                             return new AgentReport { Status = "NoChange", Message = "未应用任何修改。\n" + reply.Content };
@@ -72,7 +74,12 @@ namespace OneNoteCodeHelper.Services.Agent
                             }
                             else
                             {
-                                progress?.Report(call.Name == "finish_edit" ? "正在检查冲突、写回并验证…" : "正在执行：" + DisplayName(call.Name));
+                                var step = ++steps;
+                                progress?.Report(new AgentProgress
+                                {
+                                    Status = call.Name == "finish_edit" ? "正在检查冲突、写回并验证…" : "正在执行：" + AgentTools.DisplayName(call.Name),
+                                    Step = new AgentStep { Id = step, Text = AgentTools.DisplayName(call.Name), State = AgentStepState.Running }
+                                });
                                 object outcome;
                                 try
                                 {
@@ -82,6 +89,8 @@ namespace OneNoteCodeHelper.Services.Agent
                                 catch (AiException ex) when (!snapshot.Frozen) { outcome = new { ok = false, error = ex.Message }; }
                                 result = AgentChatClient.Serializer().Serialize(outcome);
                                 cached.Add(call.Id, (call.Name, call.Arguments, result));
+                                var (text, state) = AgentTools.DescribeStep(call.Name, call.Arguments, result);
+                                progress?.Report(new AgentProgress { Step = new AgentStep { Id = step, Text = text, State = state } });
                             }
                             messages.Add(new { role = "tool", tool_call_id = call.Id, content = result });
                             if (tools.Report != null)
@@ -95,19 +104,6 @@ namespace OneNoteCodeHelper.Services.Agent
                 }
                 catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellation.IsCancellationRequested)
                 { throw new AiException("Agent 达到任务总时限，没有继续执行。"); }
-            }
-        }
-        private static string DisplayName(string name)
-        {
-            switch (name)
-            {
-                case "get_page_overview": return "读取页面概况";
-                case "read_blocks": return "读取段落";
-                case "set_paragraph_style": return "设置段落样式";
-                case "set_text_style": return "设置重点文字样式";
-                case "highlight_code": return "高亮代码";
-                case "get_pending_changes": return "检查格式草稿";
-                default: return "校验工具请求";
             }
         }
     }

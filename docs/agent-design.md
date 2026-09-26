@@ -319,7 +319,7 @@ SSE 按 choice.index 和 tool_call.index 聚合参数片段；保留调用 ID、
 
 AgentAssistantMessage 至少保存 Content、ReasoningContent、ToolCalls、FinishReason、Usage。现有 AiReply 仅保存 reasoning 字数，不能直接承担这个角色。
 
-对 DeepSeek，当前文档要求带 tools 的后续请求回传历史 reasoning_content；只在任务内存中保留用于协议续接，界面仅显示进度摘要，日志不记录原文。[DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)
+对 DeepSeek，当前文档要求带 tools 的后续请求回传历史 reasoning_content；只在任务内存中保留用于协议续接；界面显示进度摘要和思考原文的最后三行（只在窗口内），日志不记录原文。[DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)
 
 供应商差异使用 AgentModelCapabilities 配置，包括 SupportsTools、SupportsThinkingWithTools、ReplayReasoningContent、SupportsStrictSchema、SupportsStreamUsage。默认不发送 strict 或其他未经当前接口确认的可选参数。初次接入用无页面数据的只读工具做一次联调；“OpenAI 兼容”不能替代工具能力验证。DeepSeek 思考模式下使用 auto，不能假设 required 或指定函数的 tool_choice 可用。
 
