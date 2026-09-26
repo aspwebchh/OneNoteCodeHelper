@@ -8,6 +8,9 @@ using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml.Linq;
+using Microsoft.Office.Interop.OneNote;
+using OneNoteCodeHelper.Services.Agent;
 
 namespace OneNoteCodeHelper.Services
 {
@@ -39,7 +42,7 @@ namespace OneNoteCodeHelper.Services
     }
 
     /// <summary>
-    /// 一次「AI 优化」的结果，进度窗按它画结果区。Error 不为 null 表示失败，这时其余字段没有意义。
+    /// 一次文字功能的结果，Agent 窗口按它画结果区。Error 不为 null 表示失败，这时其余字段没有意义。
     /// </summary>
     internal sealed class AiReport
     {
@@ -81,7 +84,7 @@ namespace OneNoteCodeHelper.Services
         /// <summary>页面有没有被改动。</summary>
         internal bool Changed => Applied + RemovedBlankLines > 0;
 
-        internal static AiReport Failed(string message) => new AiReport(message ?? "AI 优化失败。");
+        internal static AiReport Failed(string message) => new AiReport(message ?? "AI 文字功能失败。");
     }
 
     /// <summary>AI 对一个段落的回复：改后的全文，和它自己写的改动说明（可能为空）。</summary>
@@ -99,8 +102,8 @@ namespace OneNoteCodeHelper.Services
     }
 
     /// <summary>
-    /// 一次「AI 优化」：读段落 → 分批问 AI → 写回。整个过程在线程池（MTA）上跑，
-    /// 和「高亮选中」一样直接调 OneNote 的 COM 对象，不用封送。
+    /// Agent 窗口里的一次文字功能（智能校正等）：读段落 → 分批问 AI → 写回。整个过程在线程池（MTA）上跑，
+    /// 和「高亮选中」一样直接调 OneNote 的 COM 对象，不用封送。页面和选区由窗口在打开时固定。
     /// </summary>
     internal sealed class AiOptimizer
     {
@@ -127,30 +130,38 @@ namespace OneNoteCodeHelper.Services
             "5. changes 用简短的中文逐条说明这一段改了什么，每条只说一件事，" +
             "例如 \"帐号 → 账号\"、\"中英文之间加空格\"；同一类改动合成一条。";
 
-        private readonly PageEditor _editor;
+        private readonly IOneNotePageAccess _api;
 
         private readonly AiConfig _config;
 
         private readonly AiFunction _function;
 
-        private readonly AiModel _model;
+        private readonly string _modelId;
 
         private readonly string _effort;
 
-        internal AiOptimizer(PageEditor editor, AiConfig config, AiFunction function, AiModel model, string effort)
+        internal AiOptimizer(IOneNotePageAccess api, AiConfig config, AiFunction function, string modelId, string effort)
         {
-            _editor = editor;
+            _api = api;
             _config = config;
             _function = function;
-            _model = model;
+            _modelId = modelId;
             _effort = effort;
         }
 
-        internal async Task<AiReport> RunAsync(IProgress<AiProgress> progress, CancellationToken cancellation)
+        /// <summary>selectedIds 为 null 时处理整页，否则只处理这些段落；selectedBlankLines 是选区里的空行。</summary>
+        internal async Task<AiReport> RunAsync(string pageId, ISet<string> selectedIds, HashSet<string> selectedBlankLines,
+            IProgress<AiProgress> progress, CancellationToken cancellation)
         {
             progress.Report(new AiProgress("正在读取页面…"));
 
-            var read = _editor.ReadAiTargets(out var targets);
+            var page = XDocument.Parse(_api.GetPageContent(pageId, PageInfo.piBasic)).Root;
+            if (page == null)
+            {
+                return AiReport.Failed("读取页面内容失败。");
+            }
+
+            var read = PageEditor.ReadAiTargets(page, pageId, selectedIds, selectedBlankLines, out var targets);
             if (!read.Success)
             {
                 return AiReport.Failed(read.Message);
@@ -159,7 +170,7 @@ namespace OneNoteCodeHelper.Services
             var paragraphs = targets.Paragraphs;
             var batches = SplitIntoBatches(paragraphs.Count, i => paragraphs[i].Text.Length);
             var scope = targets.WholePage ? "整页" : "选中的";
-            AddInLog.Info($"AI 优化开始：{_function.Name}，{scope} {paragraphs.Count} 段，分 {batches.Count} 批。");
+            AddInLog.Info($"AI 文字功能开始：{_function.Name}，{scope} {paragraphs.Count} 段，分 {batches.Count} 批。");
 
             var replies = await AskInBatchesAsync(paragraphs, batches, scope, progress, cancellation)
                 .ConfigureAwait(false);
@@ -203,7 +214,7 @@ namespace OneNoteCodeHelper.Services
             {
                 progress.Report(new AiProgress("正在写回 OneNote…"));
 
-                var write = _editor.ApplyParagraphEdits(targets, edits, _function.RemoveExtraBlankLines,
+                var write = PageEditor.ApplyParagraphEdits(_api, targets, edits, _function.RemoveExtraBlankLines,
                     out applied, out conflicted, out removedBlankLines);
                 if (!write.Success)
                 {
@@ -211,7 +222,7 @@ namespace OneNoteCodeHelper.Services
                 }
             }
 
-            AddInLog.Info($"AI 优化结束：改了 {applied.Count} 段，删了 {removedBlankLines} 个空行，跳过 {conflicted} 段。");
+            AddInLog.Info($"AI 文字功能结束：改了 {applied.Count} 段，删了 {removedBlankLines} 个空行，跳过 {conflicted} 段。");
 
             // 只汇总真正写回了的段落：处理期间被用户改过而跳过的，它们的说明不算数。
             return new AiReport(scope, MergeChanges(applied.Select(e => e.Changes)), applied.Count,
@@ -312,7 +323,7 @@ namespace OneNoteCodeHelper.Services
                     {
                         // 编号从 1 开始、每批各自编：模型看到的 id 越短越不容易抄错。
                         var content = await AiClient.CompleteAsync(
-                            _config, _model.Id, _effort, systemPrompt,
+                            _config, _modelId, _effort, systemPrompt,
                             BuildUserMessage(batch.Select((index, n) => (n + 1, paragraphs[index].Text))),
                             (reasoning, text) => Update(batchIndex, reasoning, text, false),
                             failFast.Token).ConfigureAwait(false);

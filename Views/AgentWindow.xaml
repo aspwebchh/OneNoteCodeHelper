@@ -3,7 +3,8 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Agent"
         Width="480"
-        SizeToContent="Height"
+        Height="720"
+        MinHeight="540"
         ResizeMode="NoResize"
         FontFamily="Microsoft YaHei UI"
         FontSize="13"
@@ -13,7 +14,10 @@
         WindowStartupLocation="CenterScreen"
         ShowInTaskbar="False">
 
-    <!-- 配色、按钮、卡片和状态图标照搬「AI 优化」进度窗。类库里没有 App.xaml，样式只能就地定义 -->
+    <!--
+      窗口高度固定，不随内容变：处理中思考摘录、步骤、结果不断变化，高度跟着变会让按钮上下乱跳。
+      多出来的内容都在状态卡片里那一个滚动区里滚。类库里没有 App.xaml，样式只能就地定义。
+    -->
     <Window.Resources>
         <SolidColorBrush x:Key="Primary" Color="#2563EB" />
         <SolidColorBrush x:Key="PrimaryHover" Color="#1D4ED8" />
@@ -28,6 +32,13 @@
 
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource Text}" />
+        </Style>
+
+        <!-- 设置卡片左列的标签 -->
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{StaticResource Muted}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
         <Style TargetType="RadioButton">
@@ -76,7 +87,7 @@
             <Setter Property="Foreground" Value="White" />
         </Style>
 
-        <!-- 需求输入框：和改动清单框同一种浅灰圆角底，获得焦点时描主色边 -->
+        <!-- 需求输入框和提示词框：浅灰圆角底，获得焦点时描主色边 -->
         <Style x:Key="InputBox" TargetType="TextBox">
             <Setter Property="Foreground" Value="{StaticResource Text}" />
             <Setter Property="Background" Value="#F8FAFC" />
@@ -107,6 +118,121 @@
             </Setter>
         </Style>
 
+        <!-- 下拉框：外观和输入框一致。系统自带的 ComboBox 模板是灰色渐变按钮，和这套配色不搭 -->
+        <Style x:Key="PickerToggle" TargetType="ToggleButton">
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="ClickMode" Value="Press" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Shell"
+                                Background="#F8FAFC"
+                                BorderBrush="{StaticResource CardBorder}"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                SnapsToDevicePixels="True">
+                            <Path Margin="0,0,10,0"
+                                  HorizontalAlignment="Right"
+                                  VerticalAlignment="Center"
+                                  Data="M 0,0 L 4,4 L 8,0"
+                                  Stroke="{StaticResource Muted}"
+                                  StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  StrokeLineJoin="Round" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource Border}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="White" />
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource Primary}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PickerItem" TargetType="ComboBoxItem">
+            <Setter Property="Padding" Value="10,5" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="Shell" Background="Transparent" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                            <ContentPresenter />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="#EFF6FF" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Foreground" Value="{StaticResource Primary}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="Picker" TargetType="ComboBox">
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="ItemContainerStyle" Value="{StaticResource PickerItem}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton Style="{StaticResource PickerToggle}"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />
+                            <ContentPresenter Margin="10,0,26,0"
+                                              HorizontalAlignment="Left"
+                                              VerticalAlignment="Center"
+                                              IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}">
+                                <ContentPresenter.Resources>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+                                    </Style>
+                                </ContentPresenter.Resources>
+                            </ContentPresenter>
+                            <Popup x:Name="PART_Popup"
+                                   Placement="Bottom"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   PopupAnimation="Fade"
+                                   IsOpen="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}}">
+                                <Border Margin="0,2,0,0"
+                                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                                        MaxHeight="{TemplateBinding MaxDropDownHeight}"
+                                        Padding="0,4"
+                                        Background="White"
+                                        BorderBrush="{StaticResource CardBorder}"
+                                        BorderThickness="1"
+                                        CornerRadius="6"
+                                        SnapsToDevicePixels="True">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained" />
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.6" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- 状态图标里的白色笔画 -->
         <Style x:Key="GlyphStroke" TargetType="Path">
             <Setter Property="Stroke" Value="White" />
@@ -117,9 +243,15 @@
         </Style>
     </Window.Resources>
 
-    <StackPanel Margin="20,16,20,20">
+    <Grid Margin="20,16,20,20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
-        <!-- ========== 头部：图标、标题、模型和思考强度 ========== -->
+        <!-- ========== 头部：图标、标题、目标页 ========== -->
         <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
@@ -133,10 +265,11 @@
                    RenderOptions.BitmapScalingMode="HighQuality" />
 
             <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
-                <TextBlock Text="整理页面格式"
+                <TextBlock Text="AI 助手"
                            FontSize="15"
                            FontWeight="SemiBold" />
-                <TextBlock x:Name="ModelText"
+                <!-- 打开窗口时固定下来的页，之后切换 OneNote 页面也不变 -->
+                <TextBlock x:Name="PageText"
                            Margin="0,1,0,0"
                            FontSize="12"
                            Foreground="{StaticResource Muted}"
@@ -144,8 +277,9 @@
             </StackPanel>
         </Grid>
 
-        <!-- ========== 卡片：目标页、范围、需求 ========== -->
-        <Border Margin="0,14,0,0"
+        <!-- ========== 卡片：功能、模型、思考、范围、需求 ========== -->
+        <Border Grid.Row="1"
+                Margin="0,14,0,0"
                 Padding="16"
                 Background="White"
                 BorderBrush="{StaticResource CardBorder}"
@@ -161,61 +295,85 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <TextBlock Text="目标页面"
-                           FontSize="12"
-                           Foreground="{StaticResource Muted}"
-                           VerticalAlignment="Center" />
-                <!-- 打开窗口时固定下来的页，之后切换 OneNote 页面也不变 -->
-                <TextBlock x:Name="PageText"
-                           Grid.Column="1"
-                           Margin="12,0,0,0"
-                           FontWeight="SemiBold"
-                           VerticalAlignment="Center"
-                           TextTrimming="CharacterEllipsis" />
+                <TextBlock Text="功能" Style="{StaticResource FieldLabel}" />
+                <!-- 第一项是 Agent 自定义排版，后面是 AI 配置里的文字功能 -->
+                <ComboBox x:Name="FunctionPicker"
+                          Grid.Column="1"
+                          Margin="12,0,0,0"
+                          Style="{StaticResource Picker}"
+                          SelectionChanged="OnChoiceChanged" />
 
-                <TextBlock Grid.Row="1"
-                           Margin="0,12,0,0"
-                           Text="处理范围"
-                           FontSize="12"
-                           Foreground="{StaticResource Muted}"
-                           VerticalAlignment="Center" />
-                <StackPanel Grid.Row="1" Grid.Column="1" Margin="12,12,0,0" Orientation="Horizontal">
+                <TextBlock Grid.Row="1" Margin="0,10,0,0" Text="模型" Style="{StaticResource FieldLabel}" />
+                <Grid Grid.Row="1" Grid.Column="1" Margin="12,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="96" />
+                    </Grid.ColumnDefinitions>
+                    <ComboBox x:Name="ModelPicker"
+                              Style="{StaticResource Picker}"
+                              SelectionChanged="OnChoiceChanged" />
+                    <TextBlock Grid.Column="1" Margin="16,0,8,0" Text="思考" Style="{StaticResource FieldLabel}" />
+                    <!-- none 不思考，最快；low → max 思考越来越多，越慢，但更不容易漏改、改错 -->
+                    <ComboBox x:Name="EffortPicker"
+                              Grid.Column="2"
+                              Style="{StaticResource Picker}"
+                              SelectionChanged="OnChoiceChanged" />
+                </Grid>
+
+                <TextBlock Grid.Row="2" Margin="0,12,0,0" Text="范围" Style="{StaticResource FieldLabel}" />
+                <StackPanel Grid.Row="2" Grid.Column="1" Margin="12,12,0,0" Orientation="Horizontal">
                     <RadioButton x:Name="PageScope" Content="当前页" IsChecked="True" Margin="0,0,20,0" />
                     <!-- 打开窗口前没选中文字时不可用 -->
                     <RadioButton x:Name="SelectionScope" Content="选中段落" />
                 </StackPanel>
 
-                <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Margin="0,16,0,0" Orientation="Horizontal">
-                    <TextBlock Text="需求" FontSize="12" Foreground="{StaticResource Muted}" />
-                    <TextBlock Margin="8,0,0,0"
+                <StackPanel Grid.Row="3" Grid.ColumnSpan="2" Margin="0,16,0,0" Orientation="Horizontal">
+                    <TextBlock x:Name="RequestLabel" Text="需求" FontSize="12" Foreground="{StaticResource Muted}" />
+                    <TextBlock x:Name="RequestHint"
+                               Margin="8,0,0,0"
                                FontSize="12"
-                               Foreground="{StaticResource Faint}"
-                               Text="只调整格式，保留正文、代码和段落结构" />
+                               Foreground="{StaticResource Faint}" />
                 </StackPanel>
-                <TextBox x:Name="RequestText"
-                         Grid.Row="3"
-                         Grid.ColumnSpan="2"
-                         Style="{StaticResource InputBox}"
-                         Height="110"
-                         Margin="0,6,0,0"
-                         AcceptsReturn="True"
-                         TextWrapping="Wrap"
-                         VerticalScrollBarVisibility="Auto"
-                         MaxLength="8000"
-                         Text="将该页面上的内容排版下，要美观。统一正文格式，突出标题和重点。" />
+                <!-- 需求框（Agent）和提示词框（文字功能）叠在同一格、同样高，切换功能时位置不动 -->
+                <Grid Grid.Row="4" Grid.ColumnSpan="2" Height="96" Margin="0,6,0,0">
+                    <TextBox x:Name="RequestText"
+                             Style="{StaticResource InputBox}"
+                             AcceptsReturn="True"
+                             TextWrapping="Wrap"
+                             VerticalScrollBarVisibility="Auto"
+                             MaxLength="8000"
+                             Text="将该页面上的内容排版下，要美观。统一正文格式，突出标题和重点。" />
+                    <TextBox x:Name="PromptText"
+                             Style="{StaticResource InputBox}"
+                             IsReadOnly="True"
+                             FontSize="12"
+                             Foreground="{StaticResource Muted}"
+                             TextWrapping="Wrap"
+                             VerticalScrollBarVisibility="Auto"
+                             Visibility="Collapsed" />
+                </Grid>
             </Grid>
         </Border>
 
-        <!-- ========== 卡片：状态、结果（和「AI 优化」进度窗同构） ========== -->
-        <Border Margin="0,12,0,0"
+        <!-- ========== 卡片：状态、思考、步骤和结果。占满剩下的高度 ========== -->
+        <Border Grid.Row="2"
+                Margin="0,12,0,0"
                 Padding="16"
                 Background="White"
                 BorderBrush="{StaticResource CardBorder}"
                 BorderThickness="1"
                 CornerRadius="10">
-            <StackPanel>
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -223,7 +381,7 @@
                     </Grid.ColumnDefinitions>
 
                     <!-- 状态图标：同一时间只显示一个，全是矢量，不带图片 -->
-                    <Grid Width="28" Height="28" VerticalAlignment="Top">
+                    <Grid Width="28" Height="28" VerticalAlignment="Center">
                         <Grid x:Name="SpinnerIcon" RenderTransformOrigin="0.5,0.5" Visibility="Collapsed">
                             <Grid.RenderTransform>
                                 <RotateTransform x:Name="SpinnerRotation" />
@@ -257,24 +415,31 @@
                         </Grid>
                     </Grid>
 
+                    <!-- 两行都不换行：长了就省略，鼠标停上去看全文。换行会让下面的内容跟着上下跳 -->
                     <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
                         <TextBlock x:Name="StatusText"
                                    FontSize="14"
                                    FontWeight="SemiBold"
-                                   TextWrapping="Wrap"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"
                                    Text="准备就绪" />
-                        <!-- 处理中：第几轮和已用时，每秒刷新；做完：用时 -->
+                        <!-- 处理中：第几轮或 AI 在做什么，以及已用时，每秒刷新；做完：用时 -->
                         <TextBlock x:Name="DetailText"
                                    Margin="0,3,0,0"
                                    FontSize="12"
                                    Foreground="{StaticResource Muted}"
-                                   TextWrapping="Wrap"
-                                   Text="Agent 会读取所选范围并调用格式工具，完成后显示回读核验的结果；本窗口内可以撤销最近一次修改。" />
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"
+                                   Text="选好功能和范围后点「执行」。" />
                     </StackPanel>
                 </Grid>
 
-                <!-- 处理中：模型思考或回复原文的最后几行。文字贴底，最新的一行总在最下面，旧的从顶上裁掉；行高 16、内容区 48，正好三整行 -->
+                <!--
+                  处理中：模型思考或回复原文的最后几行。文字贴底，最新的一行总在最下面，旧的从顶上裁掉；
+                  行高 16、内容区 48，正好三整行。从开始到出结果一直占着位置，没有文字时显示占位。
+                -->
                 <Border x:Name="ThinkingBox"
+                        Grid.Row="1"
                         Margin="0,12,0,0"
                         Padding="10,6"
                         Height="62"
@@ -293,74 +458,84 @@
                                TextWrapping="Wrap" />
                 </Border>
 
-                <!-- 本次执行调用过的工具，做完也保留，方便看 Agent 做了什么。多了就在框里滚 -->
-                <StackPanel x:Name="StepsPanel" Margin="0,16,0,0" Visibility="Collapsed">
-                    <TextBlock Text="执行步骤" FontSize="12" Foreground="{StaticResource Muted}" />
-                    <Border Margin="0,6,0,0"
-                            Padding="12,6"
-                            Background="#F8FAFC"
-                            BorderBrush="{StaticResource CardBorder}"
-                            BorderThickness="1"
-                            CornerRadius="8">
-                        <ScrollViewer x:Name="StepsScroll" MaxHeight="140" VerticalScrollBarVisibility="Auto">
-                            <ItemsControl x:Name="StepsList">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Margin="0,2,0,2">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="18" />
-                                                <ColumnDefinition Width="*" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock FontSize="12"
-                                                       FontWeight="Bold"
-                                                       Foreground="{Binding Brush}"
-                                                       Text="{Binding Glyph}" />
-                                            <TextBlock Grid.Column="1"
-                                                       FontSize="12"
-                                                       TextWrapping="Wrap"
-                                                       Text="{Binding Text}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </ScrollViewer>
-                    </Border>
-                </StackPanel>
+                <!-- 说明、步骤、结果、错误都在这一个滚动区里，多了就滚，不把窗口撑高 -->
+                <ScrollViewer x:Name="ContentScroll"
+                              Grid.Row="2"
+                              Margin="0,12,0,0"
+                              VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <!-- 还没执行过时的说明，随所选功能变化 -->
+                        <TextBlock x:Name="IntroText"
+                                   FontSize="12"
+                                   LineHeight="19"
+                                   Foreground="{StaticResource Muted}"
+                                   TextWrapping="Wrap" />
 
-                <!-- 执行或撤销的核验结果。多了就在框里滚，不把窗口撑高 -->
-                <StackPanel x:Name="ResultPanel" Margin="0,16,0,0" Visibility="Collapsed">
-                    <TextBlock Text="结果" FontSize="12" Foreground="{StaticResource Muted}" />
-                    <Border Margin="0,6,0,0"
-                            Padding="12,8"
-                            Background="#F8FAFC"
-                            BorderBrush="{StaticResource CardBorder}"
-                            BorderThickness="1"
-                            CornerRadius="8">
-                        <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
-                            <TextBlock x:Name="ResultText" TextWrapping="Wrap" />
-                        </ScrollViewer>
-                    </Border>
-                </StackPanel>
+                        <!-- Agent 调用过的工具，做完也保留，方便看 Agent 做了什么 -->
+                        <StackPanel x:Name="StepsPanel" Margin="0,0,0,12" Visibility="Collapsed">
+                            <TextBlock Text="执行步骤" FontSize="12" Foreground="{StaticResource Muted}" />
+                            <Border Margin="0,6,0,0"
+                                    Padding="12,6"
+                                    Background="#F8FAFC"
+                                    BorderBrush="{StaticResource CardBorder}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                <ItemsControl x:Name="StepsList">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,2,0,2">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="18" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock FontSize="12"
+                                                           FontWeight="Bold"
+                                                           Foreground="{Binding Brush}"
+                                                           Text="{Binding Glyph}" />
+                                                <TextBlock Grid.Column="1"
+                                                           FontSize="12"
+                                                           TextWrapping="Wrap"
+                                                           Text="{Binding Text}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Border>
+                        </StackPanel>
 
-                <!-- 失败时的说明：放在浅红框里，不再整段红字 -->
-                <Border x:Name="ErrorBox"
-                        Margin="0,14,0,0"
-                        Padding="12,10"
-                        Background="#FEF2F2"
-                        BorderBrush="#FECACA"
-                        BorderThickness="1"
-                        CornerRadius="6"
-                        Visibility="Collapsed">
-                    <TextBlock x:Name="ErrorText"
-                               FontSize="12"
-                               Foreground="#991B1B"
-                               TextWrapping="Wrap" />
-                </Border>
-            </StackPanel>
+                        <!-- Agent：回读核验的结果；文字功能：AI 自己写的改动清单 -->
+                        <StackPanel x:Name="ResultPanel" Margin="0,0,0,12" Visibility="Collapsed">
+                            <TextBlock x:Name="ResultLabel" Text="结果" FontSize="12" Foreground="{StaticResource Muted}" />
+                            <Border Margin="0,6,0,0"
+                                    Padding="12,8"
+                                    Background="#F8FAFC"
+                                    BorderBrush="{StaticResource CardBorder}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                <TextBlock x:Name="ResultText" TextWrapping="Wrap" />
+                            </Border>
+                        </StackPanel>
+
+                        <!-- 失败时的说明：放在浅红框里，不再整段红字 -->
+                        <Border x:Name="ErrorBox"
+                                Padding="12,10"
+                                Background="#FEF2F2"
+                                BorderBrush="#FECACA"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Visibility="Collapsed">
+                            <TextBlock x:Name="ErrorText"
+                                       FontSize="12"
+                                       Foreground="#991B1B"
+                                       TextWrapping="Wrap" />
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
         </Border>
 
-        <!-- 「取消」只在处理期间显示，「撤销本次」只在有已核验的修改时显示 -->
-        <StackPanel Margin="0,14,0,0" Orientation="Horizontal" HorizontalAlignment="Right">
+        <!-- 「取消」只在处理期间显示，「撤销本次」只在 Agent 有已核验的修改时显示 -->
+        <StackPanel Grid.Row="3" Margin="0,14,0,0" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="UndoButton"
                     Content="撤销本次"
                     Style="{StaticResource BaseButton}"
@@ -378,5 +553,5 @@
                     Style="{StaticResource PrimaryButton}"
                     Click="OnExecute" />
         </StackPanel>
-    </StackPanel>
+    </Grid>
 </Window>

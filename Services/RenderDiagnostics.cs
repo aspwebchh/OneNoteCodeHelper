@@ -286,7 +286,7 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>
-        /// 用本机 ai-settings.xml 真调一次接口：按「AI 优化」完全一样的提示词和格式问，返回解析后的结果。
+        /// 用本机 ai-settings.xml 真调一次接口：按文字功能完全一样的提示词和格式问，返回解析后的结果。
         /// paragraphs 用 \n 分隔。
         /// </summary>
         internal static string RunAiSample(string functionName, string modelId, string effort, string paragraphs)

@@ -7,7 +7,7 @@ using System.Xml.Linq;
 
 namespace OneNoteCodeHelper.Services
 {
-    /// <summary>功能区「模型」下拉里的一项。下拉里直接显示模型 id，也就是发给接口的 model 参数。</summary>
+    /// <summary>Agent 窗口「模型」下拉里的一项。下拉里直接显示模型 id，也就是发给接口的 model 参数。</summary>
     internal sealed class AiModel
     {
         internal AiModel(string id)
@@ -18,7 +18,7 @@ namespace OneNoteCodeHelper.Services
         internal string Id { get; }
     }
 
-    /// <summary>功能区「功能」下拉里的一项：显示名 + 提示词，外加由插件自己做、不经过 AI 的规则。</summary>
+    /// <summary>Agent 窗口「功能」下拉里的一项文字功能：显示名 + 提示词，外加由插件自己做、不经过 AI 的规则。</summary>
     internal sealed class AiFunction
     {
         internal AiFunction(string name, string prompt, bool removeExtraBlankLines = false)
@@ -40,7 +40,7 @@ namespace OneNoteCodeHelper.Services
     }
 
     /// <summary>
-    /// 思考强度（变体），功能区下拉里直接显示这些名字。取值和请求参数照搬 opencode 配置里 deepseek 模型的 variants：
+    /// 思考强度（变体），Agent 窗口的下拉里直接显示这些名字。取值和请求参数照搬 opencode 配置里 deepseek 模型的 variants：
     /// none 关掉思考（thinking.type = disabled，不传 reasoning_effort），其余打开思考并把名字作为 reasoning_effort 传过去。
     /// </summary>
     internal static class AiEfforts
@@ -124,7 +124,7 @@ namespace OneNoteCodeHelper.Services
 
         internal int IndexOfFunction(string name) => Math.Max(0, Functions.ToList().IndexOf(FindFunction(name)));
 
-        /// <summary>两份配置的下拉选项是否一样。不一样才需要刷新功能区，免得每次都闪一下。</summary>
+        /// <summary>两份配置的下拉选项是否一样。不一样才需要重建 Agent 窗口的下拉，免得丢掉当前选中项。</summary>
         internal bool HasSameChoices(AiConfig other)
         {
             return other != null
@@ -157,6 +157,12 @@ namespace OneNoteCodeHelper.Services
         private const string RemoveBlankLinesAttribute = "removeExtraBlankLines";
 
         internal const string SmartFunctionName = "智能校正";
+
+        /// <summary>
+        /// Agent 窗口「功能」下拉的第一项：按需求调用格式工具，不是配置里的文字功能。
+        /// 配置里要是有同名的 Function，窗口里跳过那一项。
+        /// </summary>
+        internal const string AgentFunctionName = "自定义排版（Agent）";
 
         private const string LegacyCombinedFunctionName = "错别字 + 排版";
 
@@ -314,7 +320,7 @@ namespace OneNoteCodeHelper.Services
 
             return new XDocument(
                 new XDeclaration("1.0", "utf-8", null),
-                new XComment(" OneNote 代码高亮 · AI 助手配置。改完保存即可，下次点「AI 优化」或重新打开 Agent 窗口时生效。 "),
+                new XComment(" OneNote 代码高亮 · AI 助手配置。改完保存即可，回到 Agent 窗口点「执行」时生效。 "),
                 new XElement(
                     "AiConfig",
                     new XComment(" OpenAI 兼容接口的基础地址；插件会在后面加上 /chat/completions "),
@@ -333,12 +339,12 @@ namespace OneNoteCodeHelper.Services
                         new XElement("StreamUsage", true), new XElement("EnableNativeHeadings", true),
                         new XElement("EnableParagraphSpacing", true), new XElement("EnableMixedOutlines", true),
                         new XElement("EnableCodeHighlight", true)),
-                    new XComment(" 功能区「模型」下拉里的选项：id 是接口的模型名，下拉里直接显示它 "),
+                    new XComment(" Agent 窗口「模型」下拉里的选项：id 是接口的模型名，下拉里直接显示它 "),
                     new XElement(
                         "Models",
                         config.Models.Select(m => new XElement("Model", new XAttribute("id", m.Id)))),
                     new XComment(
-                        " 功能区「功能」下拉里的选项，可以自己加。Prompt 只需写清楚要做什么；\n" +
+                        " Agent 窗口「功能」下拉里的文字功能，可以自己加。Prompt 只需写清楚要做什么；\n" +
                         "       输入输出的 JSON 格式、只返回改动的段落、不要合并拆分段落等约定由插件自动附加，不用写。\n" +
                         "       removeExtraBlankLines=\"true\" 表示顺带删掉多余的空行：连续的空行只留一行，文本框开头、结尾的空行删掉。\n" +
                         "       这一步由插件自己做，不经过 AI。 "),

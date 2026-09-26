@@ -6,12 +6,12 @@ using System.Text;
 namespace OneNoteCodeHelper.Services
 {
     /// <summary>
-    /// 等模型时在进度窗里显示的实时文字：思考（或回复）原文的最后几行。
+    /// 等模型时在 Agent 窗口里显示的实时文字：思考（或回复）原文的最后几行。
     /// 只在窗口里显示，不写日志。
     /// </summary>
     internal static class LiveText
     {
-        /// <summary>摘录最多多少字。进度窗里的摘录框大约三行，多出来的从顶上裁掉。</summary>
+        /// <summary>摘录最多多少字。窗口里的摘录框大约三行，多出来的从顶上裁掉。</summary>
         internal const int ExcerptChars = 160;
 
         /// <summary>截断后在开头这么多字以内找一个断点，免得从半个词开始。</summary>
@@ -109,7 +109,7 @@ namespace OneNoteCodeHelper.Services
     }
 
     /// <summary>
-    /// 边收边看 AI 优化的返回（约定的 JSON：{"paragraphs":[{"id":..,"text":..,"changes":[..]}]}），
+    /// 边收边看文字功能的返回（约定的 JSON：{"paragraphs":[{"id":..,"text":..,"changes":[..]}]}），
     /// 不等整段收完就能说出「已经返回了几段修改、最新一条改动说明是什么」。
     ///
     /// 只做进度显示用的粗略扫描，片段可以在任何地方断开；真正写回用的还是收完之后

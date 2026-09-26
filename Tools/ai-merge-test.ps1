@@ -327,7 +327,7 @@ Assert-Equal '配置：默认功能及顺序' `
     (@($defaultXml.SelectNodes('/AiConfig/Functions/Function') | ForEach-Object { $_.GetAttribute('name') }) -join '|') `
     '智能校正|错别字修复|排版优化'
 $newSettings = [Activator]::CreateInstance($assembly.GetType('OneNoteCodeHelper.Services.AddInSettings', $true))
-Assert-Equal '配置：新安装默认选中智能校正' $newSettings.AiFunction '智能校正'
+Assert-Equal '配置：新安装默认选中 Agent 自定义排版' $newSettings.AgentFunction '自定义排版（Agent）'
 Assert-Equal '配置：智能校正删空行' `
     $defaultXml.SelectSingleNode('/AiConfig/Functions/Function[@name="智能校正"]').GetAttribute('removeExtraBlankLines') 'true'
 Assert-Equal '配置：排版优化删空行' `

@@ -56,7 +56,6 @@
     <Page Remove="Tests\**\*.xaml" />
     <EmbeddedResource Include="Ribbon.xml" />
     <EmbeddedResource Include="Resources\HighlightSelection.png" />
-    <EmbeddedResource Include="Resources\AiOptimize.png" />
     <EmbeddedResource Include="Resources\AiConfig.png" />
     <EmbeddedResource Include="Resources\Agent.png" />
   </ItemGroup>

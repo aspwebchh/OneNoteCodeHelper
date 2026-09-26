@@ -6,6 +6,7 @@ using System.Xml.Linq;
 using Microsoft.Office.Interop.OneNote;
 using OneNoteCodeHelper.Highlighting;
 using OneNoteCodeHelper.Highlighting.Themes;
+using OneNoteCodeHelper.Services.Agent;
 
 namespace OneNoteCodeHelper.Services
 {
@@ -61,7 +62,7 @@ namespace OneNoteCodeHelper.Services
         internal IReadOnlyList<string> Changes { get; }
     }
 
-    /// <summary>一次 AI 优化的处理对象：哪一页、哪些段落、是不是因为没选中文字而处理了整页。</summary>
+    /// <summary>一次文字功能的处理对象：哪一页、哪些段落、处理的是整页还是选区。</summary>
     internal sealed class AiTargets
     {
         private readonly HashSet<string> _selectedBlankLines;
@@ -231,7 +232,7 @@ namespace OneNoteCodeHelper.Services
             selection.ReplaceWith(table);
 
             var changes = BuildPageChanges(pageId, selection.Outline);
-            return Submit(pageId, page, changes,
+            return Submit(_api, pageId, page, changes,
                 $"已按 {language.DisplayName} 高亮 {selection.Paragraphs.Count} 行所在的选区。");
         }
 
@@ -309,28 +310,18 @@ namespace OneNoteCodeHelper.Services
             var outline = CodeBlockBuilder.BuildOutline(table, x, y, settings.CodeBlockWidth);
 
             var changes = BuildPageChanges(pageId, outline);
-            return Submit(pageId, page, changes, $"已按 {language.DisplayName} 插入代码框。");
+            return Submit(_api, pageId, page, changes, $"已按 {language.DisplayName} 插入代码框。");
         }
 
         /// <summary>
-        /// 读出「AI 优化」要处理的段落：有选中文字就只取选中的段落，否则取整页（标题加所有文本框）。
-        /// 代码段落、拼不回原格式的段落、空段落都不取。
+        /// 读出文字功能要处理的段落：selectedIds 为 null 时取整页（标题加所有文本框），否则只取这些段落。
+        /// 代码段落、拼不回原格式的段落、空段落都不取。selectedBlankLines 是选区里的空行，只在处理选区时用到。
+        /// 选区在 Agent 窗口打开时就固定了，所以由调用方传进来，不读 OneNote 当前的选区。
         /// </summary>
-        internal EditResult ReadAiTargets(out AiTargets targets)
+        internal static EditResult ReadAiTargets(XElement page, string pageId, ISet<string> selectedIds,
+            HashSet<string> selectedBlankLines, out AiTargets targets)
         {
             targets = null;
-
-            var pageId = _api.GetCurrentPageId();
-            if (string.IsNullOrEmpty(pageId))
-            {
-                return EditResult.Fail("找不到当前页面。请先在 OneNote 里打开一个页面再试。");
-            }
-
-            var page = XDocument.Parse(_api.GetPageContent(pageId, PageInfo.piSelection)).Root;
-            if (page == null)
-            {
-                return EditResult.Fail("读取当前页面内容失败。");
-            }
 
             var textParagraphs = page.Elements()
                 .Where(e => e.Name == One + "Title" || e.Name == One + "Outline")
@@ -338,11 +329,13 @@ namespace OneNoteCodeHelper.Services
                 .Where(oe => oe.Elements(One + "T").Any())
                 .ToList();
 
-            var selected = textParagraphs.Where(IsSelectedWithText).ToList();
-            var wholePage = selected.Count == 0;
+            var wholePage = selectedIds == null;
+            var candidates = wholePage
+                ? textParagraphs
+                : textParagraphs.Where(p => selectedIds.Contains((string)p.Attribute("objectID") ?? string.Empty)).ToList();
 
             var paragraphs = new List<AiParagraph>();
-            foreach (var oe in wholePage ? textParagraphs : selected)
+            foreach (var oe in candidates)
             {
                 var objectId = (string)oe.Attribute("objectID");
                 if (string.IsNullOrEmpty(objectId) || IsCodeParagraph(oe))
@@ -371,15 +364,15 @@ namespace OneNoteCodeHelper.Services
             }
 
             targets = new AiTargets(pageId, paragraphs, wholePage,
-                wholePage ? new HashSet<string>() : FindSelectedBlankLines(page));
+                wholePage ? new HashSet<string>() : selectedBlankLines ?? new HashSet<string>());
             return EditResult.Ok();
         }
 
         /// <summary>
-        /// 选区里的空行段落的 objectID。拖选经过空行时，空段落会不会被标成选中没有把握，
+        /// 选区里的空行段落的 objectID，page 是按 piSelection 读到的页面。拖选经过空行时，空段落会不会被标成选中没有把握，
         /// 所以夹在第一个和最后一个选中段落之间的空行也算：选区总是连续的一段。
         /// </summary>
-        private static HashSet<string> FindSelectedBlankLines(XElement page)
+        internal static HashSet<string> FindSelectedBlankLines(XElement page)
         {
             var lines = page.Elements(One + "Outline").Descendants(One + "OE").ToList();
             var first = lines.FindIndex(IsSelectedWithText);
@@ -400,15 +393,16 @@ namespace OneNoteCodeHelper.Services
         /// 哪些是空行也按重新读到的页面算，处理期间在空行里打了字的就不会被删。
         /// 只回传有改动的那几个文本框 / 标题。applied 是真正写上去的那些。
         /// </summary>
-        internal EditResult ApplyParagraphEdits(AiTargets targets, IReadOnlyList<AiParagraphEdit> edits,
-            bool removeBlankLines, out List<AiParagraphEdit> applied, out int conflicted, out int removedBlankLines)
+        internal static EditResult ApplyParagraphEdits(IOneNotePageAccess api, AiTargets targets,
+            IReadOnlyList<AiParagraphEdit> edits, bool removeBlankLines, out List<AiParagraphEdit> applied,
+            out int conflicted, out int removedBlankLines)
         {
             applied = new List<AiParagraphEdit>();
             conflicted = 0;
             removedBlankLines = 0;
 
             var pageId = targets.PageId;
-            var page = XDocument.Parse(_api.GetPageContent(pageId, PageInfo.piBasic)).Root;
+            var page = XDocument.Parse(api.GetPageContent(pageId, PageInfo.piBasic)).Root;
             if (page == null)
             {
                 return EditResult.Fail("重新读取页面失败，没有写回。");
@@ -453,7 +447,7 @@ namespace OneNoteCodeHelper.Services
 
             // 按页面上的先后顺序回传，标题在文本框前面。
             var changed = page.Elements().Where(changedContainers.Contains).ToArray();
-            return Submit(pageId, page, BuildPageChanges(pageId, changed),
+            return Submit(api, pageId, page, BuildPageChanges(pageId, changed),
                 $"AI 已修改 {applied.Count} 段，删掉 {removedBlankLines} 个空行。");
         }
 
@@ -474,7 +468,8 @@ namespace OneNoteCodeHelper.Services
         /// <summary>
         /// 提交改动。始终校验读取时的时间戳，冲突时由调用者重新读取，不能重发旧 XML。
         /// </summary>
-        private EditResult Submit(string pageId, XElement page, string changesXml, string successMessage)
+        private static EditResult Submit(IOneNotePageAccess api, string pageId, XElement page, string changesXml,
+            string successMessage)
         {
             var lastModified = ParseLastModified(page);
 
@@ -483,7 +478,7 @@ namespace OneNoteCodeHelper.Services
 
             try
             {
-                lock (PageEditCoordinator.ForPage(pageId)) _api.UpdatePageContent(changesXml, lastModified);
+                lock (PageEditCoordinator.ForPage(pageId)) api.UpdatePageContent(changesXml, lastModified);
                 return EditResult.Ok(successMessage);
             }
             catch (System.Runtime.InteropServices.COMException ex) when (ex.ErrorCode == unchecked((int)0x80042010))
@@ -566,7 +561,8 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>
-        /// AI 优化用的选区判定。和 <see cref="FindSelectedParagraphs"/> 一样碰到一点就算整段，
+        /// 文字功能用的选区判定（Agent 窗口的 <see cref="AgentPageSnapshot.SelectedIds"/> 也是同一个标准）。
+        /// 和 <see cref="FindSelectedParagraphs"/> 一样碰到一点就算整段，
         /// 但只认真有文字被选中的：光标只是停在某一行时，OneNote 也可能把一个空的 one:T 标成 "all"，
         /// 那种情况应当按「没选中」处理整页，而不是只处理光标所在的那一段。
         /// </summary>

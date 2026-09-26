@@ -45,7 +45,7 @@
 | 文件 | 职责 |
 |---|---|
 | `Ribbon.xml`、`AddIn.cs` | 按钮、STA 窗口启动、避免重复窗口、关闭时取消任务 |
-| `Views/AgentWindow.xaml(.cs)` | 范围、需求、进度（轮次、思考摘录、执行步骤）、取消、结果、会话撤销 |
+| `Views/AgentWindow.xaml(.cs)` | 功能（Agent 或文字功能）、模型、思考强度、范围、需求、进度（轮次、思考摘录、执行步骤）、取消、结果、会话撤销；窗口高度固定 |
 | `Services/Agent/AgentRunner.cs` | 模型循环、历史消息、工具分派、调用幂等和预算 |
 | `Services/Agent/AgentChatClient.cs` | Chat Completions、HTTP/SSE、工具片段聚合、消息 DTO |
 | `Services/Agent/AgentTools.cs` | 六个工具、Schema 与本地校验、草稿发布 |

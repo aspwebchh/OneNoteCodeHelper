@@ -6,7 +6,7 @@
 
 - `AddIn.cs` 和 `Ribbon.xml`：COM 外接程序生命周期、功能区及其回调。
 - `Interop/`：Office COM 接口与 Win32 声明。`Services/OneNoteApi.cs` 封装 OneNote 调用，`Services/PageEditor.cs` 处理页面 XML、选区和写回。
-- `Highlighting/`：语言词法分析、自动识别和主题；`Services/CodeBlockBuilder.cs`、`OneNoteHtmlEncoder.cs` 生成 OneNote 代码框；`Views/` 提供插入、预览和进度窗口。
+- `Highlighting/`：语言词法分析、自动识别和主题；`Services/CodeBlockBuilder.cs`、`OneNoteHtmlEncoder.cs` 生成 OneNote 代码框；`Views/` 提供插入、预览和 Agent 窗口。
 - `Services/AiConfig.cs`、`AiClient.cs`、`AiOptimizer.cs`、`RichParagraph.cs`、`BlankLines.cs`：AI 配置、请求、编排及保留格式的写回。
 - `Tools/`：不依赖正在运行的 OneNote 的回归脚本，以及需要管理员权限的注册脚本。
 

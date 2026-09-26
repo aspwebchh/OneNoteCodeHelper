@@ -92,55 +92,9 @@
                   label="Agent"
                   size="large"
                   image="Agent"
-                  screentip="用自然语言整理页面格式"
-                  supertip="输入需求，由 Agent 调用格式工具整理当前页或选中段落。保留正文、代码与段落结构。"
+                  screentip="用 AI 整理页面格式、校对文字"
+                  supertip="打开 Agent 窗口，选择功能、模型和思考强度后处理当前页或选中段落：自定义排版按需求调整格式；智能校正、错别字修复、排版优化直接修改文字。代码框不会交给 AI。"
                   onAction="OnShowAgentWindow" />
-
-          <button id="OncAiOptimize"
-                  label="AI 优化"
-                  size="large"
-                  image="AiOptimize"
-                  screentip="用 AI 修改选中的文字"
-                  supertip="先选中要处理的文字再点这里；什么都不选则处理整页。按右边「功能」里选的方式修改，结果直接写回页面。代码框不会交给 AI。"
-                  onAction="OnAiOptimize" />
-
-          <!--
-            三个下拉叠成一列。只能从列表里选，所以用 dropDown 而不是 comboBox；
-            三个都是 dropDown、sizeString 一样才对得齐（原因见上面「语言」「字号」的注释）。
-            功能、模型两个的选项来自 ai-settings.xml，改完配置会刷新。
-          -->
-          <dropDown id="OncAiFunction"
-                    label="功能"
-                    sizeString="deepseek-v4-flashx"
-                    screentip="AI 要做什么"
-                    supertip="选项和对应的提示词都在「AI 配置」里，可以自己加。"
-                    getItemCount="GetAiFunctionCount"
-                    getItemID="GetAiFunctionId"
-                    getItemLabel="GetAiFunctionLabel"
-                    getSelectedItemIndex="GetAiFunctionIndex"
-                    onAction="OnAiFunctionChanged" />
-
-          <dropDown id="OncAiModel"
-                    label="模型"
-                    sizeString="deepseek-v4-flashx"
-                    screentip="用哪个模型"
-                    supertip="发给接口的模型名。pro 效果更好，flash 更快。列表来自「AI 配置」。"
-                    getItemCount="GetAiModelCount"
-                    getItemID="GetAiModelId"
-                    getItemLabel="GetAiModelLabel"
-                    getSelectedItemIndex="GetAiModelIndex"
-                    onAction="OnAiModelChanged" />
-
-          <dropDown id="OncAiEffort"
-                    label="思考"
-                    sizeString="deepseek-v4-flashx"
-                    screentip="思考强度"
-                    supertip="none 不思考，最快；low → max 思考越来越多，越慢，但更不容易漏改、改错。"
-                    getItemCount="GetAiEffortCount"
-                    getItemID="GetAiEffortId"
-                    getItemLabel="GetAiEffortLabel"
-                    getSelectedItemIndex="GetAiEffortIndex"
-                    onAction="OnAiEffortChanged" />
 
           <button id="OncAiConfig"
                   label="AI 配置"
