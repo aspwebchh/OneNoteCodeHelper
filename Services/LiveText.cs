@@ -2,39 +2,97 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace OneNoteCodeHelper.Services
 {
     /// <summary>
-    /// 等模型时在 Agent 窗口里显示的实时文字：思考（或回复）原文的最后几行。
-    /// 只在窗口里显示，不写日志。
+    /// 等模型时在 Agent 窗口里显示的实时文字：从思考（或回复）原文里挑出最新的几句核心内容。
+    /// 直接截原文末尾总是半句，夹着 Markdown 符号和代码片段，每次刷新还都在跳；
+    /// 这里只要说完的整句，去掉标记、代码和语气词，说完新的一句才换。只在窗口里显示，不写日志。
     /// </summary>
     internal static class LiveText
     {
-        /// <summary>摘录最多多少字。窗口里的摘录框大约三行，多出来的从顶上裁掉。</summary>
-        internal const int ExcerptChars = 160;
+        /// <summary>只看原文末尾这么多字，思考再长也不会整段 ToString。<see cref="KeepTail"/> 留下的比这多。</summary>
+        private const int GistWindow = 1500;
 
-        /// <summary>截断后在开头这么多字以内找一个断点，免得从半个词开始。</summary>
-        private const int BoundarySearch = 20;
+        /// <summary>摘录框三行，一行约 30 个汉字。宽度按 <see cref="Width"/> 估：全角算 2，其余算 1。</summary>
+        private const int GistLines = 3;
 
-        private const string Boundaries = "，。；：、！？,.;:!?)）】」』";
+        private const int LineUnits = 58;
 
-        /// <summary>取末尾一段做摘录。只拷贝末尾需要的部分，思考再长也不会整段 ToString。</summary>
-        internal static string Excerpt(StringBuilder text, int maxChars = ExcerptChars)
+        /// <summary>有效字（见 <see cref="Weight"/>）不到这么多的句子多半是「嗯」「好的」「Got it」，不显示。</summary>
+        private const int MinWeight = 8;
+
+        /// <summary>句末标点。英文句号另算，见 <see cref="EndsSentence"/>。</summary>
+        private const string Stops = "。！？!?…";
+
+        /// <summary>句末标点后面连带的重复标点、引号和括号，归到这一句里。</summary>
+        private const string Closers = "。！？!?….”’\"'」』）)】";
+
+        /// <summary>这些符号占比太高的句子是代码、JSON 或表格行。</summary>
+        private const string CodeSymbols = "{}[]<>\"=;|\\$";
+
+        /// <summary>行首的 Markdown 标记：标题、引用、列表符号、待办框和编号。</summary>
+        private static readonly Regex LineMarker = new Regex(
+            @"^\s*(?:#{1,6}\s+|>\s*|[-*+•·]\s+|\[[ xX]\]\s+|\d{1,2}(?:[.)]\s+|、\s*)|[（(]\d{1,2}[)）]\s*)+");
+
+        /// <summary>行内的加粗、删除线和代码标记。</summary>
+        private static readonly Regex InlineMarker = new Regex(@"\*\*|__|~~|`+");
+
+        private static readonly Regex Spaces = new Regex(@"\s+");
+
+        /// <summary>句首的语气词。后面必须跟标点或空白，「好几段」的「好」不会被切掉。</summary>
+        private static readonly Regex Filler = new Regex(
+            @"^(?:(?:嗯+|哦|啊|好的?|OK|Okay|Hmm+|Wait|Alright|Well|So)(?:[，,、。.!！…]+\s*|\s+))+",
+            RegexOptions.IgnoreCase);
+
+        /// <summary>整句只是「让我想想」「我再检查一下」这类空话。</summary>
+        private static readonly Regex Hollow = new Regex(
+            @"^(?:(?:让我|我)?再?(?:想想|想一想|想一下|看看|看一下|检查一下|确认一下|思考一下)|let me (?:think|see|check|verify)(?: (?:again|this|that|it))?)[。.!！…]*$",
+            RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// 最新的几句核心内容：句与句换行，最新的在最下面，合起来不超过摘录框的三行。
+        /// 没有可显示的句子时返回 null，调用方留着上一次的，摘录框不闪。
+        /// finished 表示这段文字已经收完（模型开始回复或调用工具了），最后一句没有句末标点也算说完。
+        /// </summary>
+        internal static string Gist(StringBuilder text, bool finished)
         {
             if (text == null || text.Length == 0)
             {
                 return null;
             }
 
-            // 多拿一些，压掉空行后还够 maxChars。
-            var take = Math.Min(text.Length, maxChars * 2);
-            return Excerpt(text.ToString(text.Length - take, take), maxChars, take < text.Length);
-        }
+            var take = Math.Min(text.Length, GistWindow);
+            var sentences = Sentences(text.ToString(text.Length - take, take), take < text.Length, finished)
+                .Select(Clean)
+                .Where(s => s != null)
+                .ToList();
+            if (sentences.Count == 0)
+            {
+                return null;
+            }
 
-        internal static string Excerpt(string text, int maxChars = ExcerptChars)
-        {
-            return Excerpt(text, maxChars, false);
+            // 从最新一句往前加，放得下就继续。
+            var picked = new List<string>();
+            var lines = 0;
+            for (var i = sentences.Count - 1; i >= 0; i--)
+            {
+                var need = (Width(sentences[i]) + LineUnits - 1) / LineUnits;
+                if (lines + need > GistLines)
+                {
+                    break;
+                }
+
+                picked.Insert(0, sentences[i]);
+                lines += need;
+            }
+
+            // 最新一句自己就超过三行：从头截，至少看得出这句在说什么。
+            return picked.Count > 0
+                ? string.Join("\n", picked)
+                : Shorten(sentences[sentences.Count - 1], GistLines * LineUnits - 2);
         }
 
         /// <summary>
@@ -48,63 +106,130 @@ namespace OneNoteCodeHelper.Services
             }
         }
 
-        private static string Excerpt(string text, int maxChars, bool truncated)
+        /// <summary>
+        /// 按行、再按句末标点切句，行首的 Markdown 标记去掉，``` 围起来的代码整段跳过。
+        /// truncated 时第一句是从中间截断的，丢掉；没收完时最后一个句末之后的半句也丢掉。
+        /// </summary>
+        private static IEnumerable<string> Sentences(string text, bool truncated, bool finished)
         {
-            if (string.IsNullOrWhiteSpace(text))
+            var lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            var code = false;
+            for (var i = 0; i < lines.Length; i++)
             {
-                return null;
-            }
-
-            // 空行（含只有空白的行）全部去掉，行尾空白也去掉：摘录框很小，一行都不能浪费。
-            var lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n')
-                .Select(l => l.TrimEnd())
-                .Where(l => l.Length > 0);
-            var result = string.Join("\n", lines).Trim();
-
-            if (result.Length > maxChars)
-            {
-                result = result.Substring(result.Length - maxChars);
-                truncated = true;
-            }
-
-            if (truncated)
-            {
-                var cut = FindBoundary(result);
-                if (cut > 0)
+                if (lines[i].TrimStart().StartsWith("```", StringComparison.Ordinal))
                 {
-                    result = result.Substring(cut);
-                }
-                else if (result.Length > 0 && char.IsLowSurrogate(result[0]))
-                {
-                    // 截在了一个表情字符中间。
-                    result = result.Substring(1);
+                    code = !code;
+                    continue;
                 }
 
-                result = result.TrimStart();
-                if (result.Length == 0)
+                if (code)
                 {
-                    return null;
+                    continue;
                 }
 
-                result = "…" + result;
-            }
+                var open = i == lines.Length - 1 && !finished;
+                var dropFirst = truncated && i == 0;
+                var line = LineMarker.Replace(lines[i], "");
+                var start = 0;
+                for (var j = 0; j < line.Length; j++)
+                {
+                    if (!EndsSentence(line, j, open))
+                    {
+                        continue;
+                    }
 
-            return result.Length == 0 ? null : result;
+                    var end = j + 1;
+                    while (end < line.Length && Closers.IndexOf(line[end]) >= 0)
+                    {
+                        end++;
+                    }
+
+                    if (dropFirst)
+                    {
+                        dropFirst = false;
+                    }
+                    else
+                    {
+                        yield return line.Substring(start, end - start);
+                    }
+
+                    start = end;
+                    j = end - 1;
+                }
+
+                // 行尾也是句末，除非这一行还没收完。
+                if (!open && !dropFirst && start < line.Length)
+                {
+                    yield return line.Substring(start);
+                }
+            }
         }
 
-        /// <summary>开头一小段里第一个空白或标点之后的位置，找不到返回 0。</summary>
-        private static int FindBoundary(string text)
+        /// <summary>
+        /// line[j] 是不是句末。英文句号后面跟空白才算，11.5、p1.p2 不断开；
+        /// 没收完的行里句号在最末尾时还不知道后面是什么，先不算。
+        /// </summary>
+        private static bool EndsSentence(string line, int j, bool open)
         {
-            var limit = Math.Min(BoundarySearch, text.Length - 1);
-            for (var i = 0; i < limit; i++)
+            if (line[j] == '.')
             {
-                if (char.IsWhiteSpace(text[i]) || Boundaries.IndexOf(text[i]) >= 0)
+                return j + 1 < line.Length ? char.IsWhiteSpace(line[j + 1]) : !open;
+            }
+
+            return Stops.IndexOf(line[j]) >= 0;
+        }
+
+        /// <summary>去掉行内标记和句首语气词；太短、空话、像代码的句子返回 null。</summary>
+        private static string Clean(string sentence)
+        {
+            var text = Spaces.Replace(InlineMarker.Replace(sentence, ""), " ").Trim();
+            text = Filler.Replace(text, "").Trim();
+            return Weight(text) < MinWeight || Hollow.IsMatch(text) || LooksLikeCode(text) ? null : text;
+        }
+
+        private static bool LooksLikeCode(string text)
+        {
+            if (text.Contains("{\"") || text.Contains("\":") || text.Contains("</") || text.Contains("/>") || text.Contains("=>"))
+            {
+                return true;
+            }
+
+            return text.Count(c => CodeSymbols.IndexOf(c) >= 0) * 5 > text.Length;
+        }
+
+        /// <summary>有效字数：字母、数字、汉字，全角的算 2。标点和空白不算。</summary>
+        private static int Weight(string text)
+        {
+            return text.Sum(c => char.IsLetterOrDigit(c) ? (IsWide(c) ? 2 : 1) : 0);
+        }
+
+        /// <summary>估算显示宽度：汉字、全角标点和表情算 2，其余算 1。低位代理不算，和高位代理合起来是一个字。</summary>
+        private static int Width(string text)
+        {
+            return text.Sum(c => char.IsLowSurrogate(c) ? 0 : IsWide(c) ? 2 : 1);
+        }
+
+        private static bool IsWide(char c)
+        {
+            return (c >= '⺀' && c <= '꓏') || (c >= '가' && c <= '힣') || (c >= '豈' && c <= '﫿') ||
+                   (c >= '︰' && c <= '﹏') || (c >= '＀' && c <= '｠') || (c >= '￠' && c <= '￦') ||
+                   char.IsHighSurrogate(c);
+        }
+
+        /// <summary>从头保留不超过 maxUnits 的宽度，末尾加省略号。截断点落在高位代理上，整个字一起去掉。</summary>
+        private static string Shorten(string text, int maxUnits)
+        {
+            var units = 0;
+            for (var i = 0; i < text.Length; i++)
+            {
+                units += char.IsLowSurrogate(text[i]) ? 0 : IsWide(text[i]) ? 2 : 1;
+                if (units > maxUnits)
                 {
-                    return i + 1;
+                    return text.Substring(0, i).TrimEnd() + "…";
                 }
             }
 
-            return 0;
+            return text;
         }
     }
 

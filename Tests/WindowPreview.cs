@@ -11,7 +11,7 @@ using OneNoteCodeHelper.Views;
 internal static class WindowPreview
 {
     // 只渲染内存中的窗口内容，不启动 OneNote、不调用接口、不显示原生窗口。
-    // 出几张图：Agent 自定义排版、选了第一个文字功能、模拟处理中（摘录框超过三行、只有一行、还没有输出三种）；
+    // 出几张图：Agent 自定义排版、选了第一个文字功能、模拟处理中（摘录框三行占满、只有一句、还没有输出三种）；
     // 窗口高度固定，几张应一样高。
     internal static int Render(string directory)
     {
@@ -21,8 +21,9 @@ internal static class WindowPreview
         RenderOne(directory, "agent-window.png", xml, null);
         RenderOne(directory, "agent-window-text.png", xml, window => window.FunctionPicker.SelectedIndex = 1);
         RenderOne(directory, "agent-window-running.png", xml, window => SimulateRunning(window,
-            "…正文统一为 11 磅微软雅黑，段后 6 磅。二级标题目前只是加粗的正文，需要改成原生二级标题，\n" +
-            "接下来先读取第 4 到第 12 段的格式，确认列表缩进不受影响。最后检查草稿再提交。"));
+            "正文统一为 11 磅微软雅黑，段后 6 磅。\n" +
+            "二级标题目前只是加粗的正文，需要改成原生二级标题。\n" +
+            "接下来先读取第 4 到第 12 段，确认列表缩进不受影响。"));
         RenderOne(directory, "agent-window-running-short.png", xml, window => SimulateRunning(window, "先读取页面概况，看看有哪些段落。"));
         RenderOne(directory, "agent-window-running-empty.png", xml, window => SimulateRunning(window, null));
         return 0;

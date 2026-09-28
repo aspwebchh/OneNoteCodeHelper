@@ -165,7 +165,8 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         /// <summary>
-        /// 流式返回期间的进度：模型在准备哪个工具、在回复还是在思考，以及回复（没有时是思考）原文的最后几行。
+        /// 流式返回期间的进度：模型在准备哪个工具、在回复还是在思考，以及回复（没有时是思考）里最新的几句核心内容。
+        /// 还没说完新的一句时 Thinking 为 null，摘录框留着上一次的。
         /// </summary>
         internal static AgentProgress DescribeStream(AgentReply reply)
         {
@@ -174,8 +175,11 @@ namespace OneNoteCodeHelper.Services.Agent
                 : reply.ContentLength > 0 ? "模型正在回复…"
                 : reply.ReasoningLength > 0 ? "模型正在思考…"
                 : "等待模型响应…";
-            var thinking = LiveText.Excerpt(reply.ContentLength > 0 ? reply.ContentBuffer : reply.ReasoningBuffer);
-            return new AgentProgress { Status = status, Thinking = thinking ?? "" };
+            // 开始回复或调用工具后思考就结束了，最后一句没有句末标点也算说完。
+            var answered = reply.Done || reply.FinishReason != null || reply.Calls.Count > 0;
+            var thinking = (reply.ContentLength > 0 ? LiveText.Gist(reply.ContentBuffer, answered) : null)
+                           ?? LiveText.Gist(reply.ReasoningBuffer, reply.ContentLength > 0 || answered);
+            return new AgentProgress { Status = status, Thinking = thinking };
         }
 
         internal static void AbsorbEvent(string data, AgentReply reply)

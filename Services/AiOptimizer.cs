@@ -17,7 +17,7 @@ namespace OneNoteCodeHelper.Services
     /// <summary>
     /// 进度：一句话说明 + 已完成 / 总批数，Total 为 0 表示眼下没法给出比例。
     /// Detail 是等 AI 时的实时情况（在思考、在输出、已返回几段修改），不在等 AI 时为 null。
-    /// Thinking 是 AI 思考原文的最后几行，没有时为 null。
+    /// Thinking 是 AI 思考里最新的几句核心内容（见 <see cref="LiveText.Gist"/>），没有时为 null。
     /// </summary>
     internal sealed class AiProgress
     {
@@ -448,7 +448,14 @@ namespace OneNoteCodeHelper.Services
                 focus = lives.LastOrDefault(l => l.Done && l.Reasoning.Length > 0);
             }
 
-            return focus == null ? null : LiveText.Excerpt(focus.Reasoning);
+            if (focus == null)
+            {
+                return null;
+            }
+
+            // 说完新的一句才换，还没有时留着这批上一次的，摘录框不闪。
+            focus.Gist = LiveText.Gist(focus.Reasoning, focus.ContentChars > 0 || focus.Done) ?? focus.Gist;
+            return focus.Gist;
         }
 
         /// <summary>一批请求在流式返回期间的实时情况。只在 AskInBatchesAsync 的锁里读写。</summary>
@@ -462,6 +469,9 @@ namespace OneNoteCodeHelper.Services
             internal int ContentChars;
 
             internal bool Done;
+
+            /// <summary>上一次挑出的核心句，还没说完新的一句时接着显示它。</summary>
+            internal string Gist;
 
             internal bool HasData => Reasoning.Length > 0 || ContentChars > 0;
         }

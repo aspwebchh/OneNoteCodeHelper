@@ -394,17 +394,30 @@ internal static class Program
                 True(handler.Body.Contains("tool_choice"));
             }
         });
-        Test("HTTP stream progress shows reasoning excerpt and the tool being prepared", () =>
+        Test("HTTP stream progress shows finished reasoning sentences and the tool being prepared", () =>
         {
-            var handler = new StubHttp("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"先读取段落\\n\\n再定标题\"}}]}\n\n" +
+            var handler = new StubHttp("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"**先读取段落**\\n\\n再确定标题层\"}}]}\n\n" +
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"级\"}}]}\n\n" +
                 "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"x\",\"function\":{\"name\":\"read_blocks\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n", "text/event-stream");
             var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://test.invalid</ApiUrl><ApiKey>test</ApiKey></AiConfig>"));
             var log = new ProgressLog();
             using (var http = new HttpClient(handler))
                 new AgentChatClient(c, "test", "medium", http).CompleteAsync(new List<object>(), new object[0], log, CancellationToken.None).GetAwaiter().GetResult();
-            // 第一段立即报告；后面的被限频吞掉，收完再报一次最终状态。
-            Equal("模型正在思考…", log.Items[0].Status); Equal("先读取段落\n再定标题", log.Items[0].Thinking);
-            Equal("模型正在准备：读取段落", log.Items.Last().Status);
+            // 第一段立即报告，只显示说完的一句、去掉加粗；后面的被限频吞掉，收完再报一次最终状态，这时最后一句也算说完。
+            Equal("模型正在思考…", log.Items[0].Status); Equal("先读取段落", log.Items[0].Thinking);
+            Equal("模型正在准备：读取段落", log.Items.Last().Status); Equal("先读取段落\n再确定标题层级", log.Items.Last().Thinking);
+        });
+        Test("HTTP stream progress leaves the excerpt unchanged until a sentence is finished", () =>
+        {
+            var handler = new StubHttp("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"先读取页面概\"}}]}\n\n" +
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好的。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", "text/event-stream");
+            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://test.invalid</ApiUrl><ApiKey>test</ApiKey></AiConfig>"));
+            var log = new ProgressLog();
+            using (var http = new HttpClient(handler))
+                new AgentChatClient(c, "test", "medium", http).CompleteAsync(new List<object>(), new object[0], log, CancellationToken.None).GetAwaiter().GetResult();
+            // 半句不显示（null 表示不变）；回复只有语气词时退回思考，思考已经结束，最后一句也算说完。
+            Equal(null, log.Items[0].Thinking);
+            Equal("模型正在回复…", log.Items.Last().Status); Equal("先读取页面概", log.Items.Last().Thinking);
         });
         Test("SSE wrapper overhead above former 600K limit preserves complete tool call", () =>
         {

@@ -11,8 +11,8 @@ namespace OneNoteCodeHelper.Services.Agent
     }
 
     /// <summary>
-    /// Agent 进度。Turn 为 0、Status 或 Thinking 为 null 表示不变；Thinking 为空串表示收起思考摘录；
-    /// Step 不为 null 时新增或更新步骤列表里的一行。思考摘录只在窗口里显示，不写日志。
+    /// Agent 进度。Turn 为 0、Status 或 Thinking 为 null 表示不变；Thinking 为空串表示清空思考摘录、显示占位；
+    /// Step 不为 null 时新增或更新步骤列表里的一行。思考摘录是思考里最新的几句核心内容，只在窗口里显示，不写日志。
     /// </summary>
     internal sealed class AgentProgress
     {

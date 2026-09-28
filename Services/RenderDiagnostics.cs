@@ -203,10 +203,10 @@ namespace OneNoteCodeHelper.Services
             return $"{peek.Paragraphs}|{peek.LastChange}";
         }
 
-        /// <summary>思考摘录，null 返回空串。</summary>
-        internal static string LiveTextExcerpt(string text, int maxChars)
+        /// <summary>思考摘录里挑出的核心句，null 返回空串。</summary>
+        internal static string LiveTextGist(string text, bool finished)
         {
-            return LiveText.Excerpt(new System.Text.StringBuilder(text), maxChars) ?? string.Empty;
+            return LiveText.Gist(new System.Text.StringBuilder(text), finished) ?? string.Empty;
         }
 
         internal static string CollapseBlankLinesInText(string text)
