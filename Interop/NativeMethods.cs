@@ -55,6 +55,21 @@ namespace OneNoteCodeHelper.Interop
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindowVisible(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindowEnabled(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
 
         [DllImport("user32.dll")]
@@ -163,6 +178,36 @@ namespace OneNoteCodeHelper.Interop
             var y = Clamp(target.Top + (target.Bottom - target.Top - height) / 2, work.Top, work.Bottom - height);
 
             SetWindowPos(window, IntPtr.Zero, x, y, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+        }
+
+        /// <summary>
+        /// 对话框关闭前（Closing 里，窗口还没销毁）把前台交还给属主。window 已经不是前台窗口时什么都不做，
+        /// 用户切到别的程序后再关窗不去抢前台。
+        ///
+        /// 属主是 OneNote 进程里的窗口。活动窗口被销毁时由系统在 DestroyWindow 里重新激活属主，
+        /// 属主在别的线程时这一步可能失败，系统就按 Z 序另挑一个窗口激活：别的程序跑到前面，
+        /// OneNote 看起来像被最小化了。WPF 的 ShowDialog 对此没有补救（源码里那段是 #if FIGURE_OUT
+        /// 注释掉的），它关窗时只重新激活 ShowDialog 前本线程的活动窗口，而对话框线程是新开的，没有。
+        /// 所以趁本进程还握着前台，先把前台交给 OneNote，销毁时本窗口已不是活动窗口，系统也就不再另挑。
+        /// </summary>
+        internal static void ReturnForeground(IntPtr window, IntPtr owner)
+        {
+            if (window == IntPtr.Zero || owner == IntPtr.Zero || GetForegroundWindow() != window)
+            {
+                return;
+            }
+
+            var root = GetAncestor(owner, GaRoot);
+            if (root != IntPtr.Zero)
+            {
+                owner = root;
+            }
+
+            // OneNote 已关、最小化，或正被它自己的模态框禁用时，交给系统按默认规则处理。
+            if (IsWindowVisible(owner) && !IsIconic(owner) && IsWindowEnabled(owner))
+            {
+                SetForegroundWindow(owner);
+            }
         }
 
         /// <summary>

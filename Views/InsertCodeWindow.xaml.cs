@@ -93,6 +93,7 @@ namespace OneNoteCodeHelper.Views
             {
                 var interop = new WindowInteropHelper(this) { Owner = ownerHandle };
                 SourceInitialized += (_, __) => NativeMethods.CenterOver(interop.Handle, ownerHandle);
+                Closing += (_, e) => { if (!e.Cancel) NativeMethods.ReturnForeground(interop.Handle, ownerHandle); };
             }
 
             var languageChoices = BuildLanguageChoices();

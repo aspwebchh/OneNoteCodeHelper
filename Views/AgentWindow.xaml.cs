@@ -92,7 +92,12 @@ namespace OneNoteCodeHelper.Views
             };
             // 用户可能开着窗口去改了 AI 配置，切回来时重新读。
             Activated += (_, __) => RefreshConfig();
-            Closing += (_, __) => _lifetime.Cancel();
+            Closing += (_, e) =>
+            {
+                _lifetime.Cancel();
+                // 不交还的话偶尔关窗后 OneNote 会掉到别的程序后面，见 NativeMethods.ReturnForeground。
+                if (!e.Cancel) NativeMethods.ReturnForeground(interop.Handle, owner);
+            };
             Closed += (_, __) => { _closed = true; StopRunning(); };
             // 下拉展开时 Esc 只收起下拉，不关窗。
             PreviewKeyDown += (_, e) =>
