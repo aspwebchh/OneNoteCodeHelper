@@ -6,7 +6,7 @@
 
 1. 「开始 → AI 助手 → Agent」通过 `AddIn.OnShowAgentWindow` 启动独立 STA 窗口，固定当前页及打开窗口时的选区。
 2. 用户选择整页或选中段落并输入需求。后台读取固定页面，构建短 ID、保护范围、内容和格式指纹。
-3. `AgentRunner` 把模型原生 `tool_calls` 映射到本地函数（按能力开关和页面内容注册，最多十七个），完整读取后才能修改段落。模型的文字声明不能触发写回。
+3. `AgentRunner` 把模型原生 `tool_calls` 映射到本地函数（按能力开关和页面内容注册，最多十八个），完整读取后才能修改段落。模型的文字声明不能触发写回。
 4. 格式和改字工具只更新内存草稿。每个批量调用全部校验通过后才发布，返回修订号；参数错误不会留下半个工具调用的修改。
 5. 模型独立调用 `finish_edit` 后，提交器在页面锁内重读、识别冲突、重建完整的受影响容器、带时间戳提交，并回读核验。
 6. UI 展示实际核验结果，保存本次已确认段落的撤销记录。撤销再次校验指纹，避免覆盖后来编辑的内容。
@@ -32,7 +32,8 @@
 | `read_image_text` | `snapshot_id`、`image_ids`；只读，返回 OneNote 识别出的图片文字，每张最多 4000 字并标记 `truncated`。页面上有带识别文字的图片时才注册 |
 | `remove_blank_lines` | `snapshot_id`、`mode`（collapse/all）；collapse 同「排版优化」，连续空行留一行、删掉文本框和单元格首尾的空行；all 删掉全部，但不会把一摞段落删空。带列表、标记、下级段落的空段落和已排转换里的空行不删。`EnableBlankLineRemoval=false` 或没有可删空行时不注册 |
 | `set_indent` | `snapshot_id`、`block_ids`、`direction`（in/out）；in 挂到前一个兄弟段落下，out 移到上级之后、原来排在后面的兄弟段落改挂到它下面，上下顺序不变。上级也在列表里的段落跟着上级走。`EnableIndent=false` 时不注册 |
-| `move_blocks` | `snapshot_id`、`block_ids`、`target_id`、`position`（before/after）；连同下级段落按原顺序移到目标前后，成为目标的同级段落，只在同一个文本框或单元格里。`EnableMoves=false` 时不注册 |
+| `move_blocks` | `snapshot_id`、`block_ids`、`target_id`、`position`（before/after）；连同下级段落按原顺序移到目标前后，成为目标的同级段落。可以移到另一个文本框，单元格里的段落只能在同一单元格里移动，不能把文本框移空。`EnableMoves=false` 时不注册 |
+| `merge_outlines` | `snapshot_id`、`source_id`（源文本框的 container_id）、`target_id`、`position`；源文本框的全部顶层段落（含表格、图片、空行）按顺序移到目标前后，提交时删掉源文本框。目标不能在源文本框或单元格里；只处理选区时源文本框里的文字段落必须都在选区内。`EnableMoves=false` 或可调整结构的文本框少于两个时不注册 |
 | `insert_blocks` | `snapshot_id`、`target_id`、`position`、`paragraphs`（1–20 项，每项 `text` ≤500 字、`preset_id` 为 heading1/heading2/body/quote、可选 `list`）；纯文字按 HTML 转义，每个任务最多 50 段、5000 字，新段落短 ID 为 n1…。`EnableInsert=false` 时不注册 |
 | `text_to_table` | `snapshot_id`、`block_ids`（≤200）、`delimiter`（tab/pipe）、可选 `header_row`、`borders`（默认 true）和 `header_shading`；每段一行，2–10 列、最多 100 行。`EnableTextTables=false` 时不注册 |
 | `get_pending_changes` | `snapshot_id`；返回草稿修订号、修改段落 ID、已排的文字修正、未完整读取的可编辑段落 ID、已排入的代码框和表格转换、结构改动（删除、移动、缩进、插入）、尚未转换的等宽代码及保护计数 |
@@ -44,6 +45,7 @@
 `get_page_overview` 另外返回每段的 `list`、`tags`、`table_id`，以及 `tables`（t1…，行列数、当前外观、首行前 40 字、是否可编辑）和 `images`（i1…，识别文字字数）；
 `read_blocks` 每段也带 `list`、`tags`，`get_pending_changes` 带 `tables_changed`。
 概况按结构草稿里的顺序列出段落：已删除的空行不在其中，新插入的段落带 `inserted`；`depth`、`parent_id` 按结构草稿计算，`parent_id` 是上级段落的短 ID。
+段落、表格、图片的 `container_id` 是现在所在的文本框；`outlines` 列出结构草稿里的文本框（`structure` 表示能否调整结构、段落数、首段摘要），合并掉的不列。
 
 `fix_text` 在原文和改后文字之间逐字比对：没变的字连同格式、链接原样保留，新字沿用被替换的字（纯插入时沿用前一个字）的格式。修正后 `read_blocks`、概况摘要和局部格式定位都按草稿里的新文字。
 提交时只有排过文字修正的段落可以改正文，而且必须和草稿一致；其他段落仍要求正文和链接不变。冲突检测、回读核验照旧，撤销记录带上修正，撤销时文字一起还原。修正清单只进窗口里的结果，日志只记条数。
@@ -94,10 +96,27 @@
 - **转表格**复用代码框转换：选段规则相同（连续、下级段落在范围内、不带列表和标记），没有结构改动的文本框里按段落补丁提交，撤销时换回原段落。
   单元格复制源段落的 `style` 和 `T`，用 `AgentRichText.Keep` 截取，保留加粗和链接。
 
+### 跨文本框与合并
+
+2026-09-28 追加。`move_blocks` 可以把段落移到另一个文本框，`merge_outlines` 把整个文本框并进另一个文本框：
+
+- **联动组**：跨框的改动记下源文本框 `AgentLayoutChange.From`，`AgentPageSnapshot.LayoutGroups` 按 (OutlineId, From) 并查集分组。
+  提交时组内每个文本框的整框指纹都和快照一致才整组替换，有一个不一致就整组按冲突跳过（框里的格式修改照旧逐项补丁提交）；撤销按 `Group` 整组恢复或整组跳过。
+- **按实际位置取改动**：`AgentBlock.ContainerId` 等是快照时的位置，整框替换改为按结构草稿里的实际位置取格式草稿、转换和表格外观，整次提交共用一份草稿页面；
+  「原来有没有列表」和「对象原来在哪个文本框」按写入前的整页判断。补丁模式仍用快照时的位置，回退时段落就在原处。
+- **跨框的对象去掉 ID**：OneNote 把移到另一个文本框的对象一律按新对象建立，`AgentLayout.StripForeign` 事先去掉原来不在这个框里的对象的 ID，
+  其中的图片由 `FillImageData` 从 piBinaryData 补上 `one:Data`（只带 CallbackID 会成坏图）。新建段落里的图片写入后按二进制数据核对数量和内容。
+- **删框**：合并掉的文本框写成一行空白，OneNote 收到后直接删掉它；期望页面里不算这个框。写入后还留着占位空白时，核验通过后用 `DeletePageContent` 删，
+  失败则留着一行空白并在结果里说明（`Leftover`）。
+- **撤销重建**：联动组的撤销记录先存下图片数据。被删的文本框按写入前的 Position、Size 和内容新建（没有 objectID），原来就在这个框里、现在还在的对象保留 ID，
+  其余去 ID 重建；OneNote 按位置把新文本框排进页面 XML，核对前 `AlignNewOutlines` 把回读页面里的新文本框挪到期望页面的顺序。
+
 本机实测（OneNote `16.0.20326.20158`）：整框回传时，同一文本框里调换顺序、挂到别的段落下、提到上一级的段落都保留 objectID；
 省略的段落被删除；无 ID 的段落和表格按新对象建立，`hasHeaderRow`、`bordersVisible`、首行底色照写。
 `one:Column` 缺 `width` 会被架构拒绝，但未锁定列的宽度由 OneNote 按内容重算，所以只写占位值。
 整框按写入前的样子恢复可行，文本框 ID 不变。
+跨文本框移动（两种发送顺序都试过）的段落和下级段落都得到新 ID，只写目标框时源框里的原段落照旧留着；图片带 `one:Data` 跨框写入两次，数据不变，只带 CallbackID 则成坏图。
+`one:Outline` 不带 `one:OEChildren` 或 OEChildren 为空都被架构拒绝；写成只剩一行空白时 OneNote 直接删掉这个文本框；无 ID 的新 Outline 按位置排进页面 XML。
 
 ## 代码位置
 
@@ -110,11 +129,11 @@
 | `Services/Agent/AgentTools.cs` | 工具注册、Schema 与本地校验、草稿发布 |
 | `Services/Agent/AgentMarks.cs` | 列表与标记：写法、TagDef 复用与对应、元素顺序、核验投影 |
 | `Services/Agent/AgentTables.cs` | 表格外观、表格快照项、指纹和撤销记录；text_to_table 的拆分和表格生成 |
-| `Services/Agent/AgentLayout.cs` | 结构草稿的私有 ID、删空行、缩进、移动、插入、整框指纹和整框撤销记录 |
+| `Services/Agent/AgentLayout.cs` | 结构草稿的私有 ID、删空行、缩进、移动、插入、合并、整框指纹、跨框去 ID 和图片数据、整框撤销记录 |
 | `Services/Agent/AgentFormatting.cs` | 富文本解析与局部样式、等宽判定、CSS 归一化、预设、QuickStyleDef 管理 |
 | `Services/Agent/AgentCode.cs` | 代码框和表格转换的范围校验、原段落记录、代码框指纹和撤销还原 |
 | `Services/Agent/AgentPageSnapshot.cs` | 范围、短 ID、保护对象、指纹、配置和语义投影 |
-| `Services/Agent/AgentCommitter.cs` | 时间戳提交、冲突重建、整框替换、核验、撤销 |
+| `Services/Agent/AgentCommitter.cs` | 时间戳提交、冲突重建、整框（联动组）替换、删框和重建、核验、撤销 |
 | `Services/PageEditCoordinator.cs` | 有界的页面提交锁，与原有编辑器共用 |
 | `Services/OneNoteApi.cs` | 显式 xs2013、非强制更新、COM 在途调用和断开协调 |
 | `Tests/`、`Tools/agent-test.ps1` | 独立签名测试程序、Fake 页面、脚本模型、HTTP handler 模拟 |
@@ -174,6 +193,10 @@
 结构调整（2026-09-28 追加，OneNote `16.0.20326.20158`）：Agent 离线回归 100/100，高亮选区 11/11，AI 合并 81/81，语言识别 106/106。
 真实 OneNote 探针新增第二个文本框，删空行 2 行、移动 1 段、缩进 2 段、插入 2 段、pipe 文字转表格（单元格含加粗和链接），再加一处段落样式，
 一起整框提交，执行和撤销都是 Verified；撤销后文本框的文字顺序与执行前一致，移动和缩进过的段落保持原 ID。第一个文本框仍按段落逐项提交和撤销。
+
+跨文本框与合并（2026-09-28 追加）：Agent 离线回归 109/109，高亮选区 11/11，AI 合并 81/81，语言识别 106/106。
+真实 OneNote 探针新增第三个文本框（带下级段落的文字、2×2 表格、图片），先跨框移动一段，再把其余内容合并进第二个文本框：
+执行 Verified，第三个文本框在同一次写入里被删掉，两张图片按二进制数据完整；撤销 Verified，第三个文本框按原内容重建（新 ID），第二个文本框恢复原样。
 
 重现本次构建和离线测试：
 

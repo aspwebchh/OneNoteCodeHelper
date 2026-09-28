@@ -103,6 +103,8 @@ namespace OneNoteCodeHelper.Services.Agent
     {
         internal const int MaxChars = 4000;
         internal string Id;
+        /// <summary>图片自己的 objectID，段落里的图片没有，取所在段落的；用来在结构草稿里找当前所在的文本框。</summary>
+        internal string ObjectId;
         internal string ContainerId;
         internal string Text;
         internal bool Truncated;
@@ -133,8 +135,25 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<AgentInserted> Inserted = new List<AgentInserted>();
         /// <summary>撤销时整框换回的文本框。</summary>
         internal readonly List<AgentOutlineUndoItem> OutlineRestores = new List<AgentOutlineUndoItem>();
-        /// <summary>结构草稿改过的文本框，提交时整框替换。</summary>
-        internal IEnumerable<string> LayoutOutlines => LayoutChanges.Select(c => c.OutlineId).Distinct();
+        /// <summary>
+        /// 结构草稿改过的文本框，提交时整框替换。跨框移动、合并连起来的文本框在同一组里，整组写入或整组跳过，
+        /// 不会一边写进、一边没删。组内按页面顺序。
+        /// </summary>
+        internal List<List<string>> LayoutGroups
+        {
+            get
+            {
+                var root = new Dictionary<string, string>();
+                string Find(string id) { while (root[id] != id) id = root[id] = root[root[id]]; return id; }
+                foreach (var c in LayoutChanges)
+                {
+                    foreach (var id in new[] { c.OutlineId, c.From }.Where(x => x != null)) if (!root.ContainsKey(id)) root[id] = id;
+                    if (c.From != null) root[Find(c.From)] = Find(c.OutlineId);
+                }
+                var order = Page.Elements(One + "Outline").Select(o => (string)o.Attribute("objectID")).ToList();
+                return root.Keys.ToList().GroupBy(Find).Select(g => g.OrderBy(order.IndexOf).ToList()).ToList();
+            }
+        }
         internal string PageId => (string)Page.Attribute("ID");
         internal string Title => (string)Page.Attribute("name") ?? "当前页面";
         internal int Revision;
@@ -253,7 +272,8 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (length < text.Length && char.IsHighSurrogate(text[length - 1])) length--;
                 Images.Add(new AgentImage
                 {
-                    Id = "i" + (Images.Count + 1), ContainerId = container == null ? "" : (string)container.Attribute("objectID") ?? container.Name.LocalName,
+                    Id = "i" + (Images.Count + 1), ObjectId = (string)image.Attribute("objectID") ?? (string)image.Parent?.Attribute("objectID"),
+                    ContainerId = container == null ? "" : (string)container.Attribute("objectID") ?? container.Name.LocalName,
                     Text = text.Substring(0, length), Truncated = length < text.Length
                 });
             }
@@ -313,7 +333,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 try { expected = SemanticFormat(left, before); } catch (Exception) { continue; }
                 string actual;
                 try { actual = SemanticFormat(right, after); } catch (Exception) { actual = null; }
-                if (expected != actual) throw new AiException($"这样调整会改变段落 {b.Id} 的格式（会继承上级段落的样式），没有应用。");
+                if (expected != actual) throw new AiException($"这样调整会改变段落 {b.Id} 的格式（会继承上级段落或文本框的样式），没有应用。");
             }
         }
 

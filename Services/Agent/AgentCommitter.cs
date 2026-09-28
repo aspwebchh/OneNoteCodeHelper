@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Xml.Linq;
 using Microsoft.Office.Interop.OneNote;
@@ -12,6 +13,8 @@ namespace OneNoteCodeHelper.Services.Agent
     {
         string GetPageContent(string pageId, PageInfo info);
         void UpdatePageContent(string xml, DateTime expectedLastModified);
+        /// <summary>删除页面上的对象。只用来删掉合并后还留着一行占位空白的文本框（OneNote 通常在写入时已经删掉）。</summary>
+        void DeletePageContent(string pageId, string objectId, DateTime expectedLastModified);
     }
 
     internal sealed class AgentUndoItem
@@ -37,10 +40,12 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int Tables;
         /// <summary>text_to_table 转成的表格（撤销时是换回段落的表格数）。</summary>
         internal int TextTables;
-        /// <summary>结构改动：删掉的空行、移动、调整缩进和插入的段落数。</summary>
-        internal int Removed, Moved, Indented, Inserted;
-        /// <summary>整框写入的文本框（撤销时是整框恢复的文本框数）。</summary>
+        /// <summary>结构改动：删掉的空行、移动、调整缩进和插入的段落数，合并掉的文本框数。</summary>
+        internal int Removed, Moved, Indented, Inserted, Merged;
+        /// <summary>整框写入的文本框，含合并删掉的（撤销时是整框恢复、重建的文本框数）。</summary>
         internal int Outlines;
+        /// <summary>合并后没能删掉、留着一行空白的文本框。</summary>
+        internal int Leftover;
         internal readonly List<AgentUndoItem> Undo = new List<AgentUndoItem>();
         internal readonly List<AgentCodeUndoItem> CodeUndo = new List<AgentCodeUndoItem>();
         internal readonly List<AgentTableUndoItem> TableUndo = new List<AgentTableUndoItem>();
@@ -52,11 +57,12 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>撤销之后不再把撤销的逆操作当作可撤销。</summary>
         internal void ClearUndo() { Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
         internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
-            removed = Removed, moved = Moved, indented = Indented, inserted = Inserted,
+            removed = Removed, moved = Moved, indented = Indented, inserted = Inserted, merged = Merged,
             skipped_conflict = ConflictIds, unverified = Unverified, protected_count = Protected, message = Message };
         /// <summary>结果消息里的结构改动部分。</summary>
         internal string LayoutSummary => (Removed > 0 ? $"删除空行 {Removed} 行；" : "") + (Moved > 0 ? $"移动 {Moved} 段；" : "") +
-            (Indented > 0 ? $"调整缩进 {Indented} 段；" : "") + (Inserted > 0 ? $"插入 {Inserted} 段；" : "");
+            (Indented > 0 ? $"调整缩进 {Indented} 段；" : "") + (Inserted > 0 ? $"插入 {Inserted} 段；" : "") + (Merged > 0 ? $"合并文本框 {Merged} 个；" : "") +
+            (Leftover > 0 ? $"{Leftover} 个文本框合并后没能删掉，留下一行空白；" : "");
     }
 
     internal sealed class AgentCommitter
@@ -89,26 +95,51 @@ namespace OneNoteCodeHelper.Services.Agent
                     var planned = new List<(AgentBlock Block, XElement Before, XElement Desired, XElement Target)>();
                     var containers = new HashSet<XElement>();
                     var tagDefinitions = page.Elements(One + "TagDef").Count();
-                    // 有结构改动的文本框整框替换。处理期间文本框被改过就不替换：结构改动按冲突跳过，框里其余改动照常逐项提交。
+                    // 有结构改动的文本框整框替换，跨框移动、合并连起来的文本框整组替换。处理期间组里有文本框被改过就整组不替换：
+                    // 结构改动按冲突跳过，框里其余改动照常逐项提交。
+                    // 写入前的整页用来判断对象原来在哪个文本框、原来有没有列表；图片数据只在要跨框搬图片时才读。
+                    var original = new XElement(page);
+                    var homes = AgentLayout.Homes(original);
+                    XElement binary = null;
+                    XElement Binary() => binary ?? (binary = AgentPageSnapshot.ParsePage(_api.GetPageContent(snapshot.PageId, PageInfo.piBinaryData)));
                     var formatted = new HashSet<string>();
                     var edits = new List<OutlineEdit>();
-                    foreach (var outlineId in snapshot.LayoutOutlines)
+                    var draft = snapshot.LayoutChanges.Count > 0 ? snapshot.CreateDraftPage() : null;
+                    foreach (var group in snapshot.LayoutGroups)
                     {
-                        var current = Outline(page, outlineId);
-                        var original = Outline(snapshot.Page, outlineId);
-                        if (current == null || original == null || AgentLayout.OutlineFingerprint(current, page) != AgentLayout.OutlineFingerprint(original, snapshot.Page))
-                        { report.ConflictIds.AddRange(snapshot.LayoutChanges.Where(c => c.OutlineId == outlineId).SelectMany(c => c.Ids).Distinct()); continue; }
-                        edits.Add(ReplaceOutline(snapshot, page, current, untouched, formatted));
+                        if (!group.All(id => Outline(page, id) is XElement current && Outline(snapshot.Page, id) is XElement before &&
+                            AgentLayout.OutlineFingerprint(current, page) == AgentLayout.OutlineFingerprint(before, snapshot.Page)))
+                        {
+                            report.ConflictIds.AddRange(snapshot.LayoutChanges.Where(c => group.Contains(c.OutlineId))
+                                .SelectMany(c => c.Ids.Length > 0 ? c.Ids : new[] { c.From ?? c.OutlineId }).Distinct());
+                            continue;
+                        }
+                        var key = Guid.NewGuid().ToString("N");
+                        foreach (var id in group)
+                        {
+                            var current = Outline(page, id);
+                            var edit = Outline(draft, id) == null ? DeleteOutline(page, current) : ReplaceOutline(snapshot, draft, page, original, homes, current, formatted, Binary);
+                            edit.Group = key;
+                            // 撤销时图片要放回别的文本框（或重建的文本框），先记下图片数据。
+                            if (group.Count > 1) AgentLayout.FillImageData(edit.Before, Binary);
+                            edits.Add(edit);
+                        }
                     }
-                    // 撤销：文本框写入后没被改过才整框换回。
-                    foreach (var item in snapshot.OutlineRestores)
+                    // 撤销：文本框写入后没被改过、合并删掉的文本框仍不在页面上，才整组换回。
+                    foreach (var group in snapshot.OutlineRestores.GroupBy(i => i.Group ?? i.OutlineId))
                     {
-                        var current = Outline(page, item.OutlineId);
-                        if (current == null || AgentLayout.OutlineFingerprint(current, page) != item.AfterFingerprint) { report.ConflictIds.Add(item.OutlineId); continue; }
-                        edits.Add(RestoreOutline(item, page, current, untouched, formatted));
+                        if (!group.All(item => item.Deleted ? Outline(page, item.OutlineId) == null
+                            : Outline(page, item.OutlineId) is XElement current && AgentLayout.OutlineFingerprint(current, page) == item.AfterFingerprint))
+                        { report.ConflictIds.AddRange(group.Select(i => i.OutlineId)); continue; }
+                        foreach (var item in group) edits.Add(RestoreOutline(item, page, original, homes, untouched, formatted));
                     }
                     var replaced = new HashSet<string>(edits.Select(e => e.Id));
                     foreach (var edit in edits) containers.Add(edit.Written);
+                    // 删掉、转换、改过格式、跨框重建的段落不再按「未指定段落」核对；只是移动、调整缩进的段落仍要求格式不变。
+                    var present = new HashSet<string>(page.Descendants().Attributes("objectID").Select(a => a.Value));
+                    foreach (var edit in edits.Where(e => !e.Restore))
+                        foreach (var oid in edit.Before.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null))
+                            if (!present.Contains(oid) || formatted.Contains(oid)) untouched.Remove(oid);
                     foreach (var block in snapshot.Blocks.Where(b => b.Changed && !replaced.Contains(b.ContainerId)))
                     {
                         var target = Find(page, block.ObjectId);
@@ -206,6 +237,20 @@ namespace OneNoteCodeHelper.Services.Agent
                         report.Message = "已尝试写入，但无法回读确认。请查看目标页面，不要立即重复执行。";
                         return report;
                     }
+                    // 合并后空了的文本框写成一行空白，OneNote 收到后直接删掉它（本机实测）。万一还留着占位的空白，
+                    // 先不算进核对，核验通过后再用 DeletePageContent 删。
+                    var placeholders = new Dictionary<OutlineEdit, string>();
+                    foreach (var edit in edits.Where(e => e.Delete))
+                    {
+                        edit.Written.Remove();
+                        var left = Outline(actual, edit.Id);
+                        var lines = left?.Descendants(One + "OE").ToList();
+                        if (lines == null || lines.Count != 1 || AgentCode.PlainText(lines[0]).Length > 0) continue;
+                        placeholders[edit] = AgentLayout.OutlineFingerprint(left, actual);
+                        left.Remove();
+                    }
+                    // OneNote 按位置把重建的文本框排进页面 XML，核对前先把它挪到期望页面里的顺序。
+                    AlignNewOutlines(page, actual, known);
                     foreach (var item in planned)
                     {
                         // 重建的段落没有原 ID，按在页面上的位置找；位置对不上的情况由下面的内容核验兜底。
@@ -255,6 +300,17 @@ namespace OneNoteCodeHelper.Services.Agent
                         else report.CodeBlocks++;
                     }
                     foreach (var edit in edits) VerifyOutline(edit, page, actual, expectedLines, actualLines, report);
+                    // 重建的段落里的图片（跨框移动、撤销重建）只带着数据写入，piBasic 看不出坏图，按二进制数据核对。
+                    var images = page.Descendants(One + "Image").Where(i => i.Parent?.Name == One + "OE" && !known.Contains((string)i.Parent.Attribute("objectID") ?? "")).ToList();
+                    if (images.Count > 0 && !ImagesWritten(snapshot.PageId, page, images, known)) report.Unverified += images.Count;
+                    // 还留着占位空白的文本框：写入核验通过后再删掉，占位的空白之后被人改过就留着。
+                    foreach (var edit in edits.Where(e => e.Delete))
+                    {
+                        var deleted = !placeholders.TryGetValue(edit, out var placeholder) || TryDelete(snapshot.PageId, edit.Id, placeholder);
+                        if (!deleted) report.Leftover++;
+                        report.OutlineUndo.Add(new AgentOutlineUndoItem { OutlineId = edit.Id, Before = edit.Before, Styles = edit.Styles, Tags = edit.Tags, Group = edit.Group,
+                            Deleted = deleted, AfterFingerprint = deleted ? null : placeholder });
+                    }
                     foreach (var (table, before) in tables)
                     {
                         var written = AgentTable.Find(actual, table.ObjectId);
@@ -262,7 +318,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         report.Tables++;
                         report.TableUndo.Add(new AgentTableUndoItem { ObjectId = table.ObjectId, Before = before, AfterFingerprint = AgentTable.TakeFingerprint(written) });
                     }
-                    report.Status = report.Unverified > 0 || report.Conflicts > 0 ? "PartiallyApplied" : "Verified";
+                    report.Status = report.Unverified > 0 || report.Conflicts > 0 || report.Leftover > 0 ? "PartiallyApplied" : "Verified";
                     var conversions = codes.Select(c => c.Conversion).Concat(edits.SelectMany(e => e.Boxes.Select(b => b.Conversion))).ToList();
                     report.Message = $"已验证修改 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"修正文字 {report.TextFixes.Count} 处；" : "") + report.LayoutSummary +
                         (conversions.Any(c => !c.TextTable) ? $"高亮代码 {report.CodeBlocks} 处；" : "") + (conversions.Any(c => c.TextTable) ? $"转换表格 {report.TextTables} 个；" : "") +
@@ -332,6 +388,10 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             internal string Id;
             internal bool Restore;
+            /// <summary>合并后空了的文本框：写成一行空白，OneNote 收到后直接删掉；还留着时核验通过后再删。</summary>
+            internal bool Delete;
+            internal string Group;
+            /// <summary>写入前的文本框；撤销重建的文本框原来不在页面上，为 null。</summary>
             internal XElement Before;
             /// <summary>页面里替换上去的文本框，写入后按位置和回读页面对应。</summary>
             internal XElement Written;
@@ -339,21 +399,22 @@ namespace OneNoteCodeHelper.Services.Agent
             internal List<XElement> Tags = new List<XElement>();
             internal readonly List<(AgentBlock Block, XElement Node)> Changed = new List<(AgentBlock, XElement)>();
             internal readonly List<(XElement Box, AgentCodeConversion Conversion)> Boxes = new List<(XElement, AgentCodeConversion)>();
-            internal readonly List<AgentTable> Tables = new List<AgentTable>();
+            /// <summary>改了外观的表格和它在写入内容里的元素；跨框移过来的表格没有原 ID，按位置核对。</summary>
+            internal readonly List<(AgentTable Table, XElement Target)> Tables = new List<(AgentTable, XElement)>();
             internal readonly List<AgentLayoutChange> Changes = new List<AgentLayoutChange>();
         }
 
         /// <summary>
         /// 用结构草稿替换整个文本框：套上格式草稿、代码框和表格转换、表格外观，样式和标记编号按内容对应到重新读取的页面。
-        /// 删掉、转换、改过格式或重建的段落不再按「未指定段落」核对；只是移动、调整缩进的段落仍要求格式不变。
+        /// 改动按段落、表格现在所在的文本框取（跨框移动后不在原来的框里）。跨框移过来的对象去掉 ID，图片补上数据。
         /// </summary>
-        private static OutlineEdit ReplaceOutline(AgentPageSnapshot snapshot, XElement page, XElement current, Dictionary<string, string> untouched, ISet<string> formatted)
+        private static OutlineEdit ReplaceOutline(AgentPageSnapshot snapshot, XElement draft, XElement page, XElement original, Dictionary<string, string> homes,
+            XElement current, ISet<string> formatted, Func<XElement> binary)
         {
             var id = (string)current.Attribute("objectID");
             var edit = new OutlineEdit { Id = id, Before = new XElement(current), Styles = AgentLayout.Styles(current, page), Tags = AgentLayout.Tags(current, page) };
-            var draft = snapshot.CreateDraftPage();
             var written = Outline(draft, id);
-            foreach (var block in snapshot.Blocks.Where(b => b.Changed && b.ContainerId == id))
+            foreach (var block in snapshot.Blocks.Where(b => b.Changed))
             {
                 var node = AgentLayout.Find(written, block.Id);
                 if (node == null) continue;
@@ -363,20 +424,20 @@ namespace OneNoteCodeHelper.Services.Agent
                 edit.Changed.Add((block, node));
                 formatted.Add(block.ObjectId);
             }
-            foreach (var conversion in snapshot.CodeConversions.Where(c => c.Blocks[0].ContainerId == id))
+            foreach (var conversion in snapshot.CodeConversions.Where(c => AgentLayout.Find(written, c.Blocks[0].Id) != null))
             {
                 var selection = AgentCode.Select(draft, conversion.Blocks.Select(b => b.ObjectId).ToList());
                 if (selection.Code != conversion.Code) throw new AiException("结构草稿与代码框或表格转换不一致，已阻止写入。");
                 edit.Boxes.Add((selection.ReplaceWith(new XElement(conversion.Table)), conversion));
             }
-            foreach (var table in snapshot.Tables.Where(t => t.Changed && t.ContainerId == id))
+            foreach (var table in snapshot.Tables.Where(t => t.Changed))
             {
                 var target = AgentTable.Find(written, table.ObjectId);
                 if (target == null) continue;
                 table.Draft.Apply(target);
-                edit.Tables.Add(table);
+                edit.Tables.Add((table, target));
             }
-            AgentLayout.RebuildDroppedLists(written, current);
+            AgentLayout.RebuildDroppedLists(written, original);
             foreach (var e in written.DescendantsAndSelf().Where(e => e.Attribute("quickStyleIndex") != null))
             {
                 var definition = snapshot.DraftStyles.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == (string)e.Attribute("quickStyleIndex"));
@@ -388,37 +449,81 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (definition != null) tag.SetAttributeValue("index", AgentMarks.EnsureTagDefinition(page, definition));
             }
             AgentLayout.Strip(written);
+            // OneNote 把移到另一个文本框的对象一律当新对象建立，带着原 ID 也一样；图片只带 CallbackID 会建成坏图。
+            var foreign = AgentLayout.StripForeign(written, id, homes);
+            AgentLayout.FillImageData(written, binary, foreign);
+            AgentLayout.PrepareImages(written);
             written.Remove();
             current.ReplaceWith(written);
             edit.Written = written;
             edit.Changes.AddRange(snapshot.LayoutChanges.Where(c => c.OutlineId == id));
-            var present = new HashSet<string>(written.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null));
-            foreach (var oid in edit.Before.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null))
-                if (!present.Contains(oid) || formatted.Contains(oid)) untouched.Remove(oid);
             return edit;
         }
 
         /// <summary>
-        /// 整框撤销：换回写入前的文本框。已经不在页面上的对象（删掉的空行、转换前的段落、表格外层）去掉 ID 让 OneNote 重建，
-        /// 列表要去掉的段落同样重建；样式和标记定义按当前页面重新对应。插入的段落和新建的表格不在原样里，写回时一并删除。
+        /// 合并后空了的文本框：OneNote 不接受没有段落的 Outline，写成一行空白；OneNote 收到只剩一行空白的文本框会直接删掉它。
+        /// 期望页面里不算这个文本框，写入后还留着时由 <see cref="TryDelete"/> 删。
         /// </summary>
-        private static OutlineEdit RestoreOutline(AgentOutlineUndoItem item, XElement page, XElement current, Dictionary<string, string> untouched, ISet<string> formatted)
+        private static OutlineEdit DeleteOutline(XElement page, XElement current)
         {
-            var edit = new OutlineEdit { Id = item.OutlineId, Restore = true, Before = new XElement(current) };
+            var edit = new OutlineEdit { Id = (string)current.Attribute("objectID"), Delete = true, Before = new XElement(current),
+                Styles = AgentLayout.Styles(current, page), Tags = AgentLayout.Tags(current, page) };
+            var written = new XElement(current);
+            written.Elements(One + "OEChildren").Remove();
+            written.Add(new XElement(One + "OEChildren", new XElement(One + "OE", new XElement(One + "T", new XCData("")))));
+            current.ReplaceWith(written);
+            edit.Written = written;
+            return edit;
+        }
+
+        /// <summary>删掉合并后还留着占位空白的文本框。占位的文本框之后被改过就不删；页面在删之前变了会重新读取再试。</summary>
+        private bool TryDelete(string pageId, string outlineId, string expected)
+        {
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    var page = AgentPageSnapshot.ParsePage(_api.GetPageContent(pageId, PageInfo.piBasic));
+                    var outline = Outline(page, outlineId);
+                    if (outline == null) return true;
+                    if (AgentLayout.OutlineFingerprint(outline, page) != expected) return false;
+                    _api.DeletePageContent(pageId, outlineId, AgentPageSnapshot.Modified(page));
+                    return true;
+                }
+                catch (Exception) { /* 时间戳冲突或结果不确定：重新读取后再判断。 */ }
+            }
+            try { return Outline(AgentPageSnapshot.ParsePage(_api.GetPageContent(pageId, PageInfo.piBasic)), outlineId) == null; }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>
+        /// 整框撤销：换回写入前的文本框，合并删掉的文本框按原来的位置和内容重新建立（得到新的 ID）。
+        /// 原来就在这个框里、现在还在的对象保留 ID；已经不在的（删掉的空行、转换前的段落、表格外层、跨框移动后重建的对象）去掉 ID 让 OneNote 重建，
+        /// 其中的图片用执行时记下的数据。列表要去掉的段落同样重建；样式和标记定义按当前页面重新对应。插入的段落和新建的表格不在原样里，写回时一并删除。
+        /// </summary>
+        private static OutlineEdit RestoreOutline(AgentOutlineUndoItem item, XElement page, XElement original, Dictionary<string, string> homes,
+            Dictionary<string, string> untouched, ISet<string> formatted)
+        {
+            var current = item.Deleted ? null : Outline(page, item.OutlineId);
+            var edit = new OutlineEdit { Id = item.OutlineId, Restore = true, Before = current == null ? null : new XElement(current) };
             var written = new XElement(item.Before);
-            var present = new HashSet<string>(page.Descendants().Attributes("objectID").Select(a => a.Value));
-            foreach (var e in written.DescendantsAndSelf().Where(e => e.Attribute("objectID") != null && !present.Contains((string)e.Attribute("objectID"))).ToList())
-                AgentCode.StripIdentity(e);
-            AgentLayout.RebuildDroppedLists(written, current);
+            if (current == null) AgentCode.StripIdentity(written);
+            AgentLayout.StripForeign(written, item.OutlineId, homes);
+            AgentLayout.PrepareImages(written);
+            AgentLayout.RebuildDroppedLists(written, original);
             var styles = item.Styles.ToDictionary(d => (string)d.Attribute("index"), d => ParagraphStyles.EnsureDefinition(page, d));
             var tags = item.Tags.ToDictionary(d => (string)d.Attribute("index"), d => AgentMarks.EnsureTagDefinition(page, d));
             foreach (var e in written.DescendantsAndSelf().Where(e => e.Attribute("quickStyleIndex") != null))
                 if (styles.TryGetValue((string)e.Attribute("quickStyleIndex"), out var mapped)) e.SetAttributeValue("quickStyleIndex", mapped);
             foreach (var tag in written.Descendants(One + "Tag"))
                 if (tags.TryGetValue((string)tag.Attribute("index"), out var mapped)) tag.SetAttributeValue("index", mapped);
-            current.ReplaceWith(written);
+            if (current != null) current.ReplaceWith(written);
+            // 重建的文本框先排在最后；OneNote 会按位置排，核对前由 AlignNewOutlines 对齐。
+            else if (page.Elements(One + "Outline").LastOrDefault() is XElement last) last.AddAfterSelf(written);
+            else page.Add(written);
             edit.Written = written;
-            foreach (var oid in edit.Before.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null)) untouched.Remove(oid);
+            if (edit.Before != null)
+                foreach (var oid in edit.Before.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null)) untouched.Remove(oid);
             formatted.UnionWith(written.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null));
             return edit;
         }
@@ -431,7 +536,8 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             var boxLines = new HashSet<XElement>(edit.Boxes.SelectMany(b => b.Box.Descendants(One + "OE")));
             var failed = new HashSet<XElement>();
-            foreach (var line in edit.Written.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any() && !boxLines.Contains(e)))
+            // 合并删掉的文本框不在期望页面里，没有要按位置核对的段落。
+            foreach (var line in edit.Delete ? Enumerable.Empty<XElement>() : edit.Written.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any() && !boxLines.Contains(e)))
             {
                 string expected;
                 try { expected = AgentPageSnapshot.SemanticFormat(line, page); } catch (Exception) { continue; }
@@ -449,9 +555,10 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (!ConversionWritten(box, actualLines[expectedLines.IndexOf(box)], conversion, page, actual)) { report.Unverified++; continue; }
                 if (conversion.TextTable) report.TextTables++; else report.CodeBlocks++;
             }
-            foreach (var table in edit.Tables)
+            foreach (var (table, target) in edit.Tables)
             {
-                var written = AgentTable.Find(actual, table.ObjectId);
+                var index = expectedLines.IndexOf(target.Parent);
+                var written = index < 0 ? null : actualLines[index].Element(One + "Table");
                 if (written == null || !TableLook.Read(written).SameAs(table.Draft)) { report.Unverified++; continue; }
                 report.Tables++;
             }
@@ -460,11 +567,47 @@ namespace OneNoteCodeHelper.Services.Agent
             report.Moved += Ids("moved").Length;
             report.Indented += Ids("indented").Length;
             report.Inserted += Ids("inserted").Length;
+            report.Merged += edit.Changes.Count(c => c.Kind == "merged");
             report.Outlines++;
-            var after = edit.Restore ? null : Outline(actual, edit.Id);
+            // 合并删掉的文本框在删除之后才记撤销。
+            var after = edit.Restore || edit.Delete ? null : Outline(actual, edit.Id);
             if (after != null)
-                report.OutlineUndo.Add(new AgentOutlineUndoItem { OutlineId = edit.Id, Before = edit.Before, Styles = edit.Styles, Tags = edit.Tags,
+                report.OutlineUndo.Add(new AgentOutlineUndoItem { OutlineId = edit.Id, Before = edit.Before, Styles = edit.Styles, Tags = edit.Tags, Group = edit.Group,
                     AfterFingerprint = AgentLayout.OutlineFingerprint(after, actual) });
+        }
+
+        /// <summary>
+        /// 撤销重建的文本框没有 ID，期望页面里排在最后；OneNote 按位置把它排进页面 XML。把回读页面里新出现的文本框挪到期望页面的顺序，
+        /// 其他元素不动。数量对不上时不调整，交给内容核验报错。
+        /// </summary>
+        private static void AlignNewOutlines(XElement expected, XElement actual, ISet<string> known)
+        {
+            var fresh = expected.Elements(One + "Outline").Select(o => !known.Contains((string)o.Attribute("objectID") ?? "")).ToList();
+            if (!fresh.Contains(true)) return;
+            var outlines = actual.Elements(One + "Outline").ToList();
+            var added = outlines.Where(o => !known.Contains((string)o.Attribute("objectID") ?? "")).ToList();
+            var kept = outlines.Except(added).ToList();
+            if (outlines.Count != fresh.Count || added.Count != fresh.Count(f => f)) return;
+            var slots = outlines.Select(o => { var slot = new XElement("slot"); o.AddBeforeSelf(slot); return slot; }).ToList();
+            foreach (var o in outlines) o.Remove();
+            int a = 0, k = 0;
+            for (var i = 0; i < slots.Count; i++) slots[i].ReplaceWith(fresh[i] ? added[a++] : kept[k++]);
+        }
+
+        /// <summary>重建的段落里的图片：回读二进制数据，数量和位置对得上，带着数据写入的图片数据不变。坏图在二进制读取里会整个消失。</summary>
+        private bool ImagesWritten(string pageId, XElement expected, List<XElement> images, ISet<string> known)
+        {
+            try
+            {
+                var binary = AgentPageSnapshot.ParsePage(_api.GetPageContent(pageId, PageInfo.piBinaryData));
+                AlignNewOutlines(expected, binary, known);
+                var before = expected.Descendants(One + "Image").ToList();
+                var after = binary.Descendants(One + "Image").ToList();
+                if (before.Count != after.Count) return false;
+                string Data(XElement image) => Regex.Replace((string)image.Element(One + "Data") ?? "", @"\s", "");
+                return images.All(i => { var written = Data(after[before.IndexOf(i)]); return written.Length > 0 && (i.Element(One + "Data") == null || written == Data(i)); });
+            }
+            catch (Exception) { return false; }
         }
 
         /// <summary>转换出的代码框或表格已由 OneNote 建立；表格另外核对每个单元格的正文和链接。</summary>
@@ -514,8 +657,8 @@ namespace OneNoteCodeHelper.Services.Agent
             // 二进制对象的内容引用和表格布局不能消失。
             foreach (var name in new[] { "Image", "InkDrawing", "InsertedFile", "MediaFile", "FutureObject", "Tag", "List" })
             {
-                var left = expected.Descendants(One + name).Where(e => !IsFormattedMark(e, formatted, known)).Select(e => StableObject(e, expected)).ToArray();
-                var right = actual.Descendants(One + name).Where(e => !IsFormattedMark(e, formatted, known)).Select(e => StableObject(e, actual)).ToArray();
+                var left = expected.Descendants(One + name).Where(e => !IsFormattedMark(e, formatted, known)).Select(e => StableObject(e, expected, known)).ToArray();
+                var right = actual.Descendants(One + name).Where(e => !IsFormattedMark(e, formatted, known)).Select(e => StableObject(e, actual, known)).ToArray();
                 if (!left.SequenceEqual(right)) return false;
             }
             if (!expected.Descendants(One + "Columns").Select(StableColumns).SequenceEqual(actual.Descendants(One + "Columns").Select(StableColumns))) return false;
@@ -540,9 +683,19 @@ namespace OneNoteCodeHelper.Services.Agent
             return index >= 0 && before.Count == after.Count ? after[index] : null;
         }
 
-        /// <summary>标记按引用的 TagDef 内容比较，不看编号：新增 TagDef 后 OneNote 重新编号也不算内容变化。</summary>
-        private static string StableObject(XElement e, XElement page)
+        /// <summary>
+        /// 标记按引用的 TagDef 内容比较，不看编号：新增 TagDef 后 OneNote 重新编号也不算内容变化。
+        /// 新建段落里的图片带着数据写入、回读只有新的 CallbackID，这里不比数据引用，另由 <see cref="ImagesWritten"/> 按二进制核对。
+        /// </summary>
+        private static string StableObject(XElement e, XElement page, ISet<string> known)
         {
+            if (e.Name == One + "Image" && e.Parent?.Name == One + "OE" && !known.Contains((string)e.Parent.Attribute("objectID") ?? ""))
+            {
+                var image = new XElement(e);
+                image.Elements(One + "CallbackID").Remove();
+                image.Elements(One + "Data").Remove();
+                return StableXml(image);
+            }
             if (e.Name != One + "Tag") return StableXml(e);
             var tag = new XElement(e);
             tag.Attribute("index")?.Remove();

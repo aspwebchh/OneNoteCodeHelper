@@ -82,5 +82,6 @@ internal static class WindowPreview
     {
         public string GetPageContent(string pageId, PageInfo info) => throw new InvalidOperationException("Preview cannot access OneNote.");
         public void UpdatePageContent(string xml, DateTime expectedLastModified) => throw new InvalidOperationException("Preview cannot write OneNote.");
+        public void DeletePageContent(string pageId, string objectId, DateTime expectedLastModified) => throw new InvalidOperationException("Preview cannot write OneNote.");
     }
 }

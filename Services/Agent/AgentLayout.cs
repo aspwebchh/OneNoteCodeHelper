@@ -7,11 +7,15 @@ using System.Xml.Linq;
 
 namespace OneNoteCodeHelper.Services.Agent
 {
-    /// <summary>结构草稿里的一次改动，按短 ID 记录。Kind 为 removed、moved、indented、inserted。</summary>
+    /// <summary>
+    /// 结构草稿里的一次改动，按短 ID 记录。Kind 为 removed、moved、indented、inserted、merged。
+    /// 跨文本框的移动和合并记下源文本框 From，提交时两个文本框一起写入、一起跳过。
+    /// </summary>
     internal sealed class AgentLayoutChange
     {
         internal string Kind;
         internal string OutlineId;
+        internal string From;
         internal string[] Ids;
     }
 
@@ -32,13 +36,18 @@ namespace OneNoteCodeHelper.Services.Agent
         internal List<XElement> Styles;
         internal List<XElement> Tags;
         internal string AfterFingerprint;
+        /// <summary>一起写入的文本框（跨框移动、合并）同一个值，撤销时整组恢复或整组跳过。</summary>
+        internal string Group;
+        /// <summary>文本框已被合并删掉，撤销时按 Before 重新建立（得到新的 ID）。</summary>
+        internal bool Deleted;
     }
 
     /// <summary>
-    /// 结构草稿（<see cref="AgentPageSnapshot.Layout"/>）上的操作：删空行、调整缩进、移动和插入段落。
+    /// 结构草稿（<see cref="AgentPageSnapshot.Layout"/>）上的操作：删空行、调整缩进、移动和插入段落、合并文本框。
     /// 草稿里的段落用私有属性 <see cref="Key"/> 记短 ID（p1…、新插入的 n1…），不依赖 objectID，提交前统一去掉。
-    /// 本机实测（OneNote 16.0.20326.20158）：整框回传时，移动、挂到别的段落下、提到上一级的段落都保留 objectID；
-    /// 省略的段落被删除；无 ID 的段落和表格按新对象建立。
+    /// 本机实测（OneNote 16.0.20326.20158）：整框回传时，同一文本框里移动、挂到别的段落下、提到上一级的段落都保留 objectID；
+    /// 省略的段落被删除；无 ID 的段落和表格按新对象建立。移到另一个文本框的对象一律按新对象建立（带着原 ID 也一样），
+    /// 图片只带 CallbackID 会建成坏图，必须带 one:Data；Outline 不能没有段落，写成只剩一行空白时 OneNote 会直接删掉这个文本框。
     /// </summary>
     internal static class AgentLayout
     {
@@ -101,6 +110,70 @@ namespace OneNoteCodeHelper.Services.Agent
             if (following.Count > 0) Children(oe).Add(following);
             Detach(oe);
             parent.AddAfterSelf(oe);
+        }
+
+        /// <summary>合并文本框：把源文本框的全部顶层段落（含表格、图片、空行）按顺序移到目标段落前后，再删掉源文本框。</summary>
+        internal static void Merge(XElement source, XElement target, bool before)
+        {
+            var nodes = source.Elements(One + "OEChildren").Elements(One + "OE").ToList();
+            foreach (var oe in nodes) oe.Remove();
+            if (before) target.AddBeforeSelf(nodes); else target.AddAfterSelf(nodes);
+            source.Remove();
+        }
+
+        /// <summary>页面上每个带 objectID 的对象所在的顶层容器（文本框、标题）的 ID。</summary>
+        internal static Dictionary<string, string> Homes(XElement page)
+        {
+            var homes = new Dictionary<string, string>();
+            foreach (var container in page.Elements())
+                foreach (var id in container.DescendantsAndSelf().Attributes("objectID").Select(a => a.Value))
+                    if (!homes.ContainsKey(id)) homes[id] = (string)container.Attribute("objectID") ?? container.Name.LocalName;
+            return homes;
+        }
+
+        /// <summary>
+        /// 要写入 outline 这个文本框的对象里，原来不在这个框里的（跨框移动过来的）去掉 ID，让 OneNote 按新对象建立。
+        /// 返回去掉了 ID 的段落原来的 ID，用来给其中的图片补上数据。
+        /// </summary>
+        internal static Dictionary<XElement, string> StripForeign(XElement outline, string outlineId, Dictionary<string, string> homes)
+        {
+            var stripped = new Dictionary<XElement, string>();
+            foreach (var e in outline.Descendants().Where(e => e.Attribute("objectID") != null).ToList())
+            {
+                var id = (string)e.Attribute("objectID");
+                if (homes.TryGetValue(id, out var home) && home == outlineId) continue;
+                AgentCode.StripIdentity(e);
+                if (e.Name == One + "OE") stripped[e] = id;
+            }
+            return stripped;
+        }
+
+        /// <summary>
+        /// 给图片补上 one:Data（取自 piBinaryData 读到的页面，按所在段落的 ID 对应），已经有数据的跳过。
+        /// 给了 originalIds 时只补去掉了 ID 的段落里的图片，ID 取原来的；否则补全部图片。有要补的图片才读取 binary。
+        /// </summary>
+        internal static void FillImageData(XElement outline, Func<XElement> binary, IDictionary<XElement, string> originalIds = null)
+        {
+            foreach (var image in outline.Descendants(One + "Image").Where(i => i.Element(One + "Data") == null).ToList())
+            {
+                var parent = image.Parent;
+                string id;
+                if (originalIds == null) id = (string)parent?.Attribute("objectID");
+                else if (parent == null || !originalIds.TryGetValue(parent, out id)) continue;
+                var data = id == null ? null : binary().Descendants(One + "OE").FirstOrDefault(e => (string)e.Attribute("objectID") == id)?.Element(One + "Image")?.Element(One + "Data");
+                if (data == null) throw new AiException("读不到要移动的图片数据，已阻止写入。");
+                image.Add(new XElement(data));
+            }
+        }
+
+        /// <summary>写入前整理图片：所在段落保留原 ID 的只带 CallbackID，重建的段落里的图片只带数据。</summary>
+        internal static void PrepareImages(XElement outline)
+        {
+            foreach (var image in outline.Descendants(One + "Image"))
+            {
+                if (image.Parent?.Attribute("objectID") != null || image.Element(One + "Data") == null) image.Elements(One + "Data").Remove();
+                else image.Elements(One + "CallbackID").Remove();
+            }
         }
 
         /// <summary>insert_blocks 的新段落：纯文字按 HTML 转义，套用预设样式，可带列表。</summary>

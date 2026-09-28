@@ -204,7 +204,15 @@ namespace OneNoteCodeHelper.Services.Agent
                 move.Properties["target_id"] = AgentSchema.Str();
                 move.Properties["position"] = AgentSchema.Str("before", "after");
                 move.Required = new[] { "snapshot_id", "block_ids", "target_id", "position" };
-                Register("move_blocks", "把段落连同下级段落按原来的先后顺序移到目标段落前面或后面，成为目标的同级段落；只能在同一个文本框或表格单元格里移动。", move, MoveBlocks);
+                Register("move_blocks", "把段落连同下级段落按原来的先后顺序移到目标段落前面或后面，成为目标的同级段落。可以移到另一个文本框，" +
+                    "但表格单元格里的段落只能在同一个单元格里移动，也不能把文本框移空。", move, MoveBlocks);
+                if (snapshot.EditableOutlines.Count > 1)
+                    Register("merge_outlines", "把一个文本框的全部内容（段落、表格、图片、空行）按原来的顺序移到另一个文本框里目标段落的前面或后面，成为目标的同级段落，" +
+                        "再删掉空了的源文本框。source_id 是源文本框的 container_id（见 get_page_overview 的 outlines）。",
+                        AgentSchema.Obj(new Dictionary<string, AgentSchema>
+                        {
+                            ["snapshot_id"] = AgentSchema.Str(), ["source_id"] = AgentSchema.Str(), ["target_id"] = AgentSchema.Str(), ["position"] = AgentSchema.Str("before", "after")
+                        }, "snapshot_id", "source_id", "target_id", "position"), MergeOutlines);
             }
             if (structural && snapshot.Options.EnableInsert)
             {
@@ -266,6 +274,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "remove_blank_lines": return "删除空行";
                 case "set_indent": return "调整缩进";
                 case "move_blocks": return "移动段落";
+                case "merge_outlines": return "合并文本框";
                 case "insert_blocks": return "插入段落";
                 case "text_to_table": return "转换为表格";
                 case "get_pending_changes": return "检查格式草稿";
@@ -330,6 +339,9 @@ namespace OneNoteCodeHelper.Services.Agent
                     break;
                 case "insert_blocks":
                     detail = AiClient.Get(args, "paragraphs") is IList inserted ? $"{inserted.Count} 段" : null;
+                    break;
+                case "merge_outlines":
+                    detail = AiClient.Get(outcome, "moved") is IList merged ? $"{merged.Count} 段" : null;
                     break;
             }
             var text = detail == null ? DisplayName(name) : DisplayName(name) + " · " + detail;
@@ -416,20 +428,37 @@ namespace OneNoteCodeHelper.Services.Agent
                 table_shadings = Has("set_table_style") ? TableLook.Shadings : null,
                 blank_lines = Has("remove_blank_lines"), indent = Has("set_indent"), move = Has("move_blocks"), insert = Has("insert_blocks"), text_table = Has("text_to_table"),
                 total = items.Count, next_offset = offset + 100 < items.Count ? (int?)(offset + 100) : null,
-                // 按结构草稿里的顺序和层级列出，已删除的空行不在其中，新插入的段落带 inserted。
+                // 文本框按结构草稿列出，合并掉的不在其中；structure 表示能不能调整结构（移动、合并等）。
+                outlines = _snapshot.Layout.Elements(OneNoteApi.One + "Outline").Select(o =>
+                {
+                    var id = (string)o.Attribute("objectID") ?? "";
+                    var inside = items.Where(x => x.Node.Ancestors(OneNoteApi.One + "Outline").FirstOrDefault() == o).ToList();
+                    var first = inside.Select(x => x.Block == null ? x.New.Text : x.Block.Editable || x.Block.CodeCandidate ? x.Block.CurrentText : null)
+                        .FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
+                    return new { container_id = id, structure = _snapshot.EditableOutlines.Contains(id), blocks = inside.Count,
+                        summary = first?.Substring(0, Math.Min(40, first.Length)) };
+                }).ToArray(),
+                // 按结构草稿里的顺序和层级列出，已删除的空行不在其中，新插入的段落带 inserted。container_id 是现在所在的文本框。
                 blocks = items.Skip(offset).Take(100).Select(x => x.Block == null
-                    ? (object)new { id = x.Id, container_id = x.New.OutlineId, parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
+                    ? (object)new { id = x.Id, container_id = ContainerOf(x.Node), parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
                         inserted = true, summary = x.New.Text.Substring(0, Math.Min(80, x.New.Text.Length)) }
-                    : new { id = x.Id, container_id = x.Block.ContainerId, parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
+                    : new { id = x.Id, container_id = ContainerOf(x.Node), parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
                         table_id = x.Block.TableId, editable = x.Block.Editable, reason = x.Block.ProtectedReason,
                         list = AgentMarks.ListKind(x.Block.Draft), tags = AgentMarks.Describe(x.Block.Draft, _snapshot.DraftTags),
                         summary = x.Block.Editable || x.Block.CodeCandidate ? x.Block.CurrentText.Substring(0, Math.Min(80, x.Block.CurrentText.Length)) : null }).ToArray(),
                 // 表格和图片数量有限，不分页。
-                tables = _snapshot.Tables.Select(t => new { id = t.Id, container_id = t.ContainerId, rows = t.Rows, columns = t.Columns,
+                tables = _snapshot.Tables.Select(t => new { id = t.Id, container_id = ContainerOf(LayoutObject(t.ObjectId), t.ContainerId), rows = t.Rows, columns = t.Columns,
                     borders = t.Draft.Borders, header_row = t.Draft.HeaderRow, header_shading = t.Draft.ShadingName,
                     editable = t.Editable, reason = t.ProtectedReason, first_row = t.Summary }).ToArray(),
-                images = _snapshot.Images.Select(i => new { id = i.Id, container_id = i.ContainerId, chars = i.Text.Length }).ToArray() };
+                images = _snapshot.Images.Select(i => new { id = i.Id, container_id = ContainerOf(LayoutObject(i.ObjectId), i.ContainerId), chars = i.Text.Length }).ToArray() };
         }
+        /// <summary>结构草稿里对象现在所在的顶层容器：文本框的 ID，标题为 Title。不在文本框、标题里时用 fallback（快照时的位置）。</summary>
+        private string ContainerOf(XElement node, string fallback = "")
+        {
+            var container = node?.Ancestors().FirstOrDefault(e => e.Parent == _snapshot.Layout);
+            return container == null ? fallback : (string)container.Attribute("objectID") ?? container.Name.LocalName;
+        }
+        private XElement LayoutObject(string objectId) => objectId == null ? null : _snapshot.Layout.Descendants().FirstOrDefault(e => (string)e.Attribute("objectID") == objectId);
         /// <summary>结构草稿里按页面顺序排的段落：快照段落和新插入的段落，已删除的不在其中。</summary>
         private List<(string Id, AgentBlock Block, AgentInserted New, XElement Node)> Ordered()
         {
@@ -471,7 +500,8 @@ namespace OneNoteCodeHelper.Services.Agent
             var page = _snapshot.CreateDraftPage();
             foreach (var b in blocks) b.Read = true;
             return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.CurrentText,
-                depth = AgentLayout.Find(page, b.Id).Ancestors(OneNoteApi.One + "OE").Count(), container_id = b.ContainerId, parent_id = ParentKey(AgentLayout.Find(page, b.Id)),
+                depth = AgentLayout.Find(page, b.Id).Ancestors(OneNoteApi.One + "OE").Count(), container_id = ContainerOf(AgentLayout.Find(_snapshot.Layout, b.Id), b.ContainerId),
+                parent_id = ParentKey(AgentLayout.Find(page, b.Id)),
                 table_id = b.TableId, style = Css.Effective(AgentLayout.Find(page, b.Id), page),
                 list = AgentMarks.ListKind(b.Draft), tags = AgentMarks.Describe(b.Draft, _snapshot.DraftTags),
                 runs = b.Draft.Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() }).ToArray() };
@@ -674,7 +704,8 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 if (b.Conversion != null) throw new AiException("部分段落已排入代码框或表格转换。");
                 if (b.CodeCandidate) throw new AiException("代码段落请用 highlight_code 转换为代码框。");
-                if (!(b.Editable || b.ProtectedReason == "empty") || !_snapshot.EditableOutlines.Contains(b.ContainerId)) throw new AiException("目标受到保护，不能转换为表格。");
+                if (!(b.Editable || b.ProtectedReason == "empty") || !_snapshot.EditableOutlines.Contains(ContainerOf(AgentLayout.Find(_snapshot.Layout, b.Id))))
+                    throw new AiException("目标受到保护或已删除，不能转换为表格。");
                 if (b.ProtectedReason != "empty" && !b.Read) throw new AiException("请先完整读取目标段落。");
             }
             // 先全部校验、生成表格，再发布草稿；失败时这个工具没有副作用。
@@ -700,7 +731,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var candidate = new XElement(_snapshot.Layout);
             var outlines = candidate.Descendants(OneNoteApi.One + "OE").Where(e => blanks.Contains(AgentLayout.KeyOf(e) ?? "")).ToDictionary(e => e, OutlineOf);
             var removed = AgentLayout.RemoveBlankLines(candidate, e => blanks.Contains(AgentLayout.KeyOf(e) ?? ""), (string)args["mode"] == "all");
-            PublishLayout(candidate, "removed", removed.Select(e => (outlines[e], AgentLayout.KeyOf(e))).ToList());
+            PublishLayout(candidate, "removed", removed.Select(e => (outlines[e], (string)null, AgentLayout.KeyOf(e))).ToList());
             return new { ok = true, draft_revision = _snapshot.Revision, removed = removed.Select(AgentLayout.KeyOf).ToArray() };
         }
 
@@ -712,7 +743,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var listed = new HashSet<XElement>(nodes);
             // 上级段落也在列表里时，下级段落跟着它走，不再单独调整。
             var tops = nodes.Where(n => !n.Ancestors(OneNoteApi.One + "OE").Any(listed.Contains)).InDocumentOrder().ToList();
-            var changes = tops.Select(n => (OutlineOf(n), AgentLayout.KeyOf(n))).ToList();
+            var changes = tops.Select(n => (OutlineOf(n), (string)null, AgentLayout.KeyOf(n))).ToList();
             foreach (var n in tops) AgentLayout.Indent(n, (string)args["direction"] == "in", AgentLayout.KeyOf(n));
             var changed = PublishLayout(candidate, "indented", changes);
             return new { ok = true, draft_revision = _snapshot.Revision, changed = changed ? ids.ToArray() : new string[0], noop = changed ? new string[0] : ids.ToArray() };
@@ -729,13 +760,40 @@ namespace OneNoteCodeHelper.Services.Agent
             var listed = new HashSet<XElement>(nodes);
             if (nodes.Any(n => n.Ancestors(OneNoteApi.One + "OE").Any(listed.Contains))) throw new AiException("下级段落会随上级段落一起移动，不要同时列出。");
             if (target.Ancestors(OneNoteApi.One + "OE").Any(listed.Contains)) throw new AiException("目标段落不能在要移动的段落下面。");
+            // 可以移到另一个文本框；表格单元格里的段落只能在同一个单元格里移动。
             var block = PageEditor.TextBlockOf(target);
-            if (nodes.Any(n => PageEditor.TextBlockOf(n) != block)) throw new AiException("只能在同一个文本框或表格单元格里移动段落。");
+            if (nodes.Any(n => PageEditor.TextBlockOf(n) != block && (block.Name != OneNoteApi.One + "Outline" || PageEditor.TextBlockOf(n).Name != OneNoteApi.One + "Outline")))
+                throw new AiException("表格单元格里的段落只能在同一个单元格里移动，也不能从外面移进单元格。");
             var ordered = nodes.InDocumentOrder().ToList();
-            var changes = ordered.Select(n => (OutlineOf(n), AgentLayout.KeyOf(n))).ToList();
+            var into = OutlineOf(target);
+            var changes = ordered.Select(n => (into, OutlineOf(n) == into ? null : OutlineOf(n), AgentLayout.KeyOf(n))).ToList();
+            var sources = changes.Select(c => c.Item2).Where(from => from != null).Distinct().ToList();
             AgentLayout.Move(ordered, target, (string)args["position"] == "before");
+            if (sources.Any(from => !candidate.Elements(OneNoteApi.One + "Outline").First(o => (string)o.Attribute("objectID") == from).Descendants(OneNoteApi.One + "OE").Any()))
+                throw new AiException("这样会把文本框移空；要把整个文本框并入另一个文本框，请用 merge_outlines。");
             var changed = PublishLayout(candidate, "moved", changes);
             return new { ok = true, draft_revision = _snapshot.Revision, changed = changed ? ids.ToArray() : new string[0], noop = changed ? new string[0] : ids.ToArray() };
+        }
+
+        /// <summary>把整个文本框并到另一个文本框里目标段落的前后，提交时删掉空了的源文本框。</summary>
+        private object MergeOutlines(IDictionary<string, object> args)
+        {
+            var sourceId = (string)args["source_id"];
+            var candidate = new XElement(_snapshot.Layout);
+            var source = candidate.Elements(OneNoteApi.One + "Outline").FirstOrDefault(o => (string)o.Attribute("objectID") == sourceId);
+            if (source == null) throw new AiException("源文本框不存在或已经合并。");
+            if (!_snapshot.EditableOutlines.Contains(sourceId)) throw new AiException("源文本框受到保护，不能调整结构。");
+            var target = Node(candidate, (string)args["target_id"], out _);
+            if (target.Ancestors(OneNoteApi.One + "Outline").First() == source) throw new AiException("目标段落不能在源文本框里。");
+            if (PageEditor.TextBlockOf(target).Name != OneNoteApi.One + "Outline") throw new AiException("目标段落不能在表格单元格里。");
+            // 只处理选中范围时，没选中的段落不在快照里，不能跟着搬走。
+            if (source.Descendants(OneNoteApi.One + "OE").Any(e => e.Elements(OneNoteApi.One + "T").Any() && AgentLayout.KeyOf(e) == null))
+                throw new AiException("源文本框里有没选中的段落，不能整体合并。");
+            var moved = source.Descendants(OneNoteApi.One + "OE").Select(AgentLayout.KeyOf).Where(k => k != null).ToArray();
+            var into = OutlineOf(target);
+            AgentLayout.Merge(source, target, (string)args["position"] == "before");
+            PublishLayout(candidate, new[] { new AgentLayoutChange { Kind = "merged", OutlineId = into, From = sourceId, Ids = moved } });
+            return new { ok = true, draft_revision = _snapshot.Revision, merged = sourceId, into, moved };
         }
 
         private static readonly char[] Breaks = { '\n', '\r', '\t' };
@@ -755,7 +813,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var created = items.Select((item, i) => AgentLayout.NewParagraph("n" + (_snapshot.Inserted.Count + i + 1), texts[i], (string)item["preset_id"],
                 item.TryGetValue("list", out var list) ? (string)list : null, _snapshot.Options, styles)).ToList();
             if ((string)args["position"] == "before") target.AddBeforeSelf(created); else target.AddAfterSelf(created);
-            PublishLayout(candidate, "inserted", created.Select(e => (outline, AgentLayout.KeyOf(e))).ToList());
+            PublishLayout(candidate, "inserted", created.Select(e => (outline, (string)null, AgentLayout.KeyOf(e))).ToList());
             _snapshot.DraftStyles.ReplaceNodes(styles.Elements().Select(e => new XElement(e)));
             _snapshot.Inserted.AddRange(created.Select((e, i) => new AgentInserted { Id = AgentLayout.KeyOf(e), OutlineId = outline, Text = texts[i] }));
             return new { ok = true, draft_revision = _snapshot.Revision, inserted = created.Select(AgentLayout.KeyOf).ToArray() };
@@ -795,13 +853,15 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         /// <summary>结构工具共用的发布：通过不变量检查后换上新的结构草稿并记下改动。结构没有变化时不动修订号，返回 false。</summary>
-        private bool PublishLayout(XElement candidate, string kind, IList<(string Outline, string Id)> changes)
+        private bool PublishLayout(XElement candidate, string kind, IList<(string Outline, string From, string Id)> changes) =>
+            PublishLayout(candidate, changes.GroupBy(c => (c.Outline, c.From)).Select(g =>
+                new AgentLayoutChange { Kind = kind, OutlineId = g.Key.Outline, From = g.Key.From, Ids = g.Select(c => c.Id).ToArray() }));
+        private bool PublishLayout(XElement candidate, IEnumerable<AgentLayoutChange> changes)
         {
             if (XNode.DeepEquals(candidate, _snapshot.Layout)) return false;
             _snapshot.CheckLayout(candidate);
             _snapshot.Layout = candidate;
-            foreach (var group in changes.GroupBy(c => c.Outline))
-                _snapshot.LayoutChanges.Add(new AgentLayoutChange { Kind = kind, OutlineId = group.Key, Ids = group.Select(c => c.Id).ToArray() });
+            _snapshot.LayoutChanges.AddRange(changes);
             _snapshot.Revision++;
             return true;
         }
@@ -831,7 +891,8 @@ namespace OneNoteCodeHelper.Services.Agent
             code_blocks = _snapshot.CodeConversions.Where(c => !c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
             text_tables = _snapshot.CodeConversions.Where(c => c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray() }).ToArray(),
             layout = new { removed = LayoutIds("removed"), moved = LayoutIds("moved"), indented = LayoutIds("indented"),
-                inserted = _snapshot.Inserted.Select(i => new { id = i.Id, text = i.Text }).ToArray() },
+                inserted = _snapshot.Inserted.Select(i => new { id = i.Id, text = i.Text }).ToArray(),
+                merged = _snapshot.LayoutChanges.Where(c => c.Kind == "merged").Select(c => new { from = c.From, into = c.OutlineId }).ToArray() },
             unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
             tables_changed = _snapshot.Tables.Where(t => t.Changed).Select(t => t.Id).ToArray(),
             protected_count = _snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null) };

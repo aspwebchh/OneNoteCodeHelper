@@ -50,6 +50,8 @@ namespace OneNoteCodeHelper.Services
 
         string IOneNotePageAccess.GetPageContent(string pageId, PageInfo info) => GetPageContent(pageId, info);
         void IOneNotePageAccess.UpdatePageContent(string xml, DateTime expectedLastModified) => UpdatePageContent(xml, expectedLastModified);
+        void IOneNotePageAccess.DeletePageContent(string pageId, string objectId, DateTime expectedLastModified) =>
+            Call(() => { _app.DeletePageContent(pageId, objectId, expectedLastModified, false); return true; });
 
         internal OneNoteApi(IApplication application)
         {

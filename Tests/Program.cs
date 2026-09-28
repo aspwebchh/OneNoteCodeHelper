@@ -781,7 +781,7 @@ internal static class Program
             var s = Snapshot(p); var t = Tools(s);
             Rejects("请先完整读取", () => Move(t, s, new[] { "p6" }, "p7", "after"));
             Read(t, s);
-            Rejects("同一个文本框", () => Move(t, s, new[] { "p6" }, "p2", "before"));
+            Rejects("单元格", () => Move(t, s, new[] { "p6" }, "p2", "before"));
             Rejects("不要同时列出", () => Move(t, s, new[] { "p7", "p8" }, "p6", "before"));
             Rejects("下面", () => Move(t, s, new[] { "p7" }, "p8", "after"));
             Rejects("页面标题", () => Move(t, s, new[] { "p6" }, "p1", "after"));
@@ -963,6 +963,139 @@ internal static class Program
             Equal(("插入段落 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("insert_blocks", "{\"paragraphs\":[{},{}]}", "{\"ok\":true}"));
             Equal(("转换为表格 · 4 段", AgentStepState.Done), AgentTools.DescribeStep("text_to_table", "{\"block_ids\":[\"a\",\"b\",\"c\",\"d\"]}", "{\"ok\":true}"));
         });
+        Test("move_blocks moves paragraphs across text boxes in one write and undo restores both boxes", () =>
+        {
+            var s = Snapshot(TwoBoxes()); var t = Tools(s); Read(t, s);
+            True(Json(Move(t, s, new[] { "p3" }, "p2", "after")).Contains("\"changed\":[\"p3\"]"));
+            var overview = Json(Invoke(t, "get_page_overview", new { }));
+            True(overview.Contains("{\"id\":\"p3\",\"container_id\":\"A\"")); True(overview.Contains("{\"container_id\":\"B\",\"structure\":true,\"blocks\":1,\"summary\":\"乙二\"}"));
+            True(Json(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p4" } })).Contains("\"container_id\":\"A\""));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, api.Writes); Equal(1, r.Moved); Equal(2, r.Outlines); Equal(2, r.OutlineUndo.Count);
+            Equal(r.OutlineUndo[0].Group, r.OutlineUndo[1].Group);
+            Equal("甲一|甲二|乙一|乙一细节", BoxTexts(api.Page, "A")); Equal("乙二", BoxTexts(api.Page, "B"));
+            // 本机实测：移到另一个文本框的段落按新对象建立，原 ID 不再出现。
+            True(AgentCommitter.Find(api.Page, "b1") == null && AgentCommitter.Find(api.Page, "a1") != null);
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(2, undo.Outlines);
+            Equal("甲一|甲二", BoxTexts(api.Page, "A")); Equal("乙一|乙一细节|乙二", BoxTexts(api.Page, "B")); True(AgentCommitter.Find(api.Page, "b2") != null);
+        });
+        Test("move_blocks across text boxes rejects table cells and emptying the source box", () =>
+        {
+            var grid = GridPage().Element(One + "Outline").Element(One + "OEChildren").Element(One + "OE");
+            var s = Snapshot(Boxes(Box("A", 100, Paragraph("a", "甲"), grid), Box("B", 300, Paragraph("b", "乙"))));
+            var t = Tools(s); Read(t, s);
+            Rejects("单元格", () => Move(t, s, new[] { "p2" }, "p6", "after"));
+            Rejects("单元格", () => Move(t, s, new[] { "p6" }, "p2", "after"));
+            Rejects("merge_outlines", () => Move(t, s, new[] { "p6" }, "p1", "after"));
+            Equal(0, s.Revision); Equal(0, s.LayoutChanges.Count);
+        });
+        Test("merge_outlines moves a whole box with its table, image and blank line, deletes it and undo rebuilds it", () =>
+        {
+            var s = Snapshot(TwoBoxes(Image("img", "cb-orig"), Paragraph("e", ""), GridPage().Element(One + "Outline").Element(One + "OEChildren").Element(One + "OE")));
+            var t = Tools(s); Read(t, s);
+            var result = Json(Merge(t, s, "B", "p2", "after"));
+            True(result.Contains("\"merged\":\"B\"")); True(result.Contains("\"into\":\"A\""));
+            True(!Json(Invoke(t, "get_page_overview", new { })).Contains("\"container_id\":\"B\""));
+            True(Json(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId })).Contains("\"merged\":[{\"from\":\"B\",\"into\":\"A\"}]"));
+            var api = new FakePage(s.Page); api.Binary["cb-orig"] = "IMAGEDATA";
+            var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.Merged); Equal(2, r.Outlines); Equal(1, api.Writes); Equal(0, api.Deletes); True(r.Message.Contains("合并文本框 1 个"));
+            Equal(1, api.Page.Elements(One + "Outline").Count());
+            Equal("甲一|甲二|乙一|乙一细节|乙二||名称|说明|甲|乙", Texts(api.Page));
+            // 跨框的图片带着数据写入，没有变成坏图。
+            True(api.LastXml.Contains("IMAGEDATA")); Equal("IMAGEDATA", ImageData(api, api.Page));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(2, undo.Outlines); True(undo.Message.Contains("恢复文本框结构 2 个"));
+            var outlines = api.Page.Elements(One + "Outline").ToList();
+            Equal(2, outlines.Count); Equal("A", (string)outlines[0].Attribute("objectID")); True((string)outlines[1].Attribute("objectID") != "B");
+            Equal("甲一|甲二", BoxTexts(api.Page, "A")); Equal("乙一|乙一细节|乙二||名称|说明|甲|乙", BoxTexts(api.Page, (string)outlines[1].Attribute("objectID")));
+            Equal("300", (string)outlines[1].Element(One + "Position").Attribute("y")); Equal("IMAGEDATA", ImageData(api, api.Page));
+        });
+        Test("merging the upper box into the lower one: OneNote orders the rebuilt box by position and undo still verifies", () =>
+        {
+            var s = Snapshot(TwoBoxes()); var t = Tools(s); Read(t, s);
+            Merge(t, s, "A", "p5", "after");
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal("乙一|乙一细节|乙二|甲一|甲二", Texts(api.Page)); Equal("B", (string)api.Page.Elements(One + "Outline").Single().Attribute("objectID"));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal("甲一|甲二|乙一|乙一细节|乙二", Texts(api.Page));
+            Equal("B", (string)api.Page.Elements(One + "Outline").Last().Attribute("objectID"));
+        });
+        Test("merge_outlines rejects same box, protected or missing sources, cell targets and unselected paragraphs", () =>
+        {
+            var grid = GridPage().Element(One + "Outline").Element(One + "OEChildren").Element(One + "OE");
+            var ink = Box("C", 500, Paragraph("c", "丙"), new XElement(One + "OE", new XAttribute("objectID", "ink"), new XElement(One + "InkDrawing")));
+            var p = Boxes(Box("A", 100, Paragraph("a", "甲"), grid), Box("B", 300, Paragraph("b", "乙"), Paragraph("b2", "乙二")), ink);
+            p.AddFirst(new XElement(One + "Title", new XAttribute("objectID", "title"), Paragraph("title-p", "标题")));
+            var s = Snapshot(p); var t = Tools(s); Read(t, s);
+            // p1 标题；p2 甲；p3–p6 表格；p7 乙；p8 乙二；p9 丙
+            Rejects("源文本框里", () => Merge(t, s, "B", "p7", "after"));
+            Rejects("受到保护", () => Merge(t, s, "C", "p2", "after"));
+            Rejects("不存在", () => Merge(t, s, "title", "p2", "after"));
+            Rejects("受保护的文本框", () => Merge(t, s, "B", "p9", "after"));
+            Rejects("页面标题", () => Merge(t, s, "B", "p1", "after"));
+            Rejects("单元格", () => Merge(t, s, "B", "p3", "after"));
+            Equal(0, s.Revision);
+            Merge(t, s, "B", "p2", "after");
+            Rejects("已经合并", () => Merge(t, s, "B", "p2", "after"));
+            var selected = new AgentPageSnapshot(TwoBoxes().ToString(), new HashSet<string> { "a1", "b1" }, new AgentOptions());
+            var st = Tools(selected); Read(st, selected);
+            Rejects("没选中", () => Merge(st, selected, "B", "p1", "after"));
+        });
+        Test("changes follow paragraphs into the merged box: text tables, table looks, styles and list removal", () =>
+        {
+            var grid = GridPage().Element(One + "Outline").Element(One + "OEChildren").Element(One + "OE");
+            var s = Snapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("r1", "名称\t说明"), Paragraph("r2", "甲\t乙"), Listed("l", "列表项", "2"), grid)));
+            var t = Tools(s); Read(t, s);
+            // p1 甲；p2、p3 两行文字；p4 列表项；p5–p8 表格
+            Table(t, s, "tab", "p2", "p3");
+            Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p4" }, list = "none" });
+            Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p4" }, preset_id = "quote" });
+            Invoke(t, "set_table_style", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" }, style = new { borders = false } });
+            Merge(t, s, "B", "p1", "after");
+            var api = new FakePage(s.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.TextTables); Equal(1, r.Tables); Equal(1, r.Applied); Equal(1, r.Merged);
+            var tables = api.Page.Descendants(One + "Table").ToList();
+            Equal(2, tables.Count); True(tables.All(x => x.Ancestors(One + "Outline").Single().Attribute("objectID").Value == "A"));
+            True(!TableLook.Flag(tables[1], "bordersVisible")); Equal("none", AgentMarks.ListKind(api.Page.Descendants(One + "OE").First(e => AgentCode.PlainText(e) == "列表项")));
+        });
+        Test("a user edit in either linked box skips the whole group; undo skips a group edited afterwards", () =>
+        {
+            var s = Snapshot(TwoBoxes()); var t = Tools(s); Read(t, s);
+            Move(t, s, new[] { "p3" }, "p2", "after"); Style(t, s);
+            var api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "b2").Element(One + "T").Value = "用户改了乙二";
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("PartiallyApplied", r.Status); Equal(0, r.Moved); Equal(1, r.Applied); True(r.ConflictIds.Contains("p3")); Equal(0, r.OutlineUndo.Count);
+            Equal("甲一|甲二", BoxTexts(api.Page, "A")); Equal("乙一|乙一细节|用户改了乙二", BoxTexts(api.Page, "B"));
+            var merged = Snapshot(TwoBoxes()); var mt = Tools(merged); Read(mt, merged); Merge(mt, merged, "B", "p2", "after");
+            var mapi = new FakePage(merged.Page); var c = new AgentCommitter(mapi); var done = c.Commit(merged, CancellationToken.None);
+            Equal("Verified", done.Status);
+            AgentCommitter.Find(mapi.Page, "a1").Element(One + "T").Value = "之后改过";
+            var writes = mapi.Writes;
+            var undo = c.Undo(merged.PageId, done, merged.Options, CancellationToken.None);
+            Equal("NoChange", undo.Status); Equal(2, undo.Conflicts); Equal(writes, mapi.Writes); Equal(1, mapi.Page.Elements(One + "Outline").Count());
+        });
+        Test("a merged box OneNote keeps is deleted afterwards; if that fails a blank line stays and undo still restores it", () =>
+        {
+            var kept = Snapshot(TwoBoxes()); var kt = Tools(kept); Read(kt, kept); Merge(kt, kept, "B", "p2", "after");
+            var kapi = new FakePage(kept.Page) { KeepEmptyOutlines = true }; var kr = new AgentCommitter(kapi).Commit(kept, CancellationToken.None);
+            Equal("Verified", kr.Status); Equal(1, kapi.Deletes); Equal(1, kapi.Page.Elements(One + "Outline").Count()); True(kr.OutlineUndo.Any(u => u.Deleted));
+            var s = Snapshot(TwoBoxes()); var t = Tools(s); Read(t, s); Merge(t, s, "B", "p2", "after");
+            var api = new FakePage(s.Page) { KeepEmptyOutlines = true, DeleteConflicts = 5 }; var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("PartiallyApplied", r.Status); Equal(1, r.Leftover); True(r.Message.Contains("没能删掉"));
+            Equal("", BoxTexts(api.Page, "B")); Equal("甲一|甲二|乙一|乙一细节|乙二", BoxTexts(api.Page, "A"));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal("甲一|甲二", BoxTexts(api.Page, "A")); Equal("乙一|乙一细节|乙二", BoxTexts(api.Page, "B"));
+        });
+        Test("merge_outlines needs two editable boxes and the move switch; step description", () =>
+        {
+            True(Json(Tools(Snapshot(TwoBoxes())).Definitions).Contains("merge_outlines")); True(AgentRunner.SystemPrompt(Tools(Snapshot(TwoBoxes()))).Contains("merge_outlines"));
+            True(!Json(Tools(Snapshot()).Definitions).Contains("merge_outlines"));
+            var off = Tools(new AgentPageSnapshot(TwoBoxes().ToString(), null, new AgentOptions { EnableMoves = false }));
+            True(!Json(off.Definitions).Contains("merge_outlines")); True(!Json(off.Definitions).Contains("move_blocks")); True(!AgentRunner.SystemPrompt(off).Contains("merge_outlines"));
+            Equal(("合并文本框 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"]}"));
+        });
         Console.WriteLine($"Agent: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
     }
@@ -992,6 +1125,25 @@ internal static class Program
     /// <summary>页面上各文字段落的纯文字，按页面顺序用 | 连接。</summary>
     private static string Texts(XElement page) => string.Join("|", page.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).Select(AgentCode.PlainText));
     private static string Ids(XElement page) => string.Join(",", page.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")));
+    /// <summary>几个文本框组成的页面。</summary>
+    private static XElement Boxes(params XElement[] outlines) => new XElement(One + "Page", new XAttribute("ID", "page"), new XAttribute("lastModifiedTime", "2026-09-26T00:00:00Z"), outlines);
+    private static XElement Box(string id, int y, params XElement[] paragraphs) => new XElement(One + "Outline", new XAttribute("objectID", id),
+        new XElement(One + "Position", new XAttribute("x", "36"), new XAttribute("y", y), new XAttribute("z", "0")),
+        new XElement(One + "Size", new XAttribute("width", "400"), new XAttribute("height", "100")), new XElement(One + "OEChildren", paragraphs));
+    /// <summary>上面的文本框 A：甲一、甲二（p1、p2）；下面的 B：乙一带下级乙一细节、乙二（p3–p5），再接 extra。</summary>
+    private static XElement TwoBoxes(params XElement[] extra)
+    {
+        var b1 = Paragraph("b1", "乙一"); b1.Add(new XElement(One + "OEChildren", Paragraph("b1c", "乙一细节")));
+        return Boxes(Box("A", 100, Paragraph("a1", "甲一"), Paragraph("a2", "甲二")), Box("B", 300, new[] { b1, Paragraph("b2", "乙二") }.Concat(extra).ToArray()));
+    }
+    private static string BoxTexts(XElement page, string outlineId) => Texts(page.Elements(One + "Outline").Single(o => (string)o.Attribute("objectID") == outlineId));
+    private static XElement Image(string id, string callback) => new XElement(One + "OE", new XAttribute("objectID", id), new XElement(One + "Image",
+        new XElement(One + "Size", new XAttribute("width", "16"), new XAttribute("height", "16")), new XElement(One + "CallbackID", new XAttribute("callbackID", callback))));
+    /// <summary>页面上唯一一张图片的数据；坏图返回 null。</summary>
+    private static string ImageData(FakePage api, XElement page) =>
+        api.Binary.TryGetValue((string)page.Descendants(One + "Image").Single().Element(One + "CallbackID").Attribute("callbackID"), out var data) ? data : null;
+    private static object Merge(AgentTools tools, AgentPageSnapshot s, string source, string target, string position) =>
+        Invoke(tools, "merge_outlines", new { snapshot_id = s.SnapshotId, source_id = source, target_id = target, position });
     private static object Move(AgentTools tools, AgentPageSnapshot s, string[] ids, string target, string position) =>
         Invoke(tools, "move_blocks", new { snapshot_id = s.SnapshotId, block_ids = ids, target_id = target, position });
     private static object Indent(AgentTools tools, AgentPageSnapshot s, string direction, params string[] ids) =>
@@ -1053,18 +1205,54 @@ internal static class Program
         internal Action OnConflict, AfterSave;
         /// <summary>最近一次提交的 XML。</summary>
         internal string LastXml;
+        /// <summary>DeletePageContent 的次数；DeleteConflicts 大于 0 时先按时间戳冲突失败这么多次。</summary>
+        internal int Deletes, DeleteConflicts;
+        /// <summary>本机实测：写入只剩一行空白的文本框时 OneNote 直接删掉它。设为 true 模拟留着不删的情况。</summary>
+        internal bool KeepEmptyOutlines;
+        /// <summary>图片数据：CallbackID → one:Data。piBinaryData 读取时换成数据，找不到数据的坏图整个不出现（本机实测）。</summary>
+        internal readonly Dictionary<string, string> Binary = new Dictionary<string, string>();
         private int _ids;
         internal FakePage(XElement page) { Page = new XElement(page); }
         /// <summary>直接提交快照里的草稿，返回写入后的页面。</summary>
         internal XElement Commit(AgentPageSnapshot snapshot) { new AgentCommitter(this).Commit(snapshot, CancellationToken.None); return Page; }
         public string GetPageContent(string id, PageInfo info)
-        { if (FailReadAfterSave && Writes > 0) throw new Exception("read failed"); return Page.ToString(); }
+        {
+            if (FailReadAfterSave && Writes > 0) throw new Exception("read failed");
+            if (info != PageInfo.piBinaryData) return Page.ToString();
+            var copy = new XElement(Page);
+            foreach (var image in copy.Descendants(One + "Image").ToList())
+            {
+                var callback = (string)image.Element(One + "CallbackID")?.Attribute("callbackID");
+                if (callback == null || !Binary.TryGetValue(callback, out var data)) { image.Remove(); continue; }
+                image.Element(One + "CallbackID").ReplaceWith(new XElement(One + "Data", data));
+            }
+            return copy.ToString();
+        }
+        public void DeletePageContent(string pageId, string objectId, DateTime expected)
+        {
+            True(expected == AgentPageSnapshot.Modified(Page));
+            if (DeleteConflicts-- > 0) throw new COMException("conflict", unchecked((int)0x80042010));
+            Page.Elements().Single(e => (string)e.Attribute("objectID") == objectId).Remove();
+            Deletes++; Page.SetAttributeValue("lastModifiedTime", DateTime.UtcNow.AddSeconds(Deletes).ToString("o", CultureInfo.InvariantCulture));
+        }
         public void UpdatePageContent(string xml, DateTime expected)
         {
             Attempts++; True(expected != DateTime.MinValue); LastXml = xml;
             if (ConflictsRemaining-- > 0) { OnConflict?.Invoke(); throw new COMException("conflict", unchecked((int)0x80042010)); }
+            var homes = AgentLayout.Homes(Page);
             foreach (var c in XElement.Parse(xml).Elements())
             {
+                // 本机实测：移到另一个文本框的对象一律按新对象建立，带着原 ID 也一样。
+                var container = (string)c.Attribute("objectID") ?? c.Name.LocalName;
+                foreach (var e in c.Descendants().Where(e => e.Attribute("objectID") != null && homes.TryGetValue((string)e.Attribute("objectID"), out var home) && home != container))
+                    e.Attribute("objectID").Remove();
+                // 图片带数据的存下数据；新建段落里只带 CallbackID 的图片没有数据，成了坏图。
+                foreach (var image in c.Descendants(One + "Image"))
+                {
+                    var data = (string)image.Element(One + "Data");
+                    if (data != null) { var callback = "cb-" + ++_ids; Binary[callback] = data; image.Element(One + "Data").ReplaceWith(new XElement(One + "CallbackID", new XAttribute("callbackID", callback))); }
+                    else if (image.Parent?.Attribute("objectID") == null) image.Element(One + "CallbackID")?.SetAttributeValue("callbackID", "broken-" + ++_ids);
+                }
                 // 本机实测：已有段落省略 List 时 OneNote 保留原来的列表，只有重建的段落才没有列表。
                 foreach (var oe in c.DescendantsAndSelf(One + "OE").Where(e => e.Attribute("objectID") != null && e.Element(One + "List") == null))
                 {
@@ -1072,16 +1260,24 @@ internal static class Program
                     if (list != null) oe.AddFirst(new XElement(list));
                 }
                 // OneNote 给新建的段落、表格分配 ID。
-                foreach (var e in c.DescendantsAndSelf().Where(e => new[] { "OE", "Table", "Row", "Cell" }.Contains(e.Name.LocalName) && e.Attribute("objectID") == null))
+                var fresh = c.Name == One + "Outline" && c.Attribute("objectID") == null;
+                foreach (var e in c.DescendantsAndSelf().Where(e => new[] { "Outline", "OE", "Table", "Row", "Cell" }.Contains(e.Name.LocalName) && e.Attribute("objectID") == null))
                     e.SetAttributeValue("objectID", "new-" + ++_ids);
                 var identity = c.Name == One + "QuickStyleDef" || c.Name == One + "TagDef" ? "index" : "objectID";
                 var current = Page.Elements(c.Name).FirstOrDefault(e => (string)e.Attribute(identity) == (string)c.Attribute(identity));
-                if (current == null) Page.Add(new XElement(c)); else current.ReplaceWith(new XElement(c));
+                // 本机实测：新建的文本框按位置排进页面 XML。
+                var below = fresh ? Page.Elements(One + "Outline").FirstOrDefault(o => Top(o) > Top(c)) : null;
+                if (below != null) below.AddBeforeSelf(new XElement(c));
+                else if (current == null) Page.Add(new XElement(c)); else current.ReplaceWith(new XElement(c));
+                var written = Page.Elements(c.Name).FirstOrDefault(e => (string)e.Attribute("objectID") == (string)c.Attribute("objectID"));
+                if (!KeepEmptyOutlines && c.Name == One + "Outline" && written != null && written.Descendants(One + "OE").Count() == 1 && AgentCode.PlainText(written.Descendants(One + "OE").Single()) == "")
+                    written.Remove();
             }
             Writes++; Page.SetAttributeValue("lastModifiedTime", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
             AfterSave?.Invoke();
             if (ThrowAfterSave) throw new COMException("uncertain");
         }
+        private static double Top(XElement outline) => (double?)outline.Element(One + "Position")?.Attribute("y") ?? 0;
     }
     private sealed class StubHttp : HttpMessageHandler
     {

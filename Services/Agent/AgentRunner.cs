@@ -32,7 +32,9 @@ namespace OneNoteCodeHelper.Services.Agent
         internal const string BlankLinePrompt = "用户要求整理、美化排版或删空行时，可以用 remove_blank_lines 删多余的空行：一般用 collapse（连续空行留一行，删掉文本框首尾的空行），" +
             "只有用户要求删掉全部空行时才用 all。";
         internal const string IndentPrompt = "用户明确要求调整缩进或层级时用 set_indent；不要为了排版美观自行调整层级。";
-        internal const string MovePrompt = "用户明确要求调整段落顺序时用 move_blocks；不要自行重排内容。";
+        internal const string MovePrompt = "用户明确要求调整段落顺序、或把段落挪到另一个文本框时用 move_blocks；不要自行重排内容。";
+        internal const string MergePrompt = "用户明确要求把整个文本框并入另一个文本框时用 merge_outlines，它会删掉空了的源文本框；只挪一部分段落用 move_blocks。" +
+            "文本框见 get_page_overview 的 outlines；不要自行合并文本框。";
         internal const string InsertPrompt = "用户明确要求添加摘要、目录或小标题时用 insert_blocks 插入新段落，内容要忠于原文、简短；不要用它复制、改写或替换原有段落。";
         internal const string TextTablePrompt = "用户明确要求把用制表符或竖线分隔的段落整理成表格时，先 read_blocks 再用 text_to_table，一组连续的行调用一次。";
         internal const string LayoutPrompt = "结构调整也只改草稿，之后用 get_page_overview 查看新的段落顺序和层级；新插入的段落 ID 为 n1、n2…。";
@@ -49,9 +51,10 @@ namespace OneNoteCodeHelper.Services.Agent
             if (tools.Has("remove_blank_lines")) prompt.Append(BlankLinePrompt);
             if (tools.Has("set_indent")) prompt.Append(IndentPrompt);
             if (tools.Has("move_blocks")) prompt.Append(MovePrompt);
+            if (tools.Has("merge_outlines")) prompt.Append(MergePrompt);
             if (tools.Has("insert_blocks")) prompt.Append(InsertPrompt);
             if (tools.Has("text_to_table")) prompt.Append(TextTablePrompt);
-            if (new[] { "remove_blank_lines", "set_indent", "move_blocks", "insert_blocks" }.Any(tools.Has)) prompt.Append(LayoutPrompt);
+            if (new[] { "remove_blank_lines", "set_indent", "move_blocks", "merge_outlines", "insert_blocks" }.Any(tools.Has)) prompt.Append(LayoutPrompt);
             return prompt.ToString();
         }
 
@@ -131,7 +134,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             {
                                 AddInLog.Info($"Agent 完成：工具 {count} 次，修改 {tools.Report.Applied}，修正文字 {tools.Report.TextFixes.Count}，代码框 {tools.Report.CodeBlocks}，" +
                                     $"表格 {tools.Report.Tables}，转表格 {tools.Report.TextTables}，删空行 {tools.Report.Removed}，移动 {tools.Report.Moved}，缩进 {tools.Report.Indented}，" +
-                                    $"插入 {tools.Report.Inserted}，冲突 {tools.Report.Conflicts}，未验证 {tools.Report.Unverified}。");
+                                    $"插入 {tools.Report.Inserted}，合并文本框 {tools.Report.Merged}，冲突 {tools.Report.Conflicts}，未验证 {tools.Report.Unverified}。");
                                 return tools.Report;
                             }
                         }
