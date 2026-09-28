@@ -257,30 +257,73 @@ namespace OneNoteCodeHelper.Services.Agent
         private static string[] Languages => new[] { LanguageRegistry.AutoDetectId }.Concat(LanguageRegistry.All.Select(l => l.Id)).ToArray();
 
         /// <summary>工具在进度和步骤列表里的中文名。</summary>
-        internal static string DisplayName(string name)
+        private static readonly Dictionary<string, string> ToolNames = new Dictionary<string, string>
         {
-            switch (name)
+            ["get_page_overview"] = "读取页面概况",
+            ["read_blocks"] = "读取段落",
+            ["set_paragraph_style"] = "设置段落样式",
+            ["set_text_style"] = "设置重点文字样式",
+            ["fix_text"] = "修正错别字",
+            ["set_list"] = "设置列表",
+            ["set_tag"] = "设置标记",
+            ["set_table_style"] = "设置表格样式",
+            ["read_image_text"] = "读取图片文字",
+            ["highlight_code"] = "高亮代码",
+            ["remove_blank_lines"] = "删除空行",
+            ["set_indent"] = "调整缩进",
+            ["move_blocks"] = "移动段落",
+            ["merge_outlines"] = "合并文本框",
+            ["insert_blocks"] = "插入段落",
+            ["text_to_table"] = "转换为表格",
+            ["get_pending_changes"] = "检查格式草稿",
+            ["finish_edit"] = "写回并验证"
+        };
+
+        internal static string DisplayName(string name) => name != null && ToolNames.TryGetValue(name, out var text) ? text : "校验工具请求";
+
+        /// <summary>
+        /// 模型思考时常夹带的工具参数、返回字段里的英文词，换成窗口里的说法。
+        /// 只收意思明确的；换不了的英文词留着，由 <see cref="LiveText.Gist"/> 把整句过滤掉。
+        /// </summary>
+        private static readonly Dictionary<string, string> ThoughtTerms = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["page_title"] = "页面标题", ["heading1"] = "一级标题", ["heading2"] = "二级标题", ["heading"] = "标题", ["headings"] = "标题",
+            ["body"] = "正文", ["quote"] = "引用", ["preset"] = "预设样式", ["preset_id"] = "预设样式", ["style"] = "样式", ["styles"] = "样式",
+            ["block"] = "段落", ["blocks"] = "段落", ["block_id"] = "段落", ["block_ids"] = "段落", ["paragraph"] = "段落", ["paragraphs"] = "段落",
+            ["outline"] = "文本框", ["outlines"] = "文本框", ["container_id"] = "文本框",
+            ["table"] = "表格", ["tables"] = "表格", ["image"] = "图片", ["images"] = "图片",
+            ["draft"] = "草稿", ["draft_revision"] = "草稿版本", ["bullet"] = "项目符号", ["todo"] = "待办", ["tag"] = "标记", ["list"] = "列表",
+            ["indent"] = "缩进", ["spacing"] = "间距", ["font"] = "字体", ["unhighlighted_code"] = "未高亮的代码", ["highlighted_code"] = "已有代码框"
+        };
+
+        /// <summary>段落、表格、图片和新插入段落的 ID（p3、t1、i2、n1），前后可能带着「第」「段」。</summary>
+        private static readonly System.Text.RegularExpressions.Regex ThoughtId = new System.Text.RegularExpressions.Regex(
+            @"(?:第\s*)?(?<![A-Za-z0-9_])(?<kind>[ptin])(?<from>\d+)(?:\s*(?:-|–|—|~|～|到|至)\s*\k<kind>?(?<to>\d+))?(?![A-Za-z0-9_])(?:\s*(?:段落|段|个表格|表格|张图片|图片))?");
+
+        private static readonly System.Text.RegularExpressions.Regex ThoughtWord = new System.Text.RegularExpressions.Regex(
+            @"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_]*(?![A-Za-z0-9_])");
+
+        /// <summary>
+        /// 思考摘录里的工具名、预设名和段落 ID 换成中文（见 <see cref="LiveText.Gist"/>）：
+        /// 「用 set_paragraph_style 把 p3 设为 heading2」→「用「设置段落样式」把第 3 段设为二级标题」。
+        /// </summary>
+        internal static string LocalizeThought(string text)
+        {
+            text = ThoughtId.Replace(text, m =>
             {
-                case "get_page_overview": return "读取页面概况";
-                case "read_blocks": return "读取段落";
-                case "set_paragraph_style": return "设置段落样式";
-                case "set_text_style": return "设置重点文字样式";
-                case "fix_text": return "修正错别字";
-                case "set_list": return "设置列表";
-                case "set_tag": return "设置标记";
-                case "set_table_style": return "设置表格样式";
-                case "read_image_text": return "读取图片文字";
-                case "highlight_code": return "高亮代码";
-                case "remove_blank_lines": return "删除空行";
-                case "set_indent": return "调整缩进";
-                case "move_blocks": return "移动段落";
-                case "merge_outlines": return "合并文本框";
-                case "insert_blocks": return "插入段落";
-                case "text_to_table": return "转换为表格";
-                case "get_pending_changes": return "检查格式草稿";
-                case "finish_edit": return "写回并验证";
-                default: return "校验工具请求";
-            }
+                var number = m.Groups["from"].Value + (m.Groups["to"].Success ? "–" + m.Groups["to"].Value : "");
+                switch (m.Groups["kind"].Value)
+                {
+                    case "p": return $"第 {number} 段";
+                    case "t": return $"第 {number} 个表格";
+                    case "i": return $"第 {number} 张图片";
+                    default: return $"新插入的第 {number} 段";
+                }
+            });
+            return ThoughtWord.Replace(text, m =>
+                ToolNames.TryGetValue(m.Value, out var tool) ? "「" + tool + "」"
+                : ThoughtTerms.TryGetValue(m.Value, out var term) ? term
+                : m.Value);
         }
 
         /// <summary>

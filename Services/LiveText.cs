@@ -8,8 +8,8 @@ namespace OneNoteCodeHelper.Services
 {
     /// <summary>
     /// 等模型时在 Agent 窗口里显示的实时文字：从思考（或回复）原文里挑出最新的几句核心内容。
-    /// 直接截原文末尾总是半句，夹着 Markdown 符号和代码片段，每次刷新还都在跳；
-    /// 这里只要说完的整句，去掉标记、代码和语气词，说完新的一句才换。只在窗口里显示，不写日志。
+    /// 直接截原文末尾总是半句，夹着 Markdown 符号、代码片段和英文，每次刷新还都在跳；
+    /// 这里只要说完的中文整句，去掉标记、代码和语气词，说完新的一句才换。只在窗口里显示，不写日志。
     /// </summary>
     internal static class LiveText
     {
@@ -53,11 +53,18 @@ namespace OneNoteCodeHelper.Services
             RegexOptions.IgnoreCase);
 
         /// <summary>
+        /// 小写开头的英文单词（format、check、style…）和 snake_case 标识符。句子里有这些就算中英混杂，不显示；
+        /// 大写开头的专有名词（Python、JSON、OneNote）和数字后面的单位（11pt）不算。
+        /// </summary>
+        private static readonly Regex EnglishWord = new Regex(@"(?<![A-Za-z0-9_])(?:[a-z][A-Za-z]*|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*)");
+
+        /// <summary>
         /// 最新的几句核心内容：句与句换行，最新的在最下面，合起来不超过摘录框的三行。
         /// 没有可显示的句子时返回 null，调用方留着上一次的，摘录框不闪。
         /// finished 表示这段文字已经收完（模型开始回复或调用工具了），最后一句没有句末标点也算说完。
+        /// localize 先把句子里认得的英文词（工具名、段落 ID 之类）换成中文，再判断是不是中英混杂。
         /// </summary>
-        internal static string Gist(StringBuilder text, bool finished)
+        internal static string Gist(StringBuilder text, bool finished, Func<string, string> localize = null)
         {
             if (text == null || text.Length == 0)
             {
@@ -66,7 +73,7 @@ namespace OneNoteCodeHelper.Services
 
             var take = Math.Min(text.Length, GistWindow);
             var sentences = Sentences(text.ToString(text.Length - take, take), take < text.Length, finished)
-                .Select(Clean)
+                .Select(s => Clean(s, localize))
                 .Where(s => s != null)
                 .ToList();
             if (sentences.Count == 0)
@@ -179,12 +186,24 @@ namespace OneNoteCodeHelper.Services
             return Stops.IndexOf(line[j]) >= 0;
         }
 
-        /// <summary>去掉行内标记和句首语气词；太短、空话、像代码的句子返回 null。</summary>
-        private static string Clean(string sentence)
+        /// <summary>去掉行内标记和句首语气词，换掉认得的英文词；太短、空话、像代码、不是中文或中英混杂的句子返回 null。</summary>
+        private static string Clean(string sentence, Func<string, string> localize)
         {
             var text = Spaces.Replace(InlineMarker.Replace(sentence, ""), " ").Trim();
             text = Filler.Replace(text, "").Trim();
-            return Weight(text) < MinWeight || Hollow.IsMatch(text) || LooksLikeCode(text) ? null : text;
+            if (localize != null)
+            {
+                text = localize(text);
+            }
+
+            text = CloseWideGaps(text);
+            return Weight(text) < MinWeight || Hollow.IsMatch(text) || LooksLikeCode(text) || !ReadsAsChinese(text) ? null : text;
+        }
+
+        /// <summary>有汉字，也没有夹着英文小写单词或标识符（见 <see cref="EnglishWord"/>）。整句英文的思考不显示。</summary>
+        private static bool ReadsAsChinese(string text)
+        {
+            return text.Any(c => IsWide(c) && char.IsLetter(c)) && !EnglishWord.IsMatch(text);
         }
 
         private static bool LooksLikeCode(string text)
@@ -209,11 +228,39 @@ namespace OneNoteCodeHelper.Services
             return text.Sum(c => char.IsLowSurrogate(c) ? 0 : IsWide(c) ? 2 : 1);
         }
 
+        /// <summary>中日韩文字、全角标点和符号，以及表情（高位代理）。</summary>
         private static bool IsWide(char c)
         {
-            return (c >= '⺀' && c <= '꓏') || (c >= '가' && c <= '힣') || (c >= '豈' && c <= '﫿') ||
-                   (c >= '︰' && c <= '﹏') || (c >= '＀' && c <= '｠') || (c >= '￠' && c <= '￦') ||
+            return (c >= 0x2E80 && c <= 0xA4CF) || (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF) ||
+                   (c >= 0xFE30 && c <= 0xFE4F) || (c >= 0xFF00 && c <= 0xFF60) || (c >= 0xFFE0 && c <= 0xFFE6) ||
                    char.IsHighSurrogate(c);
+        }
+
+        /// <summary>去掉两个全角字符之间的空白。英文词换成中文以后常留下这种空格：「把 第 3 段 设为」。</summary>
+        private static string CloseWideGaps(string text)
+        {
+            var result = new StringBuilder(text.Length);
+            for (var i = 0; i < text.Length; i++)
+            {
+                if (char.IsWhiteSpace(text[i]) && result.Length > 0 && IsWide(result[result.Length - 1]))
+                {
+                    var next = i;
+                    while (next < text.Length && char.IsWhiteSpace(text[next]))
+                    {
+                        next++;
+                    }
+
+                    if (next < text.Length && IsWide(text[next]))
+                    {
+                        i = next - 1;
+                        continue;
+                    }
+                }
+
+                result.Append(text[i]);
+            }
+
+            return result.ToString();
         }
 
         /// <summary>从头保留不超过 maxUnits 的宽度，末尾加省略号。截断点落在高位代理上，整个字一起去掉。</summary>

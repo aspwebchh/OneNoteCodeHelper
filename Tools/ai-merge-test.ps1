@@ -239,11 +239,24 @@ Assert-Equal '外包代码块、直接给数组、changes 写成单个字符串'
     (Invoke-Peek @('```json' + "`n" + '[{"id":3,"text":"t","changes":"单条说明"}]' + "`n" + '```')) '1|单条说明'
 Assert-Equal '没有修改' (Invoke-Peek @('{"paragraphs":[]}')) '0|'
 
-Assert-Equal '摘录：空行去掉，行尾空白去掉' (Invoke-Diag 'LiveTextExcerpt' @("第一行`n`n  `n第二行  ", 160)) "第一行`n第二行"
-Assert-Equal '摘录：截断后从空白后开始，加省略号' (Invoke-Diag 'LiveTextExcerpt' @('abc def ghi jkl', 9)) '…ghi jkl'
-Assert-Equal '摘录：找不到断点就直接截' (Invoke-Diag 'LiveTextExcerpt' @('一二三四五六七八九十', 4)) '…七八九十'
-Assert-Equal '摘录：很长的思考只看末尾，从标点后开始' (Invoke-Diag 'LiveTextExcerpt' @((('x' * 1000) + '。结尾'), 10)) '…结尾'
-Assert-Equal '摘录：只有空白时不显示' (Invoke-Diag 'LiveTextExcerpt' @("  `n `n", 160)) ''
+function Invoke-Gist([string]$text, [bool]$finished) { Invoke-Diag 'LiveTextGist' @($text, $finished) }
+
+Assert-Equal '摘录：只显示说完的句子' (Invoke-Gist '先读取段落。再确定标题层' $false) '先读取段落。'
+Assert-Equal '摘录：收完后最后一句也算说完' (Invoke-Gist '先读取段落。再确定标题层级' $true) "先读取段落。`n再确定标题层级"
+Assert-Equal '摘录：Markdown 标记去掉，只有标题词的行不显示' `
+    (Invoke-Gist ("## 计划`n- **第 12 段**是标题，设为二级标题。`n") $false) '第 12 段是标题，设为二级标题。'
+Assert-Equal '摘录：JSON、表格行和代码块去掉，数字后的单位保留' `
+    (Invoke-Gist ("正文统一为 11pt 微软雅黑。`n" + '{"id":"p13","style":"heading2"}' + "`n| 列 | 值 |`n" + '```csharp' + "`n" + 'var 标题 = "一级标题";' + "`n" + '```') $true) `
+    '正文统一为 11pt 微软雅黑。'
+Assert-Equal '摘录：整句英文、夹着英文小写单词的句子不显示，大写专有名词保留' `
+    (Invoke-Gist 'The user wants a cleaner page. 需要 check 一下格式。用 Python 高亮这段代码。' $true) '用 Python 高亮这段代码。'
+Assert-Equal '摘录：语气词和空话去掉' (Invoke-Gist '嗯。Wait, 第 3 段其实是代码。让我想想。' $true) '第 3 段其实是代码。'
+Assert-Equal '摘录：放不下三行时只留最新几句' `
+    (Invoke-Gist '第一句话说的是页面结构。第二句话说的是标题层级。第三句话说的是正文字号。第四句话说的是段落间距。' $true) `
+    "第二句话说的是标题层级。`n第三句话说的是正文字号。`n第四句话说的是段落间距。"
+Assert-Equal '摘录：最新一句超过三行时从头截断' (Invoke-Gist (('很' * 100) + '。') $true) (('很' * 86) + '…')
+Assert-Equal '摘录：很长的思考只看末尾，截断的半句丢掉' (Invoke-Gist (('很' * 2000) + '。先读取段落。') $false) '先读取段落。'
+Assert-Equal '摘录：只有空白时不显示' (Invoke-Gist "  `n `n" $false) ''
 
 Write-Host ''
 Write-Host '删多余的空行（排版优化）：'

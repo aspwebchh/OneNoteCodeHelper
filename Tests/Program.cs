@@ -419,6 +419,17 @@ internal static class Program
             Equal(null, log.Items[0].Thinking);
             Equal("模型正在回复…", log.Items.Last().Status); Equal("先读取页面概", log.Items.Last().Thinking);
         });
+        Test("reasoning excerpt names tools and blocks in Chinese and drops English or mixed sentences", () =>
+        {
+            var reply = new AgentReply();
+            reply.ReasoningBuffer.Append("The user wants a cleaner page. 先调用get_page_overview看看结构。\n" +
+                "p3 到 p5 是标题，用 set_paragraph_style 设为 heading2。\n需要 check 一下 draft_revision。\n");
+            Equal("先调用「读取页面概况」看看结构。\n第 3–5 段是标题，用「设置段落样式」设为二级标题。", AgentChatClient.DescribeStream(reply).Thinking);
+            // 收完了（有结束原因），最后一句没有句号也显示；前后的「第」「段落」不重复。
+            var ids = new AgentReply { FinishReason = "stop" };
+            ids.ReasoningBuffer.Append("把 t2 和 i1 移到 n1 后面。第 p4 段和 p7 段落的 style 不同");
+            Equal("把第 2 个表格和第 1 张图片移到新插入的第 1 段后面。\n第 4 段和第 7 段的样式不同", AgentChatClient.DescribeStream(ids).Thinking);
+        });
         Test("SSE wrapper overhead above former 600K limit preserves complete tool call", () =>
         {
             var events = new System.Text.StringBuilder();
