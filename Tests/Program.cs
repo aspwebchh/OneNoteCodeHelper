@@ -897,7 +897,6 @@ internal static class Program
             Rejects("请先完整读取", () => Table(t, s, "tab", "p1", "p2"));
             Read(t, s);
             Rejects("两列", () => Table(t, s, "tab", "p3"));
-            Rejects("段内换行", () => Table(t, s, "tab", "p4"));
             Rejects("连续", () => Table(t, s, "tab", "p1", "p5"));
             Rejects("项目符号", () => Table(t, s, "tab", "p6"));
             Equal(0, s.Revision);
@@ -905,6 +904,46 @@ internal static class Program
             var api = new FakePage(s.Page); Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
             var cells = api.Page.Descendants(One + "Cell").Select(cell => AgentCode.PlainText(cell.Descendants(One + "OE").Single())).ToArray();
             Equal("名称|说明|备注|甲|乙|", string.Join("|", cells));
+        });
+        Test("text_to_table splits space-separated rows, adds a header row and keeps the title paragraph", () =>
+        {
+            var s = Snapshot(Page(Paragraph("t", "远程办公和不关机后端名单"), Paragraph("a", "李云星 10.28.2.16"), Paragraph("b", "尹志远&nbsp;&nbsp;10.28.1.106"),
+                Paragraph("c", "<b>周涛</b>　 10.28.2.46")));
+            var t = Tools(s); Read(t, s);
+            var result = Json(Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2", "p3", "p4" }, delimiter = "space", header = new[] { "姓名", "IP" } }));
+            True(result.Contains("\"rows\":4")); True(result.Contains("\"columns\":2"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.TextTables);
+            var table = api.Page.Descendants(One + "Table").Single();
+            True(TableLook.Flag(table, "hasHeaderRow"));
+            var cells = table.Descendants(One + "Cell").Select(cell => cell.Descendants(One + "OE").Single()).ToList();
+            Equal("姓名|IP|李云星|10.28.2.16|尹志远|10.28.1.106|周涛|10.28.2.46", string.Join("|", cells.Select(AgentCode.PlainText)));
+            True(cells[6].Element(One + "T").Value.Contains("<b>周涛</b>"));
+            Equal("远程办公和不关机后端名单", AgentCode.PlainText(api.Page.Descendants(One + "OE").First()));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); True(!api.Page.Descendants(One + "Table").Any()); Equal(Texts(s.Page), Texts(api.Page));
+        });
+        Test("text_to_table splits Shift+Enter lines and rejects inconsistent space rows or bad headers", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "李云星 10.28.2.16<br>尹志远 10.28.1.106"), Paragraph("b", "名单"), Paragraph("c", "周涛 10.28.2.46"),
+                Paragraph("d", "刘书康 10.28.1.89"), Paragraph("e", "标题<br>姬仁洋 10.28.2.62")));
+            var t = Tools(s); Read(t, s);
+            object Named(string[] header, params string[] ids) =>
+                Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, delimiter = "space", header });
+            Rejects("列数不一致：「名单」", () => Table(t, s, "space", "p2", "p3", "p4"));
+            Rejects("列数不一致：「标题」", () => Table(t, s, "space", "p5"));
+            Rejects("header 的列数", () => Named(new[] { "姓名" }, "p3", "p4"));
+            Rejects("header 的每一项", () => Named(new[] { "姓\t名", "IP" }, "p3", "p4"));
+            Equal(0, s.Revision);
+            var result = Json(Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, delimiter = "space", header_row = false }));
+            True(result.Contains("\"rows\":2")); True(result.Contains("\"columns\":2"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.TextTables);
+            var table = api.Page.Descendants(One + "Table").Single();
+            True(!TableLook.Flag(table, "hasHeaderRow"));
+            Equal("李云星|10.28.2.16|尹志远|10.28.1.106", string.Join("|", table.Descendants(One + "Cell").Select(cell => AgentCode.PlainText(cell.Descendants(One + "OE").Single()))));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); True(!api.Page.Descendants(One + "Table").Any()); Equal(Texts(s.Page), Texts(api.Page));
         });
         Test("structure, format and code conversion in one text box commit together and undo restores all at once", () =>
         {

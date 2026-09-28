@@ -114,34 +114,66 @@ namespace OneNoteCodeHelper.Services.Agent
     }
 
     /// <summary>
-    /// text_to_table：把用制表符或 | 分隔的段落拆成表格，每段一行，空行和 Markdown 分隔行（|---|:--:|）去掉。
-    /// 单元格复制源段落的样式和文字，按范围截取，保留加粗、链接等局部格式。
+    /// text_to_table：把用制表符、| 或空格分隔的文字拆成表格。每行文字成为表格的一行，段内换行（Shift+Enter）分开的行也各成一行；
+    /// 空行和 Markdown 分隔行（|---|:--:|）去掉。单元格复制源段落的样式和文字，按范围截取，保留加粗、链接等局部格式。
+    /// 空格分隔有歧义（单元格里本身可能有空格，标题只拆得出一列），各行列数必须相同；制表符和 | 不足的列补空格。
     /// </summary>
     internal static class AgentTextTable
     {
         internal const int MaxRows = 100;
         internal const int MaxColumns = 10;
-        internal static readonly string[] Delimiters = { "tab", "pipe" };
+        internal const int MaxHeaderChars = 30;
+        internal static readonly string[] Delimiters = { "tab", "pipe", "space" };
+        private static readonly char[] Breaks = { '\n', '\r', '\t' };
         private static XNamespace One => OneNoteApi.One;
 
         /// <param name="paragraphs">按页面顺序排好的源段落（含中间空行）。</param>
         /// <param name="shading">首行底色，null 为不设。</param>
-        internal static XElement Build(IEnumerable<XElement> paragraphs, string delimiter, bool headerRow, bool borders, string shading)
+        /// <param name="header">在首行前新增的列名，null 为不加；个数须等于列数。</param>
+        internal static XElement Build(IEnumerable<XElement> paragraphs, string delimiter, bool headerRow, bool borders, string shading, IList<string> header = null)
         {
-            var rows = new List<List<XElement>>();
+            var lines = new List<(XElement Source, string Text, List<(int Start, int Length)> Ranges)>();
             foreach (var oe in paragraphs)
             {
                 var text = new AgentRichText(oe).Text;
-                if (string.IsNullOrWhiteSpace(text)) continue;
-                if (text.IndexOf('\n') >= 0) throw new AiException("含段内换行（Shift+Enter）的段落不能转换为表格。");
-                var ranges = Split(text, delimiter);
-                if (ranges != null) rows.Add(ranges.Select(r => Cell(oe, r.Start, r.Length)).ToList());
+                // 段内换行（<br>）在文字里是 \n，按它切成行。
+                for (var from = 0; ;)
+                {
+                    var next = text.IndexOf('\n', from);
+                    var to = next < 0 ? text.Length : next;
+                    var line = text.Substring(from, to - from);
+                    var ranges = string.IsNullOrWhiteSpace(line) ? null : Split(text, from, to, delimiter);
+                    if (ranges != null) lines.Add((oe, line.Trim(), ranges));
+                    if (next < 0) break;
+                    from = next + 1;
+                }
             }
-            if (rows.Count == 0) throw new AiException("目标段落里没有可以转换的行。");
-            if (rows.Count > MaxRows) throw new AiException($"表格最多 {MaxRows} 行。");
-            var columns = rows.Max(r => r.Count);
+            if (lines.Count == 0) throw new AiException("目标段落里没有可以转换的行。");
+            if (lines.Count > MaxRows) throw new AiException($"表格最多 {MaxRows} 行。");
+            var columns = lines.Max(l => l.Ranges.Count);
             if (columns < 2) throw new AiException("按指定的分隔符分不出两列，请确认 delimiter。");
             if (columns > MaxColumns) throw new AiException($"表格最多 {MaxColumns} 列。");
+            if (delimiter == "space")
+            {
+                // 以最常见的列数为准，一样多时取列数多的，标题行就是那个例外。
+                var usual = lines.GroupBy(l => l.Ranges.Count).OrderByDescending(g => g.Count()).ThenByDescending(g => g.Key).First().Key;
+                var odd = lines.FirstOrDefault(l => l.Ranges.Count != usual);
+                if (odd.Source != null)
+                    throw new AiException($"按空格拆分后各行列数不一致：「{Excerpt(odd.Text)}」拆出 {odd.Ranges.Count} 列，其他行是 {usual} 列。" +
+                        "标题等不含分隔符的段落不要放进 block_ids；单元格里本身有空格时改用 tab 或 pipe。");
+            }
+            var rows = lines.Select(l => l.Ranges.Select(r => Cell(l.Source, r.Start, r.Length)).ToList()).ToList();
+            if (header != null)
+            {
+                var names = header.Select(h => (h ?? "").Trim()).ToList();
+                if (names.Count != columns) throw new AiException($"header 的列数必须等于表格列数 {columns}。");
+                if (names.Any(n => n.Length == 0 || n.Length > MaxHeaderChars || n.IndexOfAny(Breaks) >= 0))
+                    throw new AiException($"header 的每一项须是 1–{MaxHeaderChars} 字、不含换行和制表符的列名。");
+                // 新增的列名按纯文字转义，段落样式随第一行。
+                var source = lines[0].Source;
+                rows.Insert(0, names.Select(n => new XElement(One + "OE", source.Attribute("style"), source.Attribute("lang"),
+                    new XElement(One + "T", new XCData(OneNoteHtmlEncoder.EncodePlainText(n))))).ToList());
+            }
             // 未锁定的列宽由 OneNote 按内容自动计算（本机实测），width 只是架构要求的占位值。
             var table = new XElement(One + "Table", new XAttribute("bordersVisible", borders ? "true" : "false"), new XAttribute("hasHeaderRow", headerRow ? "true" : "false"),
                 new XElement(One + "Columns", Enumerable.Range(0, columns).Select(i => new XElement(One + "Column", new XAttribute("index", i), new XAttribute("width", 100)))));
@@ -159,11 +191,23 @@ namespace OneNoteCodeHelper.Services.Agent
             return table;
         }
 
-        /// <summary>单元格的文字范围（已去掉两侧空白）。Markdown 分隔行返回 null。</summary>
-        private static List<(int Start, int Length)> Split(string text, string delimiter)
+        /// <summary>一行文字 [start, end) 里各单元格的范围（已去掉两侧空白）。Markdown 分隔行返回 null。</summary>
+        private static List<(int Start, int Length)> Split(string text, int start, int end, string delimiter)
         {
-            var start = 0;
-            var end = text.Length;
+            if (delimiter == "space")
+            {
+                // 连续的空白（含 &nbsp; 和全角空格）算一个分隔。
+                var cells = new List<(int Start, int Length)>();
+                for (var i = start; i < end;)
+                {
+                    while (i < end && char.IsWhiteSpace(text[i])) i++;
+                    if (i == end) break;
+                    var s = i;
+                    while (i < end && !char.IsWhiteSpace(text[i])) i++;
+                    cells.Add((s, i - s));
+                }
+                return cells;
+            }
             var separator = delimiter == "tab" ? '\t' : '|';
             if (separator == '|')
             {
@@ -185,6 +229,8 @@ namespace OneNoteCodeHelper.Services.Agent
             if (separator == '|' && ranges.All(r => IsRule(text.Substring(r.Start, r.Length)))) return null;
             return ranges;
         }
+
+        private static string Excerpt(string text) => text.Length <= 20 ? text : text.Substring(0, 20) + "…";
 
         private static bool IsRule(string cell) => cell.Length > 0 && cell.Contains("-") && cell.All(ch => ch == '-' || ch == ':');
 

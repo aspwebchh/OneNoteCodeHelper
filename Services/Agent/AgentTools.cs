@@ -235,9 +235,14 @@ namespace OneNoteCodeHelper.Services.Agent
                 table.Properties["header_row"] = new AgentSchema { Type = "boolean" };
                 table.Properties["borders"] = new AgentSchema { Type = "boolean" };
                 table.Properties["header_shading"] = AgentSchema.Str(TableLook.Shadings.Concat(new[] { "none" }).ToArray());
+                var header = AgentSchema.Array(AgentSchema.Short(AgentTextTable.MaxHeaderChars));
+                header.MaxItems = AgentTextTable.MaxColumns;
+                table.Properties["header"] = header;
                 table.Required = new[] { "snapshot_id", "block_ids", "delimiter" };
-                Register("text_to_table", "把同一文本框里连续的、用制表符（tab）或竖线（pipe）分隔的段落转成表格：每段一行，中间的空行和 Markdown 分隔行去掉，单元格保留原有文字格式和链接；" +
-                    $"先完整读取有文字的段落。header_row、borders 默认 true，header_shading 是首行底色。最多 {AgentTextTable.MaxRows} 行、{AgentTextTable.MaxColumns} 列。", table, TextToTable);
+                Register("text_to_table", "把同一文本框里连续的、用制表符（tab）、竖线（pipe）或空格（space）分隔的段落转成表格：每行文字一行（段内 Shift+Enter 换行的也各成一行），" +
+                    "中间的空行和 Markdown 分隔行去掉，单元格保留原有文字格式和链接；先完整读取有文字的段落。space 按连续空白拆分，单元格里不能有空格，各行列数必须相同。" +
+                    "标题等不含分隔符的段落不要放进 block_ids。header_row、borders 默认 true，第一行是数据不是列名时 header_row 设为 false；header_shading 是首行底色。" +
+                    $"只有用户要求加表头时才用 header 在首行前新增一行列名，个数等于列数。最多 {AgentTextTable.MaxRows} 行、{AgentTextTable.MaxColumns} 列。", table, TextToTable);
             }
             Register("get_pending_changes", "检查草稿修订号、改动和尚未读取的段落。", SnapshotOnly(), Pending);
             var finish = SnapshotOnly();
@@ -739,7 +744,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 language = language.Id, discarded_format = discarded };
         }
 
-        /// <summary>把用制表符或竖线分隔的连续段落排入草稿，提交时换成表格；和代码框一样整段替换，撤销时换回原段落。</summary>
+        /// <summary>把用制表符、竖线或空格分隔的连续段落排入草稿，提交时换成表格；和代码框一样整段替换，撤销时换回原段落。</summary>
         private object TextToTable(IDictionary<string, object> args)
         {
             var blocks = Ids(args, "block_ids").Select(id => _snapshot.Blocks.FirstOrDefault(b => b.Id == id) ?? throw new AiException("目标不存在。")).ToList();
@@ -755,8 +760,9 @@ namespace OneNoteCodeHelper.Services.Agent
             var selection = AgentCode.Select(_snapshot.Layout, blocks.Select(b => b.ObjectId).ToList(), "表格");
             if (selection.Block.Name == OneNoteApi.One + "Cell") throw new AiException("表格单元格里的段落不能再转换为表格。");
             var shading = args.TryGetValue("header_shading", out var shade) && (string)shade != "none" ? TableLook.Shade((string)shade) : null;
+            var names = args.TryGetValue("header", out var header) ? ((IList)header).Cast<string>().ToList() : null;
             var table = AgentTextTable.Build(selection.Paragraphs, (string)args["delimiter"],
-                !args.TryGetValue("header_row", out var header) || (bool)header, !args.TryGetValue("borders", out var borders) || (bool)borders, shading);
+                !args.TryGetValue("header_row", out var headerRow) || (bool)headerRow, !args.TryGetValue("borders", out var borders) || (bool)borders, shading, names);
             var ordered = selection.Paragraphs.Select(oe => blocks.First(b => b.Id == AgentLayout.KeyOf(oe))).ToList();
             var conversion = new AgentCodeConversion { Blocks = ordered, TextTable = true, Code = selection.Code, Table = table };
             // 转换后这些段落就不在了，之前给它们排的格式和文字修正作废。

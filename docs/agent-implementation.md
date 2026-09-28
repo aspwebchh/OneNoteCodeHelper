@@ -35,7 +35,7 @@
 | `move_blocks` | `snapshot_id`、`block_ids`、`target_id`、`position`（before/after）；连同下级段落按原顺序移到目标前后，成为目标的同级段落。可以移到另一个文本框，单元格里的段落只能在同一单元格里移动，不能把文本框移空。`EnableMoves=false` 时不注册 |
 | `merge_outlines` | `snapshot_id`、`source_id`（源文本框的 container_id）、`target_id`、`position`；源文本框的全部顶层段落（含表格、图片、空行）按顺序移到目标前后，提交时删掉源文本框。目标不能在源文本框或单元格里；只处理选区时源文本框里的文字段落必须都在选区内。`EnableMoves=false` 或可调整结构的文本框少于两个时不注册 |
 | `insert_blocks` | `snapshot_id`、`target_id`、`position`、`paragraphs`（1–20 项，每项 `text` ≤500 字、`preset_id` 为 heading1/heading2/body/quote、可选 `list`）；纯文字按 HTML 转义，每个任务最多 50 段、5000 字，新段落短 ID 为 n1…。`EnableInsert=false` 时不注册 |
-| `text_to_table` | `snapshot_id`、`block_ids`（≤200）、`delimiter`（tab/pipe）、可选 `header_row`、`borders`（默认 true）和 `header_shading`；每段一行，2–10 列、最多 100 行。`EnableTextTables=false` 时不注册 |
+| `text_to_table` | `snapshot_id`、`block_ids`（≤200）、`delimiter`（tab/pipe/space）、可选 `header_row`、`borders`（默认 true）、`header_shading` 和 `header`（首行前新增的列名，个数等于列数，每项 ≤30 字）；每行文字一行（段内 `<br>` 切开的也各成一行），2–10 列、最多 100 行。space 按连续空白（含 `&nbsp;`、全角空格）拆分，各行列数必须相同；tab/pipe 不足的列补空格。`EnableTextTables=false` 时不注册 |
 | `get_pending_changes` | `snapshot_id`；返回草稿修订号、修改段落 ID、已排的文字修正、未完整读取的可编辑段落 ID、已排入的代码框和表格转换、结构改动（删除、移动、缩进、插入）、尚未转换的等宽代码及保护计数 |
 | `finish_edit` | `snapshot_id`、`draft_revision`；必须是当轮唯一工具，修订号匹配后冻结草稿，只提交一次 |
 
