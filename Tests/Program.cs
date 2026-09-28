@@ -911,7 +911,7 @@ internal static class Program
                 Paragraph("c", "<b>周涛</b>　 10.28.2.46")));
             var t = Tools(s); Read(t, s);
             var result = Json(Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2", "p3", "p4" }, delimiter = "space", header = new[] { "姓名", "IP" } }));
-            True(result.Contains("\"rows\":4")); True(result.Contains("\"columns\":2"));
+            True(result.Contains("\"rows\":4")); True(result.Contains("\"columns\":2")); True(result.Contains("\"padded_rows\":0"));
             var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
             Equal("Verified", r.Status); Equal(1, r.TextTables);
             var table = api.Page.Descendants(One + "Table").Single();
@@ -923,25 +923,32 @@ internal static class Program
             var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
             Equal("Verified", undo.Status); True(!api.Page.Descendants(One + "Table").Any()); Equal(Texts(s.Page), Texts(api.Page));
         });
-        Test("text_to_table splits Shift+Enter lines and rejects inconsistent space rows or bad headers", () =>
+        Test("text_to_table pads uneven rows and headers with empty cells", () =>
         {
             var s = Snapshot(Page(Paragraph("a", "李云星 10.28.2.16<br>尹志远 10.28.1.106"), Paragraph("b", "名单"), Paragraph("c", "周涛 10.28.2.46"),
                 Paragraph("d", "刘书康 10.28.1.89"), Paragraph("e", "标题<br>姬仁洋 10.28.2.62")));
             var t = Tools(s); Read(t, s);
-            object Named(string[] header, params string[] ids) =>
-                Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, delimiter = "space", header });
-            Rejects("列数不一致：「名单」", () => Table(t, s, "space", "p2", "p3", "p4"));
-            Rejects("列数不一致：「标题」", () => Table(t, s, "space", "p5"));
-            Rejects("header 的列数", () => Named(new[] { "姓名" }, "p3", "p4"));
+            string Named(string[] header, params string[] ids) =>
+                Json(Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, delimiter = "space", header }));
+            Rejects("两列", () => Table(t, s, "space", "p2"));
             Rejects("header 的每一项", () => Named(new[] { "姓\t名", "IP" }, "p3", "p4"));
             Equal(0, s.Revision);
-            var result = Json(Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, delimiter = "space", header_row = false }));
-            True(result.Contains("\"rows\":2")); True(result.Contains("\"columns\":2"));
+            var plain = Json(Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, delimiter = "space", header_row = false }));
+            True(plain.Contains("\"rows\":2")); True(plain.Contains("\"columns\":2")); True(plain.Contains("\"padded_rows\":0"));
+            // 标题行和少给的列名补空。
+            var titled = Named(new[] { "姓名" }, "p2", "p3", "p4");
+            True(titled.Contains("\"rows\":4")); True(titled.Contains("\"columns\":2")); True(titled.Contains("\"padded_rows\":2"));
+            // 多给的列名加一列，数据行补空。
+            var wider = Named(new[] { "姓名", "IP", "备注" }, "p5");
+            True(wider.Contains("\"rows\":3")); True(wider.Contains("\"columns\":3")); True(wider.Contains("\"padded_rows\":2"));
             var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
-            Equal("Verified", r.Status); Equal(1, r.TextTables);
-            var table = api.Page.Descendants(One + "Table").Single();
-            True(!TableLook.Flag(table, "hasHeaderRow"));
-            Equal("李云星|10.28.2.16|尹志远|10.28.1.106", string.Join("|", table.Descendants(One + "Cell").Select(cell => AgentCode.PlainText(cell.Descendants(One + "OE").Single()))));
+            Equal("Verified", r.Status); Equal(3, r.TextTables);
+            var tables = api.Page.Descendants(One + "Table").ToList();
+            Equal(3, tables.Count); True(!TableLook.Flag(tables[0], "hasHeaderRow"));
+            string Cells(XElement table) => string.Join("|", table.Descendants(One + "Cell").Select(cell => AgentCode.PlainText(cell.Descendants(One + "OE").Single())));
+            Equal("李云星|10.28.2.16|尹志远|10.28.1.106", Cells(tables[0]));
+            Equal("姓名||名单||周涛|10.28.2.46|刘书康|10.28.1.89", Cells(tables[1]));
+            Equal("姓名|IP|备注|标题|||姬仁洋|10.28.2.62|", Cells(tables[2]));
             var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
             Equal("Verified", undo.Status); True(!api.Page.Descendants(One + "Table").Any()); Equal(Texts(s.Page), Texts(api.Page));
         });

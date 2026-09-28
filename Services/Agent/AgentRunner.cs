@@ -38,7 +38,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal const string InsertPrompt = "用户明确要求添加摘要、目录或小标题时用 insert_blocks 插入新段落，内容要忠于原文、简短；不要用它复制、改写或替换原有段落。";
         internal const string TextTablePrompt = "用户明确要求把段落整理成表格时，先 read_blocks 再用 text_to_table，按内容选 delimiter：制表符用 tab，竖线用 pipe，" +
             "单元格里没有空格的空格分隔内容用 space；标题等不含分隔符的段落不要放进 block_ids。第一行是数据不是列名时 header_row 设为 false；" +
-            "用户要求加表头或列名时用 header 给出简短、忠于内容的列名。一组连续的行调用一次。";
+            "用户要求加表头或列名时用 header 给出简短、忠于内容的列名。一组连续的行调用一次。" +
+            "列数不一致时照常转换，缺的单元格留空；padded_rows 大于 0 时在回复里告诉用户有几行补了空单元格。";
         internal const string LayoutPrompt = "结构调整也只改草稿，之后用 get_page_overview 查看新的段落顺序和层级；新插入的段落 ID 为 n1、n2…。";
 
         /// <summary>按本次实际注册的工具拼系统提示词，没有的工具不提。</summary>

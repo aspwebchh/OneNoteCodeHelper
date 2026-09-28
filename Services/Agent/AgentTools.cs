@@ -240,9 +240,11 @@ namespace OneNoteCodeHelper.Services.Agent
                 table.Properties["header"] = header;
                 table.Required = new[] { "snapshot_id", "block_ids", "delimiter" };
                 Register("text_to_table", "把同一文本框里连续的、用制表符（tab）、竖线（pipe）或空格（space）分隔的段落转成表格：每行文字一行（段内 Shift+Enter 换行的也各成一行），" +
-                    "中间的空行和 Markdown 分隔行去掉，单元格保留原有文字格式和链接；先完整读取有文字的段落。space 按连续空白拆分，单元格里不能有空格，各行列数必须相同。" +
+                    "中间的空行和 Markdown 分隔行去掉，单元格保留原有文字格式和链接；先完整读取有文字的段落。space 按连续空白拆分。" +
+                    "各行列数不一致时按最多的列数建表，缺的单元格留空，结果里的 padded_rows 是补了空单元格的行数。" +
                     "标题等不含分隔符的段落不要放进 block_ids。header_row、borders 默认 true，第一行是数据不是列名时 header_row 设为 false；header_shading 是首行底色。" +
-                    $"只有用户要求加表头时才用 header 在首行前新增一行列名，个数等于列数。最多 {AgentTextTable.MaxRows} 行、{AgentTextTable.MaxColumns} 列。", table, TextToTable);
+                    "只有用户要求加表头时才用 header 在首行前新增一行列名，个数应等于列数，少了补空，多了按 header 加列。" +
+                    $"最多 {AgentTextTable.MaxRows} 行、{AgentTextTable.MaxColumns} 列。", table, TextToTable);
             }
             Register("get_pending_changes", "检查草稿修订号、改动和尚未读取的段落。", SnapshotOnly(), Pending);
             var finish = SnapshotOnly();
@@ -762,7 +764,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var shading = args.TryGetValue("header_shading", out var shade) && (string)shade != "none" ? TableLook.Shade((string)shade) : null;
             var names = args.TryGetValue("header", out var header) ? ((IList)header).Cast<string>().ToList() : null;
             var table = AgentTextTable.Build(selection.Paragraphs, (string)args["delimiter"],
-                !args.TryGetValue("header_row", out var headerRow) || (bool)headerRow, !args.TryGetValue("borders", out var borders) || (bool)borders, shading, names);
+                !args.TryGetValue("header_row", out var headerRow) || (bool)headerRow, !args.TryGetValue("borders", out var borders) || (bool)borders, shading, names, out var padded);
             var ordered = selection.Paragraphs.Select(oe => blocks.First(b => b.Id == AgentLayout.KeyOf(oe))).ToList();
             var conversion = new AgentCodeConversion { Blocks = ordered, TextTable = true, Code = selection.Code, Table = table };
             // 转换后这些段落就不在了，之前给它们排的格式和文字修正作废。
@@ -771,7 +773,7 @@ namespace OneNoteCodeHelper.Services.Agent
             _snapshot.CodeConversions.Add(conversion);
             _snapshot.Revision++;
             return new { ok = true, draft_revision = _snapshot.Revision, changed = ordered.Select(b => b.Id).ToArray(), rows = table.Elements(OneNoteApi.One + "Row").Count(),
-                columns = table.Element(OneNoteApi.One + "Columns").Elements().Count(), discarded_format = discarded };
+                columns = table.Element(OneNoteApi.One + "Columns").Elements().Count(), padded_rows = padded, discarded_format = discarded };
         }
 
         private object RemoveBlankLines(IDictionary<string, object> args)
