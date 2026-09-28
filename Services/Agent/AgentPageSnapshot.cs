@@ -14,8 +14,9 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int MaxTurns { get; set; } = 12;
         internal int MaxToolCalls { get; set; } = 48;
         internal int TimeoutSeconds { get; set; } = 600;
-        internal int MaxPageChars { get; set; } = 40000;
-        internal int MaxRequestChars { get; set; } = 120000;
+        // 按 DeepSeek 的 1M token 上下文估算（约 0.6 token/汉字），留出输出余量；上下文较短的模型在配置里调小。
+        internal int MaxPageChars { get; set; } = 200000;
+        internal int MaxRequestChars { get; set; } = 1000000;
         internal bool SendThinking { get; set; } = true;
         internal bool ReplayReasoning { get; set; } = true;
         internal bool StreamUsage { get; set; } = true;
@@ -44,8 +45,8 @@ namespace OneNoteCodeHelper.Services.Agent
             value.MaxTurns = Number(element, "MaxTurns", 12, 2, 30);
             value.MaxToolCalls = Number(element, "MaxToolCalls", 48, 6, 100);
             value.TimeoutSeconds = Number(element, "TimeoutSeconds", 600, 30, 1800);
-            value.MaxPageChars = Number(element, "MaxPageChars", 40000, 1000, 100000);
-            value.MaxRequestChars = Number(element, "MaxRequestChars", 120000, 16000, 500000);
+            value.MaxPageChars = Number(element, "MaxPageChars", 200000, 1000, 1000000);
+            value.MaxRequestChars = Number(element, "MaxRequestChars", 1000000, 16000, 3000000);
             value.SendThinking = Boolean(element, "SendThinking", true);
             value.ReplayReasoning = Boolean(element, "ReplayReasoning", true);
             value.StreamUsage = Boolean(element, "StreamUsage", true);

@@ -88,7 +88,9 @@ namespace OneNoteCodeHelper.Services.Agent
                     {
                         linked.Token.ThrowIfCancellationRequested();
                         progress?.Report(new AgentProgress { Turn = turn + 1, Status = "模型正在分析页面…", Thinking = "" });
-                        if (AgentChatClient.Serializer().Serialize(messages).Length > snapshot.Options.MaxRequestChars) throw new AiException("Agent 上下文预算已用完，没有提交草稿。");
+                        var used = AgentJson.Serialize(messages).Length;
+                        if (used > snapshot.Options.MaxRequestChars)
+                            throw new AiException($"Agent 上下文预算已用完（约 {used} 字，上限 {snapshot.Options.MaxRequestChars}），没有提交草稿。可以缩小处理范围，或在 ai-settings.xml 的 Agent 节点调大 MaxRequestChars。");
                         var reply = await _client.CompleteAsync(messages, tools.Definitions, progress, linked.Token).ConfigureAwait(false);
                         reply.Validate();
                         messages.Add(reply.ToMessage(snapshot.Options.ReplayReasoning));
@@ -130,7 +132,7 @@ namespace OneNoteCodeHelper.Services.Agent
                                     outcome = tools.Execute(call);
                                 }
                                 catch (AiException ex) when (!snapshot.Frozen) { outcome = new { ok = false, error = ex.Message }; }
-                                result = AgentChatClient.Serializer().Serialize(outcome);
+                                result = AgentJson.ToolResult(outcome);
                                 cached.Add(call.Id, (call.Name, call.Arguments, result));
                                 var (text, state) = AgentTools.DescribeStep(call.Name, call.Arguments, result);
                                 progress?.Report(new AgentProgress { Step = new AgentStep { Id = step, Text = text, State = state } });

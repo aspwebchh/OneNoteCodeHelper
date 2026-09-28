@@ -343,6 +343,44 @@ internal static class Program
             var s = Snapshot(); var api = new FakePage(s.Page); var model = new ScriptedClient(s);
             var r = new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
             Equal("Verified", r.Status); Equal(1, api.Writes); True(model.SawToolResult); True(model.SawReasoning);
+            // 工具结果不带 null 字段，HTML 字符不转义。
+            True(model.LastJson.Contains("tool_call_id")); True(!model.LastJson.Contains("\\\":null")); True(!model.LastJson.Contains("\\u003c"));
+        });
+        Test("runner budget error reports the size and the setting to raise", () =>
+        {
+            var s = Snapshot(); s.Options.MaxRequestChars = 3000; var api = new FakePage(s.Page);
+            Rejects("MaxRequestChars", () => new AgentRunner(new ScriptedClient(s), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult());
+            Rejects("上限 3000", () => new AgentRunner(new ScriptedClient(s), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult());
+            Equal(0, api.Writes);
+        });
+        Test("agent budget defaults fit a 1M-token model and the serializer allows them", () =>
+        {
+            var defaults = AgentOptions.Parse(null);
+            Equal(1000000, defaults.MaxRequestChars); Equal(200000, defaults.MaxPageChars);
+            var capped = AgentOptions.Parse(XElement.Parse("<Agent><MaxRequestChars>9999999</MaxRequestChars><MaxPageChars>5000000</MaxPageChars></Agent>"));
+            Equal(3000000, capped.MaxRequestChars); Equal(1000000, capped.MaxPageChars);
+            var large = new string('字', 700000);
+            Equal(large, (string)((IDictionary<string, object>)AgentChatClient.Parse(AgentJson.Serialize(new { text = large })))["text"]);
+        });
+        Test("AgentJson keeps HTML characters, prunes null fields and round-trips", () =>
+        {
+            const string html = "<b>A&B</b> 'q' \"x\" \\u003c 中文";
+            var json = AgentJson.Serialize(new { text = html });
+            True(json.Contains("<b>A&B</b> 'q'")); Equal(1, json.Split(new[] { "u003c" }, StringSplitOptions.None).Length - 1);
+            Equal(html, (string)((IDictionary<string, object>)AgentChatClient.Parse(json))["text"]);
+            // 作为字符串再包一层也不会变成 \\u003c。
+            var nested = AgentJson.Serialize(new { content = json });
+            True(nested.Contains("<b>A&B</b>")); Equal(json, (string)((IDictionary<string, object>)AgentChatClient.Parse(nested))["content"]);
+            var result = AgentJson.ToolResult(new { ok = true, none = (string)null, tags = new string[0], blocks = new[] { new { id = "p1", parent_id = (string)null } } });
+            Equal("{\"ok\":true,\"tags\":[],\"blocks\":[{\"id\":\"p1\"}]}", result);
+        });
+        Test("read_blocks gives raw runs only for paragraphs with inline formatting", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "纯文字 A&amp;B"), Paragraph("b", "有<b>加粗</b>的段落"))); var t = Tools(s);
+            var read = AgentChatClient.Parse(Json(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2" } })));
+            var blocks = (object[])AiClient.Get(read, "blocks");
+            True(AiClient.Get(blocks[0], "runs") == null); Equal("纯文字 A&B", (string)AiClient.Get(blocks[0], "text"));
+            Equal("有<b>加粗</b>的段落", string.Concat(((object[])AiClient.Get(blocks[1], "runs")).Cast<string>()));
         });
         Test("runner reports turns and one summarized step per tool", () =>
         {
@@ -1453,10 +1491,12 @@ internal static class Program
     {
         private readonly AgentPageSnapshot _s; private int _turn;
         internal bool SawToolResult, SawReasoning;
+        internal string LastJson = "";
         internal ScriptedClient(AgentPageSnapshot s) { _s = s; }
         public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
             var json = AgentChatClient.Serializer().Serialize(messages);
+            LastJson = AgentJson.Serialize(messages);
             SawToolResult |= json.Contains("tool_call_id"); SawReasoning |= json.Contains("reasoning_content");
             string name; object args;
             switch (_turn++)

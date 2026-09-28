@@ -13,6 +13,61 @@ using System.Web.Script.Serialization;
 
 namespace OneNoteCodeHelper.Services.Agent
 {
+    /// <summary>
+    /// Agent 请求体和工具结果的 JSON。JavaScriptSerializer 把 &lt; &gt; &amp; ' 转成 < 这样的 6 个字符，工具结果作为字符串再序列化一次又变成 7 个；
+    /// JSON 本来不要求转义它们，这里还原成原字符，模型看到的是原文，上下文预算也只算实际内容。
+    /// </summary>
+    internal static class AgentJson
+    {
+        internal static string Serialize(object value) => Unescape(AgentChatClient.Serializer().Serialize(value));
+
+        /// <summary>工具结果：去掉值为 null 的字段，空数组保留。</summary>
+        internal static string ToolResult(object outcome)
+        {
+            var serializer = AgentChatClient.Serializer();
+            return Serialize(Prune(serializer.DeserializeObject(serializer.Serialize(outcome))));
+        }
+
+        private static object Prune(object value)
+        {
+            if (value is IDictionary<string, object> map) return map.Where(p => p.Value != null).ToDictionary(p => p.Key, p => Prune(p.Value));
+            if (value is object[] list) return list.Select(Prune).ToArray();
+            return value;
+        }
+
+        private static string Unescape(string json)
+        {
+            if (json.IndexOf("\\u00", StringComparison.Ordinal) < 0) return json;
+            var result = new StringBuilder(json.Length);
+            for (var i = 0; i < json.Length; i++)
+            {
+                var ch = json[i];
+                if (ch != '\\' || i + 1 >= json.Length) { result.Append(ch); continue; }
+                if (json[i + 1] == 'u' && i + 5 < json.Length)
+                {
+                    var plain = Plain(json.Substring(i + 2, 4));
+                    if (plain != '\0') { result.Append(plain); i += 5; continue; }
+                }
+                // 其他转义连同下一个字符原样保留，免得把 \\u003c（原文里的反斜杠）后面的 u003c 当成转义。
+                result.Append(ch).Append(json[i + 1]);
+                i++;
+            }
+            return result.ToString();
+        }
+
+        private static char Plain(string hex)
+        {
+            switch (hex.ToLowerInvariant())
+            {
+                case "003c": return '<';
+                case "003e": return '>';
+                case "0026": return '&';
+                case "0027": return '\'';
+                default: return '\0';
+            }
+        }
+    }
+
     internal sealed class AgentToolCall
     {
         internal string Id = "";
@@ -62,6 +117,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal const int MaxStreamWireChars = 8 * 1024 * 1024;
         internal const int MaxReplyChars = 500000;
         internal const int MaxToolArgumentsChars = 64000;
+        /// <summary>序列化上限，须大于 MaxRequestChars 的上限（300 万字）再加一轮的增量；真正的预算由 MaxRequestChars 控制。</summary>
+        internal const int MaxJsonChars = 16 * 1024 * 1024;
         /// <summary>流式进度最多每隔这么久（毫秒）报告一次，免得把界面线程的消息队列塞满。</summary>
         private const int ReportIntervalMs = 200;
         private readonly AiConfig _config;
@@ -70,7 +127,7 @@ namespace OneNoteCodeHelper.Services.Agent
         private readonly HttpClient _http;
         internal AgentChatClient(AiConfig config, string model, string effort, HttpClient http = null)
         { _config = config; _model = model; _effort = effort; _http = http ?? AiClient.Transport; }
-        internal static JavaScriptSerializer Serializer() => new JavaScriptSerializer { MaxJsonLength = 600000, RecursionLimit = 40 };
+        internal static JavaScriptSerializer Serializer() => new JavaScriptSerializer { MaxJsonLength = MaxJsonChars, RecursionLimit = 40 };
         internal static object Parse(string json)
         {
             try { return Serializer().DeserializeObject(json); }
@@ -84,8 +141,9 @@ namespace OneNoteCodeHelper.Services.Agent
             if (_config.Agent.StreamUsage) body["stream_options"] = new { include_usage = true };
             if (_config.Agent.SendThinking) AiEfforts.ApplyTo(body, _effort);
             if (_config.MaxTokens > 0) body["max_tokens"] = _config.MaxTokens;
-            var json = Serializer().Serialize(body);
-            if (json.Length > _config.Agent.MaxRequestChars) throw new AiException("Agent 会话达到上下文预算，未提交草稿。请缩小处理范围。");
+            var json = AgentJson.Serialize(body);
+            if (json.Length > _config.Agent.MaxRequestChars)
+                throw new AiException($"Agent 会话达到上下文预算（约 {json.Length} 字，上限 {_config.Agent.MaxRequestChars}），未提交草稿。可以缩小处理范围，或在 ai-settings.xml 的 Agent 节点调大 MaxRequestChars。");
             using (var total = new CancellationTokenSource(TimeSpan.FromSeconds(_config.TimeoutSeconds)))
             using (var idle = new CancellationTokenSource(TimeSpan.FromSeconds(AiClient.IdleTimeoutSeconds)))
             using (var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, total.Token, idle.Token))

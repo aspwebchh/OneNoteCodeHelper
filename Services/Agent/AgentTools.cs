@@ -567,7 +567,8 @@ namespace OneNoteCodeHelper.Services.Agent
                 parent_id = ParentKey(AgentLayout.Find(page, b.Id)),
                 table_id = b.TableId, style = Css.Effective(AgentLayout.Find(page, b.Id), page),
                 list = AgentMarks.ListKind(b.Draft), tags = AgentMarks.Describe(b.Draft, _snapshot.DraftTags),
-                runs = b.Draft.Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() }).ToArray() };
+                // 有加粗、链接等行内格式时才给原始 HTML；纯文字和 text 一样，不重复输出。
+                runs = b.Draft.Elements(OneNoteApi.One + "T").Any(t => t.Value.IndexOf('<') >= 0) ? b.Draft.Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() : null }).ToArray() };
         }
 
         private object Paragraph(IDictionary<string, object> args)
