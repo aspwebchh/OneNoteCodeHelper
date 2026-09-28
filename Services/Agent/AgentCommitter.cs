@@ -35,15 +35,28 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int CodeBlocks;
         /// <summary>已核验的表格样式修改（撤销时是恢复的表格数）。</summary>
         internal int Tables;
+        /// <summary>text_to_table 转成的表格（撤销时是换回段落的表格数）。</summary>
+        internal int TextTables;
+        /// <summary>结构改动：删掉的空行、移动、调整缩进和插入的段落数。</summary>
+        internal int Removed, Moved, Indented, Inserted;
+        /// <summary>整框写入的文本框（撤销时是整框恢复的文本框数）。</summary>
+        internal int Outlines;
         internal readonly List<AgentUndoItem> Undo = new List<AgentUndoItem>();
         internal readonly List<AgentCodeUndoItem> CodeUndo = new List<AgentCodeUndoItem>();
         internal readonly List<AgentTableUndoItem> TableUndo = new List<AgentTableUndoItem>();
+        internal readonly List<AgentOutlineUndoItem> OutlineUndo = new List<AgentOutlineUndoItem>();
         internal readonly List<string> ConflictIds = new List<string>();
         /// <summary>已核验写入的文字修正，每项形如「原文」→「改后」。含笔记正文，只在窗口里显示，不写日志。</summary>
         internal readonly List<string> TextFixes = new List<string>();
-        internal bool CanUndo => Undo.Count + CodeUndo.Count + TableUndo.Count > 0;
-        internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, code_blocks = CodeBlocks, tables = Tables,
+        internal bool CanUndo => Undo.Count + CodeUndo.Count + TableUndo.Count + OutlineUndo.Count > 0;
+        /// <summary>撤销之后不再把撤销的逆操作当作可撤销。</summary>
+        internal void ClearUndo() { Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
+        internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
+            removed = Removed, moved = Moved, indented = Indented, inserted = Inserted,
             skipped_conflict = ConflictIds, unverified = Unverified, protected_count = Protected, message = Message };
+        /// <summary>结果消息里的结构改动部分。</summary>
+        internal string LayoutSummary => (Removed > 0 ? $"删除空行 {Removed} 行；" : "") + (Moved > 0 ? $"移动 {Moved} 段；" : "") +
+            (Indented > 0 ? $"调整缩进 {Indented} 段；" : "") + (Inserted > 0 ? $"插入 {Inserted} 段；" : "");
     }
 
     internal sealed class AgentCommitter
@@ -76,7 +89,27 @@ namespace OneNoteCodeHelper.Services.Agent
                     var planned = new List<(AgentBlock Block, XElement Before, XElement Desired, XElement Target)>();
                     var containers = new HashSet<XElement>();
                     var tagDefinitions = page.Elements(One + "TagDef").Count();
-                    foreach (var block in snapshot.Blocks.Where(b => b.Changed))
+                    // 有结构改动的文本框整框替换。处理期间文本框被改过就不替换：结构改动按冲突跳过，框里其余改动照常逐项提交。
+                    var formatted = new HashSet<string>();
+                    var edits = new List<OutlineEdit>();
+                    foreach (var outlineId in snapshot.LayoutOutlines)
+                    {
+                        var current = Outline(page, outlineId);
+                        var original = Outline(snapshot.Page, outlineId);
+                        if (current == null || original == null || AgentLayout.OutlineFingerprint(current, page) != AgentLayout.OutlineFingerprint(original, snapshot.Page))
+                        { report.ConflictIds.AddRange(snapshot.LayoutChanges.Where(c => c.OutlineId == outlineId).SelectMany(c => c.Ids).Distinct()); continue; }
+                        edits.Add(ReplaceOutline(snapshot, page, current, untouched, formatted));
+                    }
+                    // 撤销：文本框写入后没被改过才整框换回。
+                    foreach (var item in snapshot.OutlineRestores)
+                    {
+                        var current = Outline(page, item.OutlineId);
+                        if (current == null || AgentLayout.OutlineFingerprint(current, page) != item.AfterFingerprint) { report.ConflictIds.Add(item.OutlineId); continue; }
+                        edits.Add(RestoreOutline(item, page, current, untouched, formatted));
+                    }
+                    var replaced = new HashSet<string>(edits.Select(e => e.Id));
+                    foreach (var edit in edits) containers.Add(edit.Written);
+                    foreach (var block in snapshot.Blocks.Where(b => b.Changed && !replaced.Contains(b.ContainerId)))
                     {
                         var target = Find(page, block.ObjectId);
                         if (target == null || !fingerprints.TryGetValue(block.ObjectId, out var fingerprint) || fingerprint != block.Fingerprint)
@@ -108,8 +141,8 @@ namespace OneNoteCodeHelper.Services.Agent
                         untouched.Remove(block.ObjectId);
                         containers.Add(target.Ancestors().First(e => e.Parent == page));
                     }
-                    var codes = new List<(XElement Box, AgentCodeUndoItem Undo)>();
-                    foreach (var conversion in snapshot.CodeConversions)
+                    var codes = new List<(XElement Box, AgentCodeUndoItem Undo, AgentCodeConversion Conversion)>();
+                    foreach (var conversion in snapshot.CodeConversions.Where(c => !replaced.Contains(c.Blocks[0].ContainerId)))
                     {
                         // 源段落有任何变化（改字、改格式、移动、插入下级段落）都整个跳过，不在别人的内容上重放。
                         var ids = conversion.Blocks.Select(b => b.ObjectId).ToList();
@@ -119,21 +152,22 @@ namespace OneNoteCodeHelper.Services.Agent
                         if (selection == null || selection.Code != conversion.Code)
                         { report.ConflictIds.AddRange(conversion.Blocks.Select(b => b.Id)); continue; }
                         var undo = AgentCode.CaptureOriginals(selection, page);
+                        undo.TextTable = conversion.TextTable;
                         containers.Add(selection.Outline);
-                        codes.Add((selection.ReplaceWith(new XElement(conversion.Table)), undo));
+                        codes.Add((selection.ReplaceWith(new XElement(conversion.Table)), undo, conversion));
                         foreach (var id in ids) untouched.Remove(id);
                     }
-                    var restores = new List<List<XElement>>();
+                    var restores = new List<(List<XElement> Lines, AgentCodeUndoItem Item)>();
                     foreach (var item in snapshot.CodeRestores)
                     {
                         var box = AgentCode.FindCodeBox(page, item.TableId);
                         if (box == null || AgentCode.Fingerprint(box) != item.Fingerprint) { report.ConflictIds.Add(item.TableId); continue; }
                         foreach (var id in box.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(id => id != null).ToList()) untouched.Remove(id);
                         containers.Add(box.Ancestors().First(e => e.Parent == page));
-                        restores.Add(AgentCode.Restore(box, item, page));
+                        restores.Add((AgentCode.Restore(box, item, page), item));
                     }
                     var tables = new List<(AgentTable Table, TableLook Before)>();
-                    foreach (var table in snapshot.Tables.Where(t => t.Changed))
+                    foreach (var table in snapshot.Tables.Where(t => t.Changed && !replaced.Contains(t.ContainerId)))
                     {
                         // 外观、行列或首行被改过就跳过，不在别人改过的表格上重放。单元格文字的修改不影响。
                         var target = AgentTable.Find(page, table.ObjectId);
@@ -143,7 +177,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         containers.Add(target.Ancestors().First(e => e.Parent == page));
                     }
                     report.Conflicts = report.ConflictIds.Count;
-                    if (planned.Count == 0 && codes.Count == 0 && restores.Count == 0 && tables.Count == 0)
+                    if (planned.Count == 0 && codes.Count == 0 && restores.Count == 0 && tables.Count == 0 && edits.Count == 0)
                     {
                         report.Status = "NoChange";
                         report.Message = report.Conflicts > 0 ? $"没有写入：{report.Conflicts} 段在处理期间发生变化。" : "没有需要写入的格式修改。";
@@ -168,7 +202,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     catch (Exception)
                     {
                         report.Status = "CommitOutcomeUnknown";
-                        report.Unverified = planned.Count + codes.Count + restores.Count + tables.Count;
+                        report.Unverified = planned.Count + codes.Count + restores.Count + tables.Count + edits.Count;
                         report.Message = "已尝试写入，但无法回读确认。请查看目标页面，不要立即重复执行。";
                         return report;
                     }
@@ -190,7 +224,8 @@ namespace OneNoteCodeHelper.Services.Agent
                         catch (Exception) { report.Unverified++; }
                     }
                     // 原页面所有文字、链接、段落顺序必须保留，包括没有交给模型的对象。
-                    if (!ContentPreserved(page, actual, known, new HashSet<string>(planned.Select(p => p.Block.ObjectId))) || !UntouchedPreserved(untouched, actual))
+                    formatted.UnionWith(planned.Select(p => p.Block.ObjectId));
+                    if (!ContentPreserved(page, actual, known, formatted) || !UntouchedPreserved(untouched, actual))
                     {
                         report.Status = "CommitOutcomeUnknown";
                         report.Message = "写入后页面结构或内容与预期不一致，请检查目标页面。";
@@ -202,22 +237,24 @@ namespace OneNoteCodeHelper.Services.Agent
                     foreach (var code in codes)
                     {
                         var written = actualLines[expectedLines.IndexOf(code.Box)];
-                        var tableId = (string)written.Element(One + "Table")?.Attribute("objectID");
-                        if (string.IsNullOrEmpty(tableId)) { report.Unverified++; continue; }
-                        code.Undo.TableId = tableId;
+                        if (!ConversionWritten(code.Box, written, code.Conversion, page, actual)) { report.Unverified++; continue; }
+                        code.Undo.TableId = (string)written.Element(One + "Table").Attribute("objectID");
                         code.Undo.Fingerprint = AgentCode.Fingerprint(written);
-                        report.CodeBlocks++;
+                        if (code.Conversion.TextTable) report.TextTables++; else report.CodeBlocks++;
                         report.CodeUndo.Add(code.Undo);
                     }
                     foreach (var restored in restores)
                     {
-                        var same = restored.SelectMany(r => r.DescendantsAndSelf(One + "OE")).Where(e => e.Elements(One + "T").Any()).All(e =>
+                        var same = restored.Lines.SelectMany(r => r.DescendantsAndSelf(One + "OE")).Where(e => e.Elements(One + "T").Any()).All(e =>
                         {
                             try { return AgentPageSnapshot.SemanticFormat(e, page) == AgentPageSnapshot.SemanticFormat(actualLines[expectedLines.IndexOf(e)], actual); }
                             catch (Exception) { return false; }
                         });
-                        if (same) report.CodeBlocks++; else report.Unverified++;
+                        if (!same) report.Unverified++;
+                        else if (restored.Item.TextTable) report.TextTables++;
+                        else report.CodeBlocks++;
                     }
+                    foreach (var edit in edits) VerifyOutline(edit, page, actual, expectedLines, actualLines, report);
                     foreach (var (table, before) in tables)
                     {
                         var written = AgentTable.Find(actual, table.ObjectId);
@@ -226,10 +263,12 @@ namespace OneNoteCodeHelper.Services.Agent
                         report.TableUndo.Add(new AgentTableUndoItem { ObjectId = table.ObjectId, Before = before, AfterFingerprint = AgentTable.TakeFingerprint(written) });
                     }
                     report.Status = report.Unverified > 0 || report.Conflicts > 0 ? "PartiallyApplied" : "Verified";
-                    report.Message = $"已验证修改 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"修正文字 {report.TextFixes.Count} 处；" : "") +
-                        (codes.Count > 0 ? $"高亮代码 {report.CodeBlocks} 处；" : "") + (tables.Count > 0 ? $"表格样式 {report.Tables} 个；" : "") +
+                    var conversions = codes.Select(c => c.Conversion).Concat(edits.SelectMany(e => e.Boxes.Select(b => b.Conversion))).ToList();
+                    report.Message = $"已验证修改 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"修正文字 {report.TextFixes.Count} 处；" : "") + report.LayoutSummary +
+                        (conversions.Any(c => !c.TextTable) ? $"高亮代码 {report.CodeBlocks} 处；" : "") + (conversions.Any(c => c.TextTable) ? $"转换表格 {report.TextTables} 个；" : "") +
+                        (tables.Count + edits.Sum(e => e.Tables.Count) > 0 ? $"表格样式 {report.Tables} 个；" : "") +
                         $"冲突跳过 {report.Conflicts} 处；未验证 {report.Unverified} 处；保护 {report.Protected} 段。";
-                    if (uncertain && report.Applied + report.CodeBlocks + report.Tables == 0) report.Message = "写回未得到确认，请检查页面。" + report.Message;
+                    if (uncertain && report.Applied + report.CodeBlocks + report.Tables + report.TextTables + report.Outlines == 0) report.Message = "写回未得到确认，请检查页面。" + report.Message;
                     return report;
                 }
             }
@@ -251,6 +290,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 var xml = _api.GetPageContent(pageId, PageInfo.piBasic);
                 var snapshot = new AgentPageSnapshot(xml, new HashSet<string>(previous.Undo.Select(i => i.ObjectId)), options);
                 snapshot.CodeRestores.AddRange(previous.CodeUndo);
+                snapshot.OutlineRestores.AddRange(previous.OutlineUndo);
                 // 表格外观和写入后一致时换回原外观；指纹用写入后的，表格之后又被改过就按冲突跳过。
                 var restoredTables = new HashSet<string>(previous.TableUndo.Select(t => t.ObjectId));
                 snapshot.Tables.RemoveAll(t => restoredTables.Contains(t.ObjectId));
@@ -275,7 +315,9 @@ namespace OneNoteCodeHelper.Services.Agent
                 report.ConflictIds.AddRange(skipped);
                 if (report.Status == "Verified" && report.Conflicts > 0) report.Status = "PartiallyApplied";
                 report.Message = $"撤销已验证恢复 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"还原文字 {report.TextFixes.Count} 处；" : "") +
-                    (previous.CodeUndo.Count > 0 ? $"恢复代码 {report.CodeBlocks} 处；" : "") +
+                    (previous.OutlineUndo.Count > 0 ? $"恢复文本框结构 {report.Outlines} 个；" : "") +
+                    (previous.CodeUndo.Any(u => !u.TextTable) ? $"恢复代码 {report.CodeBlocks} 处；" : "") +
+                    (previous.CodeUndo.Any(u => u.TextTable) ? $"表格换回段落 {report.TextTables} 个；" : "") +
                     (previous.TableUndo.Count > 0 ? $"恢复表格 {report.Tables} 个；" : "") +
                     $"跳过 {report.Conflicts} 处；未验证 {report.Unverified} 处。";
                 return report;
@@ -283,6 +325,158 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         internal static XElement Find(XElement page, string id) => page.Descendants(One + "OE").SingleOrDefault(e => (string)e.Attribute("objectID") == id);
+        private static XElement Outline(XElement page, string id) => page.Elements(One + "Outline").FirstOrDefault(o => (string)o.Attribute("objectID") == id);
+
+        /// <summary>一个整框写入的文本框：写入前后的样子，以及框里要核验、计数的改动。</summary>
+        private sealed class OutlineEdit
+        {
+            internal string Id;
+            internal bool Restore;
+            internal XElement Before;
+            /// <summary>页面里替换上去的文本框，写入后按位置和回读页面对应。</summary>
+            internal XElement Written;
+            internal List<XElement> Styles = new List<XElement>();
+            internal List<XElement> Tags = new List<XElement>();
+            internal readonly List<(AgentBlock Block, XElement Node)> Changed = new List<(AgentBlock, XElement)>();
+            internal readonly List<(XElement Box, AgentCodeConversion Conversion)> Boxes = new List<(XElement, AgentCodeConversion)>();
+            internal readonly List<AgentTable> Tables = new List<AgentTable>();
+            internal readonly List<AgentLayoutChange> Changes = new List<AgentLayoutChange>();
+        }
+
+        /// <summary>
+        /// 用结构草稿替换整个文本框：套上格式草稿、代码框和表格转换、表格外观，样式和标记编号按内容对应到重新读取的页面。
+        /// 删掉、转换、改过格式或重建的段落不再按「未指定段落」核对；只是移动、调整缩进的段落仍要求格式不变。
+        /// </summary>
+        private static OutlineEdit ReplaceOutline(AgentPageSnapshot snapshot, XElement page, XElement current, Dictionary<string, string> untouched, ISet<string> formatted)
+        {
+            var id = (string)current.Attribute("objectID");
+            var edit = new OutlineEdit { Id = id, Before = new XElement(current), Styles = AgentLayout.Styles(current, page), Tags = AgentLayout.Tags(current, page) };
+            var draft = snapshot.CreateDraftPage();
+            var written = Outline(draft, id);
+            foreach (var block in snapshot.Blocks.Where(b => b.Changed && b.ContainerId == id))
+            {
+                var node = AgentLayout.Find(written, block.Id);
+                if (node == null) continue;
+                // 只有 fix_text 排过修正的段落可以改文字。
+                if (block.TextFixes.Count == 0 && new AgentRichText(node).Signature(draft, false) != new AgentRichText(block.Original).Signature(snapshot.Page, false))
+                    throw new AiException("格式修改改变了正文或链接，已阻止写入。");
+                edit.Changed.Add((block, node));
+                formatted.Add(block.ObjectId);
+            }
+            foreach (var conversion in snapshot.CodeConversions.Where(c => c.Blocks[0].ContainerId == id))
+            {
+                var selection = AgentCode.Select(draft, conversion.Blocks.Select(b => b.ObjectId).ToList());
+                if (selection.Code != conversion.Code) throw new AiException("结构草稿与代码框或表格转换不一致，已阻止写入。");
+                edit.Boxes.Add((selection.ReplaceWith(new XElement(conversion.Table)), conversion));
+            }
+            foreach (var table in snapshot.Tables.Where(t => t.Changed && t.ContainerId == id))
+            {
+                var target = AgentTable.Find(written, table.ObjectId);
+                if (target == null) continue;
+                table.Draft.Apply(target);
+                edit.Tables.Add(table);
+            }
+            AgentLayout.RebuildDroppedLists(written, current);
+            foreach (var e in written.DescendantsAndSelf().Where(e => e.Attribute("quickStyleIndex") != null))
+            {
+                var definition = snapshot.DraftStyles.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == (string)e.Attribute("quickStyleIndex"));
+                if (definition != null) e.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(page, definition));
+            }
+            foreach (var tag in written.Descendants(One + "Tag"))
+            {
+                var definition = AgentMarks.Definition(snapshot.DraftTags, tag);
+                if (definition != null) tag.SetAttributeValue("index", AgentMarks.EnsureTagDefinition(page, definition));
+            }
+            AgentLayout.Strip(written);
+            written.Remove();
+            current.ReplaceWith(written);
+            edit.Written = written;
+            edit.Changes.AddRange(snapshot.LayoutChanges.Where(c => c.OutlineId == id));
+            var present = new HashSet<string>(written.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null));
+            foreach (var oid in edit.Before.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null))
+                if (!present.Contains(oid) || formatted.Contains(oid)) untouched.Remove(oid);
+            return edit;
+        }
+
+        /// <summary>
+        /// 整框撤销：换回写入前的文本框。已经不在页面上的对象（删掉的空行、转换前的段落、表格外层）去掉 ID 让 OneNote 重建，
+        /// 列表要去掉的段落同样重建；样式和标记定义按当前页面重新对应。插入的段落和新建的表格不在原样里，写回时一并删除。
+        /// </summary>
+        private static OutlineEdit RestoreOutline(AgentOutlineUndoItem item, XElement page, XElement current, Dictionary<string, string> untouched, ISet<string> formatted)
+        {
+            var edit = new OutlineEdit { Id = item.OutlineId, Restore = true, Before = new XElement(current) };
+            var written = new XElement(item.Before);
+            var present = new HashSet<string>(page.Descendants().Attributes("objectID").Select(a => a.Value));
+            foreach (var e in written.DescendantsAndSelf().Where(e => e.Attribute("objectID") != null && !present.Contains((string)e.Attribute("objectID"))).ToList())
+                AgentCode.StripIdentity(e);
+            AgentLayout.RebuildDroppedLists(written, current);
+            var styles = item.Styles.ToDictionary(d => (string)d.Attribute("index"), d => ParagraphStyles.EnsureDefinition(page, d));
+            var tags = item.Tags.ToDictionary(d => (string)d.Attribute("index"), d => AgentMarks.EnsureTagDefinition(page, d));
+            foreach (var e in written.DescendantsAndSelf().Where(e => e.Attribute("quickStyleIndex") != null))
+                if (styles.TryGetValue((string)e.Attribute("quickStyleIndex"), out var mapped)) e.SetAttributeValue("quickStyleIndex", mapped);
+            foreach (var tag in written.Descendants(One + "Tag"))
+                if (tags.TryGetValue((string)tag.Attribute("index"), out var mapped)) tag.SetAttributeValue("index", mapped);
+            current.ReplaceWith(written);
+            edit.Written = written;
+            foreach (var oid in edit.Before.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null)) untouched.Remove(oid);
+            formatted.UnionWith(written.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null));
+            return edit;
+        }
+
+        /// <summary>
+        /// 整框写入的核验：框里每个文字段落按位置比较格式（期望一侧解析不了的段落已由内容核验比过原文）；
+        /// 新代码框只比文字，已在内容核验里做过；新表格的单元格另比正文和链接。执行时记下整框撤销。
+        /// </summary>
+        private static void VerifyOutline(OutlineEdit edit, XElement page, XElement actual, List<XElement> expectedLines, List<XElement> actualLines, AgentReport report)
+        {
+            var boxLines = new HashSet<XElement>(edit.Boxes.SelectMany(b => b.Box.Descendants(One + "OE")));
+            var failed = new HashSet<XElement>();
+            foreach (var line in edit.Written.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any() && !boxLines.Contains(e)))
+            {
+                string expected;
+                try { expected = AgentPageSnapshot.SemanticFormat(line, page); } catch (Exception) { continue; }
+                try { if (AgentPageSnapshot.SemanticFormat(actualLines[expectedLines.IndexOf(line)], actual) != expected) failed.Add(line); }
+                catch (Exception) { failed.Add(line); }
+            }
+            report.Unverified += failed.Count;
+            foreach (var (block, node) in edit.Changed.Where(c => !failed.Contains(c.Node)))
+            {
+                report.Applied++;
+                report.TextFixes.AddRange(block.TextFixes);
+            }
+            foreach (var (box, conversion) in edit.Boxes)
+            {
+                if (!ConversionWritten(box, actualLines[expectedLines.IndexOf(box)], conversion, page, actual)) { report.Unverified++; continue; }
+                if (conversion.TextTable) report.TextTables++; else report.CodeBlocks++;
+            }
+            foreach (var table in edit.Tables)
+            {
+                var written = AgentTable.Find(actual, table.ObjectId);
+                if (written == null || !TableLook.Read(written).SameAs(table.Draft)) { report.Unverified++; continue; }
+                report.Tables++;
+            }
+            string[] Ids(string kind) => edit.Changes.Where(c => c.Kind == kind).SelectMany(c => c.Ids).Distinct().ToArray();
+            report.Removed += Ids("removed").Length;
+            report.Moved += Ids("moved").Length;
+            report.Indented += Ids("indented").Length;
+            report.Inserted += Ids("inserted").Length;
+            report.Outlines++;
+            var after = edit.Restore ? null : Outline(actual, edit.Id);
+            if (after != null)
+                report.OutlineUndo.Add(new AgentOutlineUndoItem { OutlineId = edit.Id, Before = edit.Before, Styles = edit.Styles, Tags = edit.Tags,
+                    AfterFingerprint = AgentLayout.OutlineFingerprint(after, actual) });
+        }
+
+        /// <summary>转换出的代码框或表格已由 OneNote 建立；表格另外核对每个单元格的正文和链接。</summary>
+        private static bool ConversionWritten(XElement box, XElement written, AgentCodeConversion conversion, XElement page, XElement actual)
+        {
+            if (string.IsNullOrEmpty((string)written.Element(One + "Table")?.Attribute("objectID"))) return false;
+            if (!conversion.TextTable) return true;
+            var left = box.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).ToList();
+            var right = written.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).ToList();
+            try { return left.Count == right.Count && left.Zip(right, (a, b) => new AgentRichText(a).Signature(page, false) == new AgentRichText(b).Signature(actual, false)).All(x => x); }
+            catch (Exception) { return false; }
+        }
 
         private static bool UntouchedPreserved(Dictionary<string, string> expected, XElement page)
         {

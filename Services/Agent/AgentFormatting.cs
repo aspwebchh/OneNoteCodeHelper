@@ -177,6 +177,21 @@ namespace OneNoteCodeHelper.Services.Agent
             Save();
         }
 
+        /// <summary>只留下 [start, start + length) 的文字，留下的字保留原有格式和链接。把一段拆成表格单元格时用。</summary>
+        internal void Keep(int start, int length)
+        {
+            CheckRange(start, length);
+            var chars = new List<Piece>();
+            foreach (var p in _pieces)
+            {
+                if (p.Break) chars.Add(p);
+                else chars.AddRange(p.Text.Select(ch => Copy(p, ch.ToString(), p.Path)));
+            }
+            _pieces.Clear();
+            _pieces.AddRange(chars.GetRange(start, length));
+            Save();
+        }
+
         internal void Format(int start, int length, IDictionary<string, string> properties, bool removeOnly = false)
         {
             CheckRange(start, length);

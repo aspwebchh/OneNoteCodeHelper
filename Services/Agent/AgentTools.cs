@@ -182,6 +182,55 @@ namespace OneNoteCodeHelper.Services.Agent
                 Register("highlight_code", "把同一文本块里连续的代码段落（含中间空行）整体换成插件的高亮代码框；先完整读取有文字的段落。" +
                     "language 为 auto 时自动识别，识别不出会报错，可改用 text。已有代码框和行内代码不要转换。", code, HighlightCode);
             }
+            var structural = snapshot.EditableOutlines.Count > 0;
+            if (snapshot.Options.EnableBlankLineRemoval && snapshot.Blocks.Any(b => b.ProtectedReason == "empty" && snapshot.EditableOutlines.Contains(b.ContainerId)))
+            {
+                var blank = SnapshotOnly();
+                blank.Properties["mode"] = AgentSchema.Str("collapse", "all");
+                blank.Required = new[] { "snapshot_id", "mode" };
+                Register("remove_blank_lines", "删除多余的空行（只有空白的段落）：collapse 把连续空行合并为一行，并删掉文本框、单元格首尾的空行；all 删掉全部空行。" +
+                    "带列表、标记或下级段落的空段落和代码里的空行不删。", blank, RemoveBlankLines);
+            }
+            if (structural && snapshot.Options.EnableIndent)
+            {
+                var indent = WithIds();
+                indent.Properties["direction"] = AgentSchema.Str("in", "out");
+                indent.Required = new[] { "snapshot_id", "block_ids", "direction" };
+                Register("set_indent", "调整段落层级：in 挂到上一段下面，out 提到上一级（原来排在它后面的同级段落改挂到它下面）。上下顺序不变，下级段落跟着一起调整。", indent, SetIndent);
+            }
+            if (structural && snapshot.Options.EnableMoves)
+            {
+                var move = WithIds();
+                move.Properties["target_id"] = AgentSchema.Str();
+                move.Properties["position"] = AgentSchema.Str("before", "after");
+                move.Required = new[] { "snapshot_id", "block_ids", "target_id", "position" };
+                Register("move_blocks", "把段落连同下级段落按原来的先后顺序移到目标段落前面或后面，成为目标的同级段落；只能在同一个文本框或表格单元格里移动。", move, MoveBlocks);
+            }
+            if (structural && snapshot.Options.EnableInsert)
+            {
+                var item = new Dictionary<string, AgentSchema> { ["text"] = AgentSchema.Short(MaxInsertChars), ["preset_id"] = AgentSchema.Str("heading1", "heading2", "body", "quote") };
+                if (snapshot.Options.EnableLists) item["list"] = AgentSchema.Str("bullet", "number");
+                var paragraphs = AgentSchema.Array(AgentSchema.Obj(item, "text", "preset_id"));
+                paragraphs.MaxItems = MaxInsertPerCall;
+                Register("insert_blocks", $"在目标段落前面或后面插入同级的新段落：只写纯文字、不含换行，使用预设样式。每次最多 {MaxInsertPerCall} 段，每段最多 {MaxInsertChars} 字，" +
+                    $"每个任务最多 {MaxInserted} 段、{MaxInsertedChars} 字。新段落的 ID 为 n1、n2…，可以作为之后插入、移动的目标。",
+                    AgentSchema.Obj(new Dictionary<string, AgentSchema>
+                    {
+                        ["snapshot_id"] = AgentSchema.Str(), ["target_id"] = AgentSchema.Str(), ["position"] = AgentSchema.Str("before", "after"), ["paragraphs"] = paragraphs
+                    }, "snapshot_id", "target_id", "position", "paragraphs"), InsertBlocks);
+            }
+            if (structural && snapshot.Options.EnableTextTables)
+            {
+                var table = WithIds();
+                table.Properties["block_ids"].MaxItems = 200;
+                table.Properties["delimiter"] = AgentSchema.Str(AgentTextTable.Delimiters);
+                table.Properties["header_row"] = new AgentSchema { Type = "boolean" };
+                table.Properties["borders"] = new AgentSchema { Type = "boolean" };
+                table.Properties["header_shading"] = AgentSchema.Str(TableLook.Shadings.Concat(new[] { "none" }).ToArray());
+                table.Required = new[] { "snapshot_id", "block_ids", "delimiter" };
+                Register("text_to_table", "把同一文本框里连续的、用制表符（tab）或竖线（pipe）分隔的段落转成表格：每段一行，中间的空行和 Markdown 分隔行去掉，单元格保留原有文字格式和链接；" +
+                    $"先完整读取有文字的段落。header_row、borders 默认 true，header_shading 是首行底色。最多 {AgentTextTable.MaxRows} 行、{AgentTextTable.MaxColumns} 列。", table, TextToTable);
+            }
             Register("get_pending_changes", "检查草稿修订号、改动和尚未读取的段落。", SnapshotOnly(), Pending);
             var finish = SnapshotOnly();
             finish.Properties["draft_revision"] = AgentSchema.Num(0, 10000, true);
@@ -191,6 +240,11 @@ namespace OneNoteCodeHelper.Services.Agent
 
         /// <summary>fix_text 每处原文和改后文字的字数上限：够放下错字和前后一两个字，放不下整句改写。</summary>
         internal const int MaxFixChars = 30;
+        /// <summary>insert_blocks 的限额：每次调用、每段、每个任务。</summary>
+        internal const int MaxInsertPerCall = 20;
+        internal const int MaxInsertChars = 500;
+        internal const int MaxInserted = 50;
+        internal const int MaxInsertedChars = 5000;
 
         private static string[] Languages => new[] { LanguageRegistry.AutoDetectId }.Concat(LanguageRegistry.All.Select(l => l.Id)).ToArray();
 
@@ -209,6 +263,11 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "set_table_style": return "设置表格样式";
                 case "read_image_text": return "读取图片文字";
                 case "highlight_code": return "高亮代码";
+                case "remove_blank_lines": return "删除空行";
+                case "set_indent": return "调整缩进";
+                case "move_blocks": return "移动段落";
+                case "insert_blocks": return "插入段落";
+                case "text_to_table": return "转换为表格";
                 case "get_pending_changes": return "检查格式草稿";
                 case "finish_edit": return "写回并验证";
                 default: return "校验工具请求";
@@ -257,6 +316,20 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "highlight_code":
                     detail = JoinDetail(LanguageName(AiClient.Get(outcome, "language") as string ?? AiClient.Get(args, "language") as string),
                         CountOf(args, "block_ids"));
+                    break;
+                case "remove_blank_lines":
+                    detail = AiClient.Get(outcome, "removed") is IList removed ? $"{removed.Count} 行" : null;
+                    break;
+                case "set_indent":
+                    var direction = AiClient.Get(args, "direction") as string;
+                    detail = JoinDetail(direction == "in" ? "增加缩进" : direction == "out" ? "减少缩进" : null, CountOf(args, "block_ids"));
+                    break;
+                case "move_blocks":
+                case "text_to_table":
+                    detail = CountOf(args, "block_ids");
+                    break;
+                case "insert_blocks":
+                    detail = AiClient.Get(args, "paragraphs") is IList inserted ? $"{inserted.Count} 段" : null;
                     break;
             }
             var text = detail == null ? DisplayName(name) : DisplayName(name) + " · " + detail;
@@ -334,23 +407,48 @@ namespace OneNoteCodeHelper.Services.Agent
         private object Overview(IDictionary<string, object> args)
         {
             var offset = args.TryGetValue("offset", out var n) ? Convert.ToInt32(n) : 0;
+            var items = Ordered();
             return new { snapshot_id = _snapshot.SnapshotId, page_title = _snapshot.Title, scope = _snapshot.SelectionOnly ? "selected_paragraphs" : "page",
                 draft_revision = _snapshot.Revision, presets = ParagraphStyles.Ids, native_headings = _snapshot.Options.EnableNativeHeadings,
                 paragraph_spacing = _snapshot.Options.EnableParagraphSpacing, code_highlight = _snapshot.Options.EnableCodeHighlight,
                 languages = _snapshot.Options.EnableCodeHighlight ? Languages : null,
                 list_edit = Has("set_list"), tag_edit = Has("set_tag"), table_style = Has("set_table_style"),
                 table_shadings = Has("set_table_style") ? TableLook.Shadings : null,
-                total = _snapshot.Blocks.Count, next_offset = offset + 100 < _snapshot.Blocks.Count ? (int?)(offset + 100) : null,
-                blocks = _snapshot.Blocks.Skip(offset).Take(100).Select(b => new { id = b.Id, container_id = b.ContainerId, parent_id = b.ParentId, depth = b.Depth,
-                    table_id = b.TableId, editable = b.Editable, reason = b.ProtectedReason,
-                    list = AgentMarks.ListKind(b.Draft), tags = AgentMarks.Describe(b.Draft, _snapshot.DraftTags),
-                    summary = b.Editable || b.CodeCandidate ? b.CurrentText.Substring(0, Math.Min(80, b.CurrentText.Length)) : null }).ToArray(),
+                blank_lines = Has("remove_blank_lines"), indent = Has("set_indent"), move = Has("move_blocks"), insert = Has("insert_blocks"), text_table = Has("text_to_table"),
+                total = items.Count, next_offset = offset + 100 < items.Count ? (int?)(offset + 100) : null,
+                // 按结构草稿里的顺序和层级列出，已删除的空行不在其中，新插入的段落带 inserted。
+                blocks = items.Skip(offset).Take(100).Select(x => x.Block == null
+                    ? (object)new { id = x.Id, container_id = x.New.OutlineId, parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
+                        inserted = true, summary = x.New.Text.Substring(0, Math.Min(80, x.New.Text.Length)) }
+                    : new { id = x.Id, container_id = x.Block.ContainerId, parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
+                        table_id = x.Block.TableId, editable = x.Block.Editable, reason = x.Block.ProtectedReason,
+                        list = AgentMarks.ListKind(x.Block.Draft), tags = AgentMarks.Describe(x.Block.Draft, _snapshot.DraftTags),
+                        summary = x.Block.Editable || x.Block.CodeCandidate ? x.Block.CurrentText.Substring(0, Math.Min(80, x.Block.CurrentText.Length)) : null }).ToArray(),
                 // 表格和图片数量有限，不分页。
                 tables = _snapshot.Tables.Select(t => new { id = t.Id, container_id = t.ContainerId, rows = t.Rows, columns = t.Columns,
                     borders = t.Draft.Borders, header_row = t.Draft.HeaderRow, header_shading = t.Draft.ShadingName,
                     editable = t.Editable, reason = t.ProtectedReason, first_row = t.Summary }).ToArray(),
                 images = _snapshot.Images.Select(i => new { id = i.Id, container_id = i.ContainerId, chars = i.Text.Length }).ToArray() };
         }
+        /// <summary>结构草稿里按页面顺序排的段落：快照段落和新插入的段落，已删除的不在其中。</summary>
+        private List<(string Id, AgentBlock Block, AgentInserted New, XElement Node)> Ordered()
+        {
+            var blocks = _snapshot.Blocks.ToDictionary(b => b.Id);
+            var inserted = _snapshot.Inserted.ToDictionary(i => i.Id);
+            var result = new List<(string, AgentBlock, AgentInserted, XElement)>();
+            foreach (var oe in _snapshot.Layout.Descendants(OneNoteApi.One + "OE"))
+            {
+                var key = AgentLayout.KeyOf(oe);
+                if (key == null) continue;
+                blocks.TryGetValue(key, out var block);
+                inserted.TryGetValue(key, out var added);
+                if (block != null || added != null) result.Add((key, block, added, oe));
+            }
+            return result;
+        }
+        /// <summary>上级段落的短 ID；上级不是快照里的段落（比如表格外层）时为 null。</summary>
+        private static string ParentKey(XElement oe) => AgentLayout.KeyOf(oe.Ancestors(OneNoteApi.One + "OE").FirstOrDefault());
+
         private List<AgentBlock> Targets(IDictionary<string, object> args)
         {
             var ids = ((IList)args["block_ids"]).Cast<string>().ToList();
@@ -360,7 +458,8 @@ namespace OneNoteCodeHelper.Services.Agent
         private AgentBlock Block(string id, bool writing)
         {
             var b = _snapshot.Blocks.FirstOrDefault(x => x.Id == id);
-            if (writing && b != null && (b.CodeCandidate || b.Conversion != null)) throw new AiException("代码段落不能设置样式或修改文字；用 highlight_code 转换为代码框。");
+            if (writing && b?.Conversion != null) throw new AiException("段落已排入代码框或表格转换，不能再修改。");
+            if (writing && b != null && b.CodeCandidate) throw new AiException("代码段落不能设置样式或修改文字；用 highlight_code 转换为代码框。");
             // 待高亮的代码可以读取，供判断范围和语言。
             if (b == null || !(b.Editable || b.CodeCandidate)) throw new AiException("目标不存在或受到保护。");
             if (writing && !b.Read) throw new AiException("请先完整读取目标段落。");
@@ -371,8 +470,9 @@ namespace OneNoteCodeHelper.Services.Agent
             var blocks = Targets(args);
             var page = _snapshot.CreateDraftPage();
             foreach (var b in blocks) b.Read = true;
-            return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.CurrentText, depth = b.Depth,
-                container_id = b.ContainerId, parent_id = b.ParentId, table_id = b.TableId, style = Css.Effective(AgentCommitter.Find(page, b.ObjectId), page),
+            return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.CurrentText,
+                depth = AgentLayout.Find(page, b.Id).Ancestors(OneNoteApi.One + "OE").Count(), container_id = b.ContainerId, parent_id = ParentKey(AgentLayout.Find(page, b.Id)),
+                table_id = b.TableId, style = Css.Effective(AgentLayout.Find(page, b.Id), page),
                 list = AgentMarks.ListKind(b.Draft), tags = AgentMarks.Describe(b.Draft, _snapshot.DraftTags),
                 runs = b.Draft.Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() }).ToArray() };
         }
@@ -551,7 +651,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (b.ProtectedReason != "empty" && !b.Read) throw new AiException("请先完整读取目标段落。");
             }
             // 先全部校验、生成代码框，再发布草稿；失败时这个工具没有副作用。
-            var selection = AgentCode.Select(_snapshot.Page, blocks.Select(b => b.ObjectId).ToList());
+            var selection = AgentCode.Select(_snapshot.Layout, blocks.Select(b => b.ObjectId).ToList());
             var language = LanguageRegistry.Resolve((string)args["language"], selection.Code)
                 ?? throw new AiException("无法自动识别代码语言。请用 language 指定语言；不确定时用 text。");
             var table = CodeBlockBuilder.BuildTable(selection.Code, language, _code.Theme, _code);
@@ -564,6 +664,146 @@ namespace OneNoteCodeHelper.Services.Agent
             _snapshot.Revision++;
             return new { ok = true, draft_revision = _snapshot.Revision, changed = ordered.Select(b => b.Id).ToArray(), noop = new string[0],
                 language = language.Id, discarded_format = discarded };
+        }
+
+        /// <summary>把用制表符或竖线分隔的连续段落排入草稿，提交时换成表格；和代码框一样整段替换，撤销时换回原段落。</summary>
+        private object TextToTable(IDictionary<string, object> args)
+        {
+            var blocks = Ids(args, "block_ids").Select(id => _snapshot.Blocks.FirstOrDefault(b => b.Id == id) ?? throw new AiException("目标不存在。")).ToList();
+            foreach (var b in blocks)
+            {
+                if (b.Conversion != null) throw new AiException("部分段落已排入代码框或表格转换。");
+                if (b.CodeCandidate) throw new AiException("代码段落请用 highlight_code 转换为代码框。");
+                if (!(b.Editable || b.ProtectedReason == "empty") || !_snapshot.EditableOutlines.Contains(b.ContainerId)) throw new AiException("目标受到保护，不能转换为表格。");
+                if (b.ProtectedReason != "empty" && !b.Read) throw new AiException("请先完整读取目标段落。");
+            }
+            // 先全部校验、生成表格，再发布草稿；失败时这个工具没有副作用。
+            var selection = AgentCode.Select(_snapshot.Layout, blocks.Select(b => b.ObjectId).ToList(), "表格");
+            if (selection.Block.Name == OneNoteApi.One + "Cell") throw new AiException("表格单元格里的段落不能再转换为表格。");
+            var shading = args.TryGetValue("header_shading", out var shade) && (string)shade != "none" ? TableLook.Shade((string)shade) : null;
+            var table = AgentTextTable.Build(selection.Paragraphs, (string)args["delimiter"],
+                !args.TryGetValue("header_row", out var header) || (bool)header, !args.TryGetValue("borders", out var borders) || (bool)borders, shading);
+            var ordered = selection.Paragraphs.Select(oe => blocks.First(b => b.Id == AgentLayout.KeyOf(oe))).ToList();
+            var conversion = new AgentCodeConversion { Blocks = ordered, TextTable = true, Code = selection.Code, Table = table };
+            // 转换后这些段落就不在了，之前给它们排的格式和文字修正作废。
+            var discarded = ordered.Where(b => b.Changed).Select(b => b.Id).ToArray();
+            foreach (var b in ordered) { b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.Conversion = conversion; }
+            _snapshot.CodeConversions.Add(conversion);
+            _snapshot.Revision++;
+            return new { ok = true, draft_revision = _snapshot.Revision, changed = ordered.Select(b => b.Id).ToArray(), rows = table.Elements(OneNoteApi.One + "Row").Count(),
+                columns = table.Element(OneNoteApi.One + "Columns").Elements().Count(), discarded_format = discarded };
+        }
+
+        private object RemoveBlankLines(IDictionary<string, object> args)
+        {
+            var blanks = new HashSet<string>(_snapshot.Blocks.Where(b => b.ProtectedReason == "empty" && b.Conversion == null && _snapshot.EditableOutlines.Contains(b.ContainerId)).Select(b => b.Id));
+            var candidate = new XElement(_snapshot.Layout);
+            var outlines = candidate.Descendants(OneNoteApi.One + "OE").Where(e => blanks.Contains(AgentLayout.KeyOf(e) ?? "")).ToDictionary(e => e, OutlineOf);
+            var removed = AgentLayout.RemoveBlankLines(candidate, e => blanks.Contains(AgentLayout.KeyOf(e) ?? ""), (string)args["mode"] == "all");
+            PublishLayout(candidate, "removed", removed.Select(e => (outlines[e], AgentLayout.KeyOf(e))).ToList());
+            return new { ok = true, draft_revision = _snapshot.Revision, removed = removed.Select(AgentLayout.KeyOf).ToArray() };
+        }
+
+        private object SetIndent(IDictionary<string, object> args)
+        {
+            var ids = Ids(args, "block_ids");
+            var candidate = new XElement(_snapshot.Layout);
+            var nodes = ids.Select(id => Movable(candidate, id)).ToList();
+            var listed = new HashSet<XElement>(nodes);
+            // 上级段落也在列表里时，下级段落跟着它走，不再单独调整。
+            var tops = nodes.Where(n => !n.Ancestors(OneNoteApi.One + "OE").Any(listed.Contains)).InDocumentOrder().ToList();
+            var changes = tops.Select(n => (OutlineOf(n), AgentLayout.KeyOf(n))).ToList();
+            foreach (var n in tops) AgentLayout.Indent(n, (string)args["direction"] == "in", AgentLayout.KeyOf(n));
+            var changed = PublishLayout(candidate, "indented", changes);
+            return new { ok = true, draft_revision = _snapshot.Revision, changed = changed ? ids.ToArray() : new string[0], noop = changed ? new string[0] : ids.ToArray() };
+        }
+
+        private object MoveBlocks(IDictionary<string, object> args)
+        {
+            var ids = Ids(args, "block_ids");
+            var targetId = (string)args["target_id"];
+            if (ids.Contains(targetId)) throw new AiException("目标段落不能是要移动的段落。");
+            var candidate = new XElement(_snapshot.Layout);
+            var nodes = ids.Select(id => Movable(candidate, id)).ToList();
+            var target = Node(candidate, targetId, out _);
+            var listed = new HashSet<XElement>(nodes);
+            if (nodes.Any(n => n.Ancestors(OneNoteApi.One + "OE").Any(listed.Contains))) throw new AiException("下级段落会随上级段落一起移动，不要同时列出。");
+            if (target.Ancestors(OneNoteApi.One + "OE").Any(listed.Contains)) throw new AiException("目标段落不能在要移动的段落下面。");
+            var block = PageEditor.TextBlockOf(target);
+            if (nodes.Any(n => PageEditor.TextBlockOf(n) != block)) throw new AiException("只能在同一个文本框或表格单元格里移动段落。");
+            var ordered = nodes.InDocumentOrder().ToList();
+            var changes = ordered.Select(n => (OutlineOf(n), AgentLayout.KeyOf(n))).ToList();
+            AgentLayout.Move(ordered, target, (string)args["position"] == "before");
+            var changed = PublishLayout(candidate, "moved", changes);
+            return new { ok = true, draft_revision = _snapshot.Revision, changed = changed ? ids.ToArray() : new string[0], noop = changed ? new string[0] : ids.ToArray() };
+        }
+
+        private static readonly char[] Breaks = { '\n', '\r', '\t' };
+
+        private object InsertBlocks(IDictionary<string, object> args)
+        {
+            var candidate = new XElement(_snapshot.Layout);
+            var target = Node(candidate, (string)args["target_id"], out _);
+            var items = ((IList)args["paragraphs"]).Cast<IDictionary<string, object>>().ToList();
+            var texts = items.Select(i => ((string)i["text"]).Trim()).ToList();
+            if (texts.Any(t => t.Length == 0)) throw new AiException("插入的段落不能是空白。");
+            if (texts.Any(t => t.IndexOfAny(Breaks) >= 0)) throw new AiException("插入的文字不能含换行或制表符，每段单独写一项。");
+            if (_snapshot.Inserted.Count + items.Count > MaxInserted || _snapshot.Inserted.Sum(i => i.Text.Length) + texts.Sum(t => t.Length) > MaxInsertedChars)
+                throw new AiException($"每个任务最多插入 {MaxInserted} 段、{MaxInsertedChars} 字。");
+            var styles = new XElement(_snapshot.DraftStyles);
+            var outline = OutlineOf(target);
+            var created = items.Select((item, i) => AgentLayout.NewParagraph("n" + (_snapshot.Inserted.Count + i + 1), texts[i], (string)item["preset_id"],
+                item.TryGetValue("list", out var list) ? (string)list : null, _snapshot.Options, styles)).ToList();
+            if ((string)args["position"] == "before") target.AddBeforeSelf(created); else target.AddAfterSelf(created);
+            PublishLayout(candidate, "inserted", created.Select(e => (outline, AgentLayout.KeyOf(e))).ToList());
+            _snapshot.DraftStyles.ReplaceNodes(styles.Elements().Select(e => new XElement(e)));
+            _snapshot.Inserted.AddRange(created.Select((e, i) => new AgentInserted { Id = AgentLayout.KeyOf(e), OutlineId = outline, Text = texts[i] }));
+            return new { ok = true, draft_revision = _snapshot.Revision, inserted = created.Select(AgentLayout.KeyOf).ToArray() };
+        }
+
+        private static List<string> Ids(IDictionary<string, object> args, string key)
+        {
+            var ids = ((IList)args[key]).Cast<string>().ToList();
+            if (ids.Distinct().Count() != ids.Count) throw new AiException("目标段落重复。");
+            return ids;
+        }
+
+        private static string OutlineOf(XElement oe) => (string)oe.Ancestors(OneNoteApi.One + "Outline").First().Attribute("objectID");
+
+        /// <summary>结构工具的对象：快照段落或新插入的段落，返回结构草稿 layout 里的 OE。只能在可调整结构的文本框里。</summary>
+        private XElement Node(XElement layout, string id, out AgentBlock block)
+        {
+            block = _snapshot.Blocks.FirstOrDefault(b => b.Id == id);
+            var node = AgentLayout.Find(layout, id);
+            if (node == null || (block == null && !_snapshot.Inserted.Any(i => i.Id == id))) throw new AiException($"段落 {id} 不存在或已删除。");
+            var container = node.Ancestors().FirstOrDefault(e => e.Parent == layout);
+            if (container == null || container.Name != OneNoteApi.One + "Outline" || !_snapshot.EditableOutlines.Contains((string)container.Attribute("objectID") ?? ""))
+                throw new AiException($"段落 {id} 在页面标题或受保护的文本框里，不能调整结构。");
+            if (block?.Conversion != null) throw new AiException($"段落 {id} 已排入代码框或表格转换，不能调整结构。");
+            if (block?.ProtectedReason == "highlighted_code") throw new AiException($"段落 {id} 在代码框里，不能调整结构。");
+            return node;
+        }
+
+        /// <summary>要移动、调整缩进的段落：读过的文字段落、待转换的代码、空行或新插入的段落。</summary>
+        private XElement Movable(XElement layout, string id)
+        {
+            var node = Node(layout, id, out var block);
+            if (block == null || block.ProtectedReason == "empty") return node;
+            if (!(block.Editable || block.CodeCandidate)) throw new AiException($"段落 {id} 受到保护，不能移动或调整缩进。");
+            if (!block.Read) throw new AiException("请先完整读取目标段落。");
+            return node;
+        }
+
+        /// <summary>结构工具共用的发布：通过不变量检查后换上新的结构草稿并记下改动。结构没有变化时不动修订号，返回 false。</summary>
+        private bool PublishLayout(XElement candidate, string kind, IList<(string Outline, string Id)> changes)
+        {
+            if (XNode.DeepEquals(candidate, _snapshot.Layout)) return false;
+            _snapshot.CheckLayout(candidate);
+            _snapshot.Layout = candidate;
+            foreach (var group in changes.GroupBy(c => c.Outline))
+                _snapshot.LayoutChanges.Add(new AgentLayoutChange { Kind = kind, OutlineId = group.Key, Ids = group.Select(c => c.Id).ToArray() });
+            _snapshot.Revision++;
+            return true;
         }
 
         private object Publish(Dictionary<AgentBlock, XElement> drafts)
@@ -588,10 +828,15 @@ namespace OneNoteCodeHelper.Services.Agent
             changed = _snapshot.Blocks.Where(b => b.Changed).Select(b => b.Id).ToArray(),
             text_fixes = _snapshot.Blocks.Where(b => b.TextFixes.Count > 0).Select(b => new { id = b.Id, fixes = b.TextFixes.ToArray() }).ToArray(),
             unread = _snapshot.Blocks.Where(b => b.Editable && !b.Read && b.Conversion == null).Select(b => b.Id).ToArray(),
-            code_blocks = _snapshot.CodeConversions.Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
+            code_blocks = _snapshot.CodeConversions.Where(c => !c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
+            text_tables = _snapshot.CodeConversions.Where(c => c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray() }).ToArray(),
+            layout = new { removed = LayoutIds("removed"), moved = LayoutIds("moved"), indented = LayoutIds("indented"),
+                inserted = _snapshot.Inserted.Select(i => new { id = i.Id, text = i.Text }).ToArray() },
             unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
             tables_changed = _snapshot.Tables.Where(t => t.Changed).Select(t => t.Id).ToArray(),
             protected_count = _snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null) };
+        private string[] LayoutIds(string kind) => _snapshot.LayoutChanges.Where(c => c.Kind == kind).SelectMany(c => c.Ids).Distinct().ToArray();
+
         private object Finish(IDictionary<string, object> args)
         {
             if (Convert.ToInt32(args["draft_revision"]) != _snapshot.Revision) throw new AiException("草稿修订号过期，请先检查待提交修改。");

@@ -113,6 +113,98 @@ namespace OneNoteCodeHelper.Services.Agent
         }
     }
 
+    /// <summary>
+    /// text_to_table：把用制表符或 | 分隔的段落拆成表格，每段一行，空行和 Markdown 分隔行（|---|:--:|）去掉。
+    /// 单元格复制源段落的样式和文字，按范围截取，保留加粗、链接等局部格式。
+    /// </summary>
+    internal static class AgentTextTable
+    {
+        internal const int MaxRows = 100;
+        internal const int MaxColumns = 10;
+        internal static readonly string[] Delimiters = { "tab", "pipe" };
+        private static XNamespace One => OneNoteApi.One;
+
+        /// <param name="paragraphs">按页面顺序排好的源段落（含中间空行）。</param>
+        /// <param name="shading">首行底色，null 为不设。</param>
+        internal static XElement Build(IEnumerable<XElement> paragraphs, string delimiter, bool headerRow, bool borders, string shading)
+        {
+            var rows = new List<List<XElement>>();
+            foreach (var oe in paragraphs)
+            {
+                var text = new AgentRichText(oe).Text;
+                if (string.IsNullOrWhiteSpace(text)) continue;
+                if (text.IndexOf('\n') >= 0) throw new AiException("含段内换行（Shift+Enter）的段落不能转换为表格。");
+                var ranges = Split(text, delimiter);
+                if (ranges != null) rows.Add(ranges.Select(r => Cell(oe, r.Start, r.Length)).ToList());
+            }
+            if (rows.Count == 0) throw new AiException("目标段落里没有可以转换的行。");
+            if (rows.Count > MaxRows) throw new AiException($"表格最多 {MaxRows} 行。");
+            var columns = rows.Max(r => r.Count);
+            if (columns < 2) throw new AiException("按指定的分隔符分不出两列，请确认 delimiter。");
+            if (columns > MaxColumns) throw new AiException($"表格最多 {MaxColumns} 列。");
+            // 未锁定的列宽由 OneNote 按内容自动计算（本机实测），width 只是架构要求的占位值。
+            var table = new XElement(One + "Table", new XAttribute("bordersVisible", borders ? "true" : "false"), new XAttribute("hasHeaderRow", headerRow ? "true" : "false"),
+                new XElement(One + "Columns", Enumerable.Range(0, columns).Select(i => new XElement(One + "Column", new XAttribute("index", i), new XAttribute("width", 100)))));
+            for (var i = 0; i < rows.Count; i++)
+            {
+                var row = new XElement(One + "Row");
+                for (var j = 0; j < columns; j++)
+                {
+                    var cell = new XElement(One + "Cell", new XElement(One + "OEChildren", j < rows[i].Count ? rows[i][j] : new XElement(One + "OE", new XElement(One + "T", new XCData("")))));
+                    if (i == 0 && shading != null) cell.SetAttributeValue("shadingColor", shading);
+                    row.Add(cell);
+                }
+                table.Add(row);
+            }
+            return table;
+        }
+
+        /// <summary>单元格的文字范围（已去掉两侧空白）。Markdown 分隔行返回 null。</summary>
+        private static List<(int Start, int Length)> Split(string text, string delimiter)
+        {
+            var start = 0;
+            var end = text.Length;
+            var separator = delimiter == "tab" ? '\t' : '|';
+            if (separator == '|')
+            {
+                Trim(text, ref start, ref end);
+                if (start < end && text[start] == '|') start++;
+                if (end > start && text[end - 1] == '|') end--;
+            }
+            var ranges = new List<(int Start, int Length)>();
+            for (var from = start; ;)
+            {
+                var next = text.IndexOf(separator, from, end - from);
+                var to = next < 0 ? end : next;
+                int s = from, e = to;
+                Trim(text, ref s, ref e);
+                ranges.Add((s, e - s));
+                if (next < 0) break;
+                from = next + 1;
+            }
+            if (separator == '|' && ranges.All(r => IsRule(text.Substring(r.Start, r.Length)))) return null;
+            return ranges;
+        }
+
+        private static bool IsRule(string cell) => cell.Length > 0 && cell.Contains("-") && cell.All(ch => ch == '-' || ch == ':');
+
+        private static void Trim(string text, ref int start, ref int end)
+        {
+            while (start < end && char.IsWhiteSpace(text[start])) start++;
+            while (end > start && char.IsWhiteSpace(text[end - 1])) end--;
+        }
+
+        /// <summary>复制源段落的样式和文字，只留下这一格的范围。quickStyleIndex 不带，单元格按正文显示。</summary>
+        private static XElement Cell(XElement source, int start, int length)
+        {
+            var oe = new XElement(One + "OE", source.Attribute("style"), source.Attribute("lang"), source.Elements(One + "T").Select(t => new XElement(t)));
+            new AgentRichText(oe).Keep(start, length);
+            // 截掉的 T 只剩空内容，留一个就够。
+            foreach (var t in oe.Elements(One + "T").Where(t => t.Value.Length == 0).Skip(oe.Elements(One + "T").All(t => t.Value.Length == 0) ? 1 : 0).ToList()) t.Remove();
+            return oe;
+        }
+    }
+
     /// <summary>表格样式的撤销记录：表格外观没被再改过时换回 Before。</summary>
     internal sealed class AgentTableUndoItem
     {

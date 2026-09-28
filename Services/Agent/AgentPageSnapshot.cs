@@ -29,6 +29,12 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool EnableLists { get; set; } = true;
         internal bool EnableTags { get; set; } = true;
         internal bool EnableTableStyles { get; set; } = true;
+        // 改变段落结构的工具：删空行、调整缩进、移动段落、插入段落、把分隔的文字转成表格。
+        internal bool EnableBlankLineRemoval { get; set; } = true;
+        internal bool EnableIndent { get; set; } = true;
+        internal bool EnableMoves { get; set; } = true;
+        internal bool EnableInsert { get; set; } = true;
+        internal bool EnableTextTables { get; set; } = true;
         internal string FontFamily { get; set; } = "Microsoft YaHei";
 
         internal static AgentOptions Parse(XElement element)
@@ -50,6 +56,11 @@ namespace OneNoteCodeHelper.Services.Agent
             value.EnableLists = Boolean(element, "EnableLists", true);
             value.EnableTags = Boolean(element, "EnableTags", true);
             value.EnableTableStyles = Boolean(element, "EnableTableStyles", true);
+            value.EnableBlankLineRemoval = Boolean(element, "EnableBlankLineRemoval", true);
+            value.EnableIndent = Boolean(element, "EnableIndent", true);
+            value.EnableMoves = Boolean(element, "EnableMoves", true);
+            value.EnableInsert = Boolean(element, "EnableInsert", true);
+            value.EnableTextTables = Boolean(element, "EnableTextTables", true);
             var font = (string)element.Element("FontFamily");
             if (ParagraphStyles.Fonts.Contains(font)) value.FontFamily = font;
             return value;
@@ -111,6 +122,19 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly XElement DraftStyles;
         /// <summary>草稿里的 TagDef：页面原有的加上 set_tag 新增的。提交时按内容重新对应到页面上的编号。</summary>
         internal readonly XElement DraftTags;
+        /// <summary>
+        /// 结构草稿：页面副本，删空行、缩进、移动、插入只改它，格式草稿仍在各段落的 Draft 里。
+        /// 段落用 <see cref="AgentLayout.Key"/> 记短 ID。工具在副本上改好、校验通过后整个换掉。
+        /// </summary>
+        internal XElement Layout;
+        /// <summary>可以调整结构的文本框（objectID）：不是标题，不含墨迹、附件等不支持的对象。</summary>
+        internal readonly HashSet<string> EditableOutlines = new HashSet<string>();
+        internal readonly List<AgentLayoutChange> LayoutChanges = new List<AgentLayoutChange>();
+        internal readonly List<AgentInserted> Inserted = new List<AgentInserted>();
+        /// <summary>撤销时整框换回的文本框。</summary>
+        internal readonly List<AgentOutlineUndoItem> OutlineRestores = new List<AgentOutlineUndoItem>();
+        /// <summary>结构草稿改过的文本框，提交时整框替换。</summary>
+        internal IEnumerable<string> LayoutOutlines => LayoutChanges.Select(c => c.OutlineId).Distinct();
         internal string PageId => (string)Page.Attribute("ID");
         internal string Title => (string)Page.Attribute("name") ?? "当前页面";
         internal int Revision;
@@ -127,10 +151,15 @@ namespace OneNoteCodeHelper.Services.Agent
             SelectionOnly = selection != null;
             var tableIds = CollectTables(selection);
             CollectImages(selection);
+            foreach (var outline in Page.Elements(One + "Outline"))
+                if (!string.IsNullOrEmpty((string)outline.Attribute("objectID")) && ContainerReason(outline) == null) EditableOutlines.Add((string)outline.Attribute("objectID"));
+            Layout = new XElement(Page);
             var objects = Page.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).ToList();
+            var layoutObjects = Layout.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).ToList();
             var duplicate = new HashSet<string>(objects.GroupBy(e => (string)e.Attribute("objectID")).Where(g => g.Count() > 1).Select(g => g.Key));
-            foreach (var oe in objects)
+            for (var index = 0; index < objects.Count; index++)
             {
+                var oe = objects[index];
                 var objectId = (string)oe.Attribute("objectID");
                 if (selection != null && !selection.Contains(objectId ?? "")) continue;
                 var container = oe.Ancestors().FirstOrDefault(e => e.Parent == Page);
@@ -148,6 +177,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 catch (Exception ex) when (ex is XmlException || ex is AiException || ex is ArgumentException)
                 { reason = "unsupported_html"; }
                 var original = new XElement(oe);
+                layoutObjects[index].SetAttributeValue(AgentLayout.Key, "p" + (Blocks.Count + 1));
                 Blocks.Add(new AgentBlock
                 {
                     Id = "p" + (Blocks.Count + 1), ObjectId = objectId, Original = original, Draft = new XElement(original),
@@ -245,14 +275,46 @@ namespace OneNoteCodeHelper.Services.Agent
                 || (string)e.Attribute("selected") == "all")
             .Select(e => (string)e.Attribute("objectID")).Where(id => !string.IsNullOrEmpty(id)));
 
-        internal XElement CreateDraftPage()
+        /// <summary>草稿页面：结构草稿（默认当前的 <see cref="Layout"/>）加上格式草稿和草稿里的样式、标记定义。段落仍带 <see cref="AgentLayout.Key"/>。</summary>
+        internal XElement CreateDraftPage(XElement layout = null)
         {
-            var page = new XElement(Page);
+            var page = new XElement(layout ?? Layout);
             page.Elements(One + "QuickStyleDef").Remove();
             page.Elements(One + "TagDef").Remove();
             page.AddFirst(DraftTags.Elements().Concat(DraftStyles.Elements()).Select(e => new XElement(e)));
-            foreach (var b in Blocks.Where(b => b.Changed)) CopyFormat(b.Draft, AgentCommitter.Find(page, b.ObjectId));
+            foreach (var b in Blocks.Where(b => b.Changed))
+            {
+                var target = AgentLayout.Find(page, b.Id);
+                if (target != null) CopyFormat(b.Draft, target);
+            }
             return page;
+        }
+
+        /// <summary>
+        /// 结构操作的两条不变量，candidate 是改好的结构草稿：已排入的代码框和表格转换仍然连续、内容不变；
+        /// 已有段落的格式不变（挂到带样式的段落下面会继承它的样式，这种调整不做）。
+        /// </summary>
+        internal void CheckLayout(XElement candidate)
+        {
+            foreach (var conversion in CodeConversions)
+            {
+                CodeSelection selection = null;
+                try { selection = AgentCode.Select(candidate, conversion.Blocks.Select(b => b.ObjectId).ToList()); } catch (AiException) { }
+                if (selection == null || selection.Code != conversion.Code) throw new AiException("这样调整会打断已排入的代码框或表格转换，没有应用。");
+            }
+            var before = CreateDraftPage();
+            var after = CreateDraftPage(candidate);
+            foreach (var b in Blocks)
+            {
+                var left = AgentLayout.Find(before, b.Id);
+                var right = AgentLayout.Find(after, b.Id);
+                if (left == null || right == null) continue;
+                string expected;
+                try { expected = SemanticFormat(left, before); } catch (Exception) { continue; }
+                string actual;
+                try { actual = SemanticFormat(right, after); } catch (Exception) { actual = null; }
+                if (expected != actual) throw new AiException($"这样调整会改变段落 {b.Id} 的格式（会继承上级段落的样式），没有应用。");
+            }
         }
 
         private static bool IsBinary(XElement e) => new[] { "Image", "InkDrawing", "InkWord", "InkParagraph", "InsertedFile", "MediaFile", "FutureObject", "HTMLBlock" }.Contains(e.Name.LocalName);

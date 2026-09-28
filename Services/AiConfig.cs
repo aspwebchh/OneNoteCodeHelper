@@ -330,7 +330,7 @@ namespace OneNoteCodeHelper.Services
                     new XElement("TimeoutSeconds", config.TimeoutSeconds),
                     new XComment(" 单次请求最多输出多少 token（含思考过程）。0 表示用接口的默认值 "),
                     new XElement("MaxTokens", config.MaxTokens),
-                    new XComment(" Agent 工具调用：默认启用标题、段间距、图文容器、代码框转换、列表、标记和表格样式，哪项回存有问题就把对应的 Enable 开关设为 false。" +
+                    new XComment(" Agent 工具调用：默认启用标题、段间距、图文容器、代码框转换、列表、标记、表格样式，以及删空行、缩进、移动、插入段落和转表格等结构调整，哪项回存有问题或不想让 Agent 改结构，就把对应的 Enable 开关设为 false。" +
                         "若接口不接受思考参数，可把 SendThinking 设为 false。旧配置不写此节点也可使用默认值。 "),
                     new XElement("Agent",
                         new XElement("MaxTurns", 12), new XElement("MaxToolCalls", 48),
@@ -340,7 +340,9 @@ namespace OneNoteCodeHelper.Services
                         new XElement("StreamUsage", true), new XElement("EnableNativeHeadings", true),
                         new XElement("EnableParagraphSpacing", true), new XElement("EnableMixedOutlines", true),
                         new XElement("EnableCodeHighlight", true), new XElement("EnableLists", true),
-                        new XElement("EnableTags", true), new XElement("EnableTableStyles", true)),
+                        new XElement("EnableTags", true), new XElement("EnableTableStyles", true),
+                        new XElement("EnableBlankLineRemoval", true), new XElement("EnableIndent", true),
+                        new XElement("EnableMoves", true), new XElement("EnableInsert", true), new XElement("EnableTextTables", true)),
                     new XComment(" Agent 窗口「模型」下拉里的选项：id 是接口的模型名，下拉里直接显示它 "),
                     new XElement(
                         "Models",

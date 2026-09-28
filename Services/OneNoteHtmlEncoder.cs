@@ -272,6 +272,13 @@ namespace OneNoteCodeHelper.Services
             return builder.ToString();
         }
 
+        /// <summary>一行纯文字转成 one:T 里的 HTML，转义和空白处理同代码行。Agent 插入新段落时用。</summary>
+        internal static string EncodePlainText(string text)
+        {
+            var atLineStart = true;
+            return EncodeText(text, ref atLineStart);
+        }
+
         private static void Repeat(StringBuilder builder, string text, int count)
         {
             for (var i = 0; i < count; i++)

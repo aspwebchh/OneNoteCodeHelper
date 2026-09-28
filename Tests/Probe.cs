@@ -54,7 +54,13 @@ internal static class Probe
                                 new XElement(ns + "Column", new XAttribute("index", 1), new XAttribute("width", 200), new XAttribute("isLocked", true))),
                             new XElement(ns + "Row", Cell(ns, "表格内文字"), Cell(ns, "保持原样的单元格")))),
                         new XElement(ns + "OE", new XElement(ns + "Image", new XAttribute("format", "png"),
-                            new XElement(ns + "Size", new XAttribute("width", 16), new XAttribute("height", 16)), new XElement(ns + "Data", png))))));
+                            new XElement(ns + "Size", new XAttribute("width", 16), new XAttribute("height", 16)), new XElement(ns + "Data", png))))),
+                // 第二个文本框覆盖结构调整：整框提交、整框撤销。第一个文本框没有结构改动，仍按段落逐项提交。
+                new XElement(ns + "Outline", new XElement(ns + "Position", new XAttribute("x", 36), new XAttribute("y", 520), new XAttribute("z", 1)),
+                    new XElement(ns + "Size", new XAttribute("width", 500), new XAttribute("height", 200)),
+                    new XElement(ns + "OEChildren", Line(ns, "结构调整说明"), Line(ns, ""), Line(ns, ""), Line(ns, "第一项"), Line(ns, "第一项的细节"), Line(ns, "第一项的补充"),
+                        Line(ns, "| 名称 | 说明 |"), Line(ns, "|---|---|"), Line(ns, "| <b>甲</b> | 见<a href='https://example.com'>链接</a> |"),
+                        Line(ns, "应当放在最前面的结论"), Line(ns, ""))));
             api.UpdatePageContent(page.ToString(SaveOptions.DisableFormatting), AgentPageSnapshot.Modified(initial));
             var beforeXml = api.GetPageContent(pageId, PageInfo.piBasic);
             File.WriteAllText(Path.Combine(directory, "before.xml"), beforeXml);
@@ -87,24 +93,44 @@ internal static class Probe
             Execute(tools, "set_tag", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { todo }, tag = "todo", completed = true });
             var grid = snapshot.Tables.Single(t => t.Editable);
             Execute(tools, "set_table_style", new { snapshot_id = snapshot.SnapshotId, table_ids = new[] { grid.Id }, style = new { header_row = true, header_shading = "#DEEAF6" } });
+            // 结构调整：删空行、移动、缩进、插入、转表格，再加一处格式修改，一起整框提交。
+            string Id(string text) => editable.First(b => b.Text == text).Id;
+            var structureOutline = snapshot.Blocks.First(b => b.Text == "结构调整说明").ContainerId;
+            Execute(tools, "remove_blank_lines", new { snapshot_id = snapshot.SnapshotId, mode = "collapse" });
+            Execute(tools, "move_blocks", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { Id("应当放在最前面的结论") }, target_id = Id("结构调整说明"), position = "before" });
+            Execute(tools, "set_indent", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { Id("第一项的细节"), Id("第一项的补充") }, direction = "in" });
+            Execute(tools, "insert_blocks", new { snapshot_id = snapshot.SnapshotId, target_id = Id("应当放在最前面的结论"), position = "after", paragraphs = new object[] {
+                new { text = "摘要", preset_id = "heading2" }, new { text = "要点：先备份再部署", preset_id = "body", list = "bullet" } } });
+            Execute(tools, "text_to_table", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { Id("| 名称 | 说明 |"), Id("|---|---|"), Id("| 甲 | 见链接 |") },
+                delimiter = "pipe", header_shading = "#E2EFDA" });
+            Execute(tools, "set_paragraph_style", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { Id("第一项") }, preset_id = "body" });
+            var structureBefore = OutlineText(AgentPageSnapshot.ParsePage(beforeXml), structureOutline);
             var expected = snapshot.CreateDraftPage();
             File.WriteAllText(Path.Combine(directory, "expected.xml"), expected.ToString());
             Execute(tools, "finish_edit", new { snapshot_id = snapshot.SnapshotId, draft_revision = snapshot.Revision });
             File.WriteAllText(Path.Combine(directory, "after.xml"), api.GetPageContent(pageId, PageInfo.piBasic));
             Console.WriteLine("Test section: " + path);
             Console.WriteLine("Result: " + tools.Report.Status + " " + tools.Report.Message);
-            Console.WriteLine("Code blocks: " + tools.Report.CodeBlocks + ", tables: " + tools.Report.Tables);
+            Console.WriteLine("Code blocks: " + tools.Report.CodeBlocks + ", tables: " + tools.Report.Tables + ", text tables: " + tools.Report.TextTables +
+                ", outlines: " + tools.Report.Outlines + ", removed: " + tools.Report.Removed + ", moved: " + tools.Report.Moved + ", indented: " + tools.Report.Indented + ", inserted: " + tools.Report.Inserted);
             var actual = AgentPageSnapshot.ParsePage(api.GetPageContent(pageId, PageInfo.piBasic));
             // OneNote 实际写回的列表、标记和表格外观，供对照 AgentMarks / TableLook 的写法。
             foreach (var e in actual.Elements(ns + "TagDef").Concat(actual.Descendants(ns + "Tag")).Concat(actual.Descendants(ns + "List")))
+                Console.WriteLine("Written " + e.Name.LocalName + ": " + e.ToString(SaveOptions.DisableFormatting));
+            var writtenStructure = actual.Elements(ns + "Outline").First(o => (string)o.Attribute("objectID") == structureOutline);
+            Console.WriteLine("Written structure: " + string.Join(" | ", writtenStructure.Descendants(ns + "OE").Where(e => e.Elements(ns + "T").Any())
+                .Select(e => new string('>', e.Ancestors(ns + "OE").Count()) + AgentCode.PlainText(e))));
+            foreach (var e in writtenStructure.Descendants(ns + "Table").Concat(writtenStructure.Descendants(ns + "OE").Take(3)))
                 Console.WriteLine("Written " + e.Name.LocalName + ": " + e.ToString(SaveOptions.DisableFormatting));
             var writtenGrid = AgentTable.Find(actual, grid.ObjectId);
             if (writtenGrid != null) Console.WriteLine("Written table: borders=" + (string)writtenGrid.Attribute("bordersVisible") + " header=" + (string)writtenGrid.Attribute("hasHeaderRow") +
                 " shading=" + string.Join(",", writtenGrid.Element(ns + "Row").Elements(ns + "Cell").Select(c => (string)c.Attribute("shadingColor"))));
             foreach (var b in snapshot.Blocks.Where(b => b.Changed))
             {
-                var left = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(expected, b.ObjectId), expected);
-                var right = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(actual, b.ObjectId), actual);
+                var written = AgentCommitter.Find(actual, b.ObjectId);
+                if (written == null) continue;
+                var left = AgentPageSnapshot.SemanticFormat(AgentLayout.Find(expected, b.Id), expected);
+                var right = AgentPageSnapshot.SemanticFormat(written, actual);
                 if (left != right)
                 {
                     var i = 0; while (i < Math.Min(left.Length, right.Length) && left[i] == right[i]) i++;
@@ -121,12 +147,22 @@ internal static class Probe
             var child = snapshot.Blocks.Single(b => b.Text == "保留原样的子段落");
             var childKept = AgentCommitter.Find(restored, child.ObjectId) != null;
             Console.WriteLine("Tags and lists left after undo: " + marksLeft + ", child paragraph kept its ID: " + childKept);
-            return tools.Report.Status == "Verified" && undo.Status == "Verified" && tools.Report.CodeBlocks == 2 && undo.CodeBlocks == 2 &&
-                tools.Report.Tables == 1 && undo.Tables == 1 && marksLeft == 0 && childKept ? 0 : 1;
+            // 撤销后第二个文本框的文字和原来一致；只移动、缩进过的段落保持原 ID。
+            var structureRestored = OutlineText(restored, structureOutline) == structureBefore;
+            var movedKept = new[] { "应当放在最前面的结论", "第一项的细节", "第一项" }.All(text => AgentCommitter.Find(restored, snapshot.Blocks.Single(b => b.Text == text).ObjectId) != null);
+            Console.WriteLine("Structure restored: " + structureRestored + ", moved paragraphs kept their IDs: " + movedKept + ", tables left: " + restored.Descendants(ns + "Table").Count());
+            var report = tools.Report;
+            return report.Status == "Verified" && undo.Status == "Verified" && report.CodeBlocks == 2 && undo.CodeBlocks == 2 &&
+                report.Tables == 1 && undo.Tables == 1 && marksLeft == 0 && childKept &&
+                report.Outlines == 1 && undo.Outlines == 1 && report.TextTables == 1 && report.Removed == 2 && report.Moved == 1 && report.Indented == 2 && report.Inserted == 2 &&
+                structureRestored && movedKept ? 0 : 1;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
         finally { if (app != null && Marshal.IsComObject(app)) Marshal.FinalReleaseComObject(app); }
     }
+    private static XElement Line(XNamespace ns, string html) => new XElement(ns + "OE", new XElement(ns + "T", new XCData(html)));
+    private static string OutlineText(XElement page, string outlineId) => string.Join("|", page.Elements(OneNoteApi.One + "Outline")
+        .First(o => (string)o.Attribute("objectID") == outlineId).Descendants(OneNoteApi.One + "OE").Where(e => e.Elements(OneNoteApi.One + "T").Any()).Select(AgentCode.PlainText));
     private static XElement Cell(XNamespace ns, string text) => new XElement(ns + "Cell",
         new XElement(ns + "OEChildren", new XElement(ns + "OE", new XElement(ns + "T", text))));
     private static void Execute(AgentTools tools, string name, object args) => tools.Execute(new AgentToolCall { Id = name, Name = name, Arguments = AgentChatClient.Serializer().Serialize(args) });

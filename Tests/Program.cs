@@ -724,6 +724,245 @@ internal static class Program
             Equal(("设置表格样式 · 1 个表格", AgentStepState.Done), AgentTools.DescribeStep("set_table_style", "{\"table_ids\":[\"t1\"]}", "{\"ok\":true}"));
             Equal(("读取图片文字 · 2 张", AgentStepState.Done), AgentTools.DescribeStep("read_image_text", "{\"image_ids\":[\"i1\",\"i2\"]}", "{}"));
         });
+        Test("remove_blank_lines collapses runs and edges, verifies and undo restores the blank lines", () =>
+        {
+            var s = Snapshot(Page(Paragraph("e1", ""), Paragraph("a", "第一段"), Paragraph("e2", ""), Paragraph("e3", ""), Paragraph("b", "第二段"), Paragraph("e4", "")));
+            var t = Tools(s);
+            True(Json(Invoke(t, "remove_blank_lines", new { snapshot_id = s.SnapshotId, mode = "collapse" })).Contains("\"removed\":[\"p1\",\"p4\",\"p6\"]"));
+            Equal(1, s.Revision); True(!Json(Invoke(t, "get_page_overview", new { })).Contains("\"id\":\"p1\""));
+            True(Json(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId })).Contains("\"removed\":[\"p1\",\"p4\",\"p6\"]"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(3, r.Removed); Equal(1, r.OutlineUndo.Count); Equal(1, api.Writes); True(r.Message.Contains("删除空行 3 行"));
+            Equal("第一段||第二段", Texts(api.Page));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(1, undo.Outlines); True(undo.Message.Contains("恢复文本框结构 1 个"));
+            Equal("|第一段|||第二段|", Texts(api.Page));
+            True(AgentCommitter.Find(api.Page, "e2") != null && AgentCommitter.Find(api.Page, "e1") == null && AgentCommitter.Find(api.Page, "a") != null);
+        });
+        Test("remove_blank_lines skips marked blanks, code ranges and blanks outside the selection", () =>
+        {
+            var tagged = Paragraph("g", ""); tagged.AddFirst(Tag("0"));
+            var p = Page(Paragraph("a", "正文"), Paragraph("e1", ""), Listed("l", "", "2"), Paragraph("e2", ""), tagged,
+                Paragraph("c1", "x = 1"), Paragraph("c2", ""), Paragraph("c3", "y = 2"), Paragraph("b", "结尾"));
+            p.AddFirst(TagDef("0", 3, "待办事项"));
+            var s = Snapshot(p); var t = Tools(s); Read(t, s);
+            Code(t, s, "python", "p6", "p7", "p8");
+            True(Json(Invoke(t, "remove_blank_lines", new { snapshot_id = s.SnapshotId, mode = "all" })).Contains("\"removed\":[\"p2\",\"p4\"]"));
+            var api = new FakePage(s.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(2, r.Removed); Equal(1, r.CodeBlocks); Equal(0, r.CodeUndo.Count); Equal(1, r.OutlineUndo.Count);
+            // all 也不会把一摞段落删空；选区外的空行不删。
+            var blank = Snapshot(Page(Paragraph("e1", ""), Paragraph("e2", "")));
+            True(Json(Invoke(Tools(blank), "remove_blank_lines", new { snapshot_id = blank.SnapshotId, mode = "all" })).Contains("\"removed\":[\"p2\"]"));
+            var selected = new AgentPageSnapshot(Page(Paragraph("a", "正文"), Paragraph("e1", ""), Paragraph("e2", ""), Paragraph("b", "结尾")).ToString(),
+                new HashSet<string> { "a", "e1" }, new AgentOptions());
+            True(Json(Invoke(Tools(selected), "remove_blank_lines", new { snapshot_id = selected.SnapshotId, mode = "collapse" })).Contains("\"removed\":[\"p2\"]"));
+            Equal("正文||结尾", Texts(new FakePage(selected.Page).Commit(selected)));
+        });
+        Test("move_blocks moves a paragraph with its children, keeps IDs, verifies and undo restores order", () =>
+        {
+            var conclusion = Paragraph("c", "结论"); conclusion.Add(new XElement(One + "OEChildren", Paragraph("c1", "细节")));
+            var s = Snapshot(Page(Paragraph("a", "背景"), Paragraph("b", "过程"), conclusion)); var t = Tools(s); Read(t, s);
+            Move(t, s, new[] { "p3" }, "p1", "before"); Equal(1, s.Revision);
+            Move(t, s, new[] { "p3" }, "p1", "before"); Equal(1, s.Revision);
+            var overview = Json(Invoke(t, "get_page_overview", new { }));
+            True(overview.IndexOf("\"id\":\"p3\"", StringComparison.Ordinal) < overview.IndexOf("\"id\":\"p1\"", StringComparison.Ordinal));
+            True(overview.Contains("\"parent_id\":\"p3\""));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.Moved); True(r.Message.Contains("移动 1 段"));
+            Equal("结论|细节|背景|过程", Texts(api.Page)); Equal("c,c1,a,b", Ids(api.Page));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal("背景|过程|结论|细节", Texts(api.Page)); Equal("a,b,c,c1", Ids(api.Page));
+        });
+        Test("move_blocks rejects unread, cross-cell, nested, title and self targets without side effects", () =>
+        {
+            var parent = Paragraph("n", "父"); parent.Add(new XElement(One + "OEChildren", Paragraph("m", "子")));
+            var p = GridPage(); p.Element(One + "Outline").Element(One + "OEChildren").Add(Paragraph("a", "正文"), parent);
+            p.AddFirst(new XElement(One + "Title", Paragraph("title", "标题")));
+            var s = Snapshot(p); var t = Tools(s);
+            Rejects("请先完整读取", () => Move(t, s, new[] { "p6" }, "p7", "after"));
+            Read(t, s);
+            Rejects("同一个文本框", () => Move(t, s, new[] { "p6" }, "p2", "before"));
+            Rejects("不要同时列出", () => Move(t, s, new[] { "p7", "p8" }, "p6", "before"));
+            Rejects("下面", () => Move(t, s, new[] { "p7" }, "p8", "after"));
+            Rejects("页面标题", () => Move(t, s, new[] { "p6" }, "p1", "after"));
+            Rejects("不能是要移动的段落", () => Move(t, s, new[] { "p6" }, "p6", "after"));
+            Equal(0, s.Revision); Equal(0, s.LayoutChanges.Count);
+        });
+        Test("set_indent in and out keep document order; undo restores nesting", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "一"), Paragraph("b", "二"), Paragraph("c", "三"), Paragraph("d", "四"))); var t = Tools(s); Read(t, s);
+            Indent(t, s, "in", "p2", "p3");
+            True(Json(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p3" } })).Contains("\"parent_id\":\"p1\""));
+            Indent(t, s, "out", "p2");
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(2, r.Indented); Equal("一|二|三|四", Texts(api.Page));
+            var b = AgentCommitter.Find(api.Page, "b");
+            Equal(0, b.Ancestors(One + "OE").Count()); Equal("c", (string)b.Element(One + "OEChildren").Element(One + "OE").Attribute("objectID"));
+            Equal(0, AgentCommitter.Find(api.Page, "a").Elements(One + "OEChildren").Count());
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+            Equal(0, api.Page.Descendants(One + "OEChildren").Count(e => e.Parent.Name == One + "OE")); Equal("a,b,c,d", Ids(api.Page));
+        });
+        Test("set_indent rejects the first paragraph, outermost outdent and inherited parent style", () =>
+        {
+            var heading = Paragraph("h", "标题"); heading.SetAttributeValue("style", "font-size:20pt");
+            var s = Snapshot(Page(Paragraph("a", "首段"), heading, Paragraph("b", "正文"))); var t = Tools(s); Read(t, s);
+            Rejects("前面没有", () => Indent(t, s, "in", "p1"));
+            Rejects("最外层", () => Indent(t, s, "out", "p2"));
+            Rejects("继承", () => Indent(t, s, "in", "p3"));
+            Equal(0, s.Revision);
+        });
+        Test("insert_blocks adds styled plain paragraphs that can be targets, commits and undo removes them", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "第一段"), Paragraph("b", "第二段"))); var t = Tools(s); Read(t, s);
+            True(Json(Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = "p1", position = "before", paragraphs = new object[] {
+                new { text = "摘要", preset_id = "heading2" }, new { text = "要点 <b>&", preset_id = "body", list = "bullet" } } })).Contains("\"inserted\":[\"n1\",\"n2\"]"));
+            Insert(t, s, "n2", "补充");
+            var overview = Json(Invoke(t, "get_page_overview", new { }));
+            True(overview.IndexOf("\"id\":\"n3\"", StringComparison.Ordinal) < overview.IndexOf("\"id\":\"p1\"", StringComparison.Ordinal)); True(overview.Contains("\"inserted\":true"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(3, r.Inserted); True(!api.LastXml.Contains("urn:onenote-code-helper"));
+            Equal("摘要|要点 <b>&|补充|第一段|第二段", Texts(api.Page));
+            var lines = api.Page.Descendants(One + "OE").ToList();
+            True(lines[1].Element(One + "T").Value.Contains("要点 &lt;b&gt;&amp;")); Equal("bullet", AgentMarks.ListKind(lines[1]));
+            var index = (string)lines[0].Attribute("quickStyleIndex");
+            Equal("h2", (string)api.Page.Elements(One + "QuickStyleDef").Single(d => (string)d.Attribute("index") == index).Attribute("name"));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal("第一段|第二段", Texts(api.Page));
+        });
+        Test("insert_blocks rejects bad text, presets, targets and limits without side effects", () =>
+        {
+            var p = Page(Paragraph("a", "正文")); p.AddFirst(new XElement(One + "Title", Paragraph("title", "标题")));
+            var s = Snapshot(p); var t = Tools(s);
+            Rejects("换行", () => Insert(t, s, "p2", "第一行\n第二行"));
+            Rejects("空白", () => Insert(t, s, "p2", "   "));
+            Rejects("字符串无效", () => Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = "p2", position = "after", paragraphs = new[] { new { text = "x", preset_id = "page_title" } } }));
+            Rejects("页面标题", () => Insert(t, s, "p1", "新段落"));
+            Rejects("不存在", () => Insert(t, s, "n9", "新段落"));
+            var many = Enumerable.Range(1, 21).Select(i => new { text = "第" + i + "项", preset_id = "body" }).ToArray();
+            Rejects("数组长度", () => Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = "p2", position = "after", paragraphs = many }));
+            Equal(0, s.Revision);
+            for (var i = 0; i < 2; i++) Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = "p2", position = "after", paragraphs = many.Take(20).ToArray() });
+            Rejects("最多插入", () => Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = "p2", position = "after", paragraphs = many.Take(20).ToArray() }));
+            Equal(2, s.Revision); Equal(40, s.Inserted.Count);
+        });
+        Test("text_to_table converts pipe rows keeping links and bold, verifies and undo restores paragraphs", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "对比如下："), Paragraph("r1", "| 名称 | 说明 |"), Paragraph("r2", "|---|:--:|"),
+                Paragraph("r3", "| <b>甲</b> | 见<a href='https://example.com'>链接</a> |"), Paragraph("b", "结尾")));
+            var t = Tools(s); Read(t, s);
+            var result = Json(Table(t, s, "pipe", "p2", "p3", "p4"));
+            True(result.Contains("\"rows\":2")); True(result.Contains("\"columns\":2"));
+            Rejects("表格转换", () => Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, preset_id = "body" }));
+            True(Json(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId })).Contains("\"text_tables\":[{\"block_ids\":[\"p2\",\"p3\",\"p4\"]}]"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.TextTables); Equal(1, r.CodeUndo.Count); True(r.Message.Contains("转换表格 1 个"));
+            var table = api.Page.Descendants(One + "Table").Single();
+            True(TableLook.Flag(table, "hasHeaderRow")); True(TableLook.Flag(table, "bordersVisible"));
+            Equal("#DEEAF6", (string)table.Element(One + "Row").Element(One + "Cell").Attribute("shadingColor"));
+            var cells = table.Descendants(One + "Cell").Select(cell => cell.Descendants(One + "OE").Single()).ToList();
+            Equal("名称|说明|甲|见链接", string.Join("|", cells.Select(AgentCode.PlainText)));
+            True(cells[2].Element(One + "T").Value.Contains("<b>甲</b>")); True(cells[3].Element(One + "T").Value.Contains("href=\"https://example.com\""));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(1, undo.TextTables); True(undo.Message.Contains("表格换回段落 1 个"));
+            True(!api.Page.Descendants(One + "Table").Any()); Equal(Texts(s.Page), Texts(api.Page));
+        });
+        Test("text_to_table splits tabs, pads short rows and rejects invalid input", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "名称\t说明\t备注"), Paragraph("b", "甲\t乙"), Paragraph("c", "单列"), Paragraph("d", "第一行<br>第二行\tx"),
+                Paragraph("e", "一\t二"), Listed("l", "列\t表", "2")));
+            var t = Tools(s);
+            Rejects("请先完整读取", () => Table(t, s, "tab", "p1", "p2"));
+            Read(t, s);
+            Rejects("两列", () => Table(t, s, "tab", "p3"));
+            Rejects("段内换行", () => Table(t, s, "tab", "p4"));
+            Rejects("连续", () => Table(t, s, "tab", "p1", "p5"));
+            Rejects("项目符号", () => Table(t, s, "tab", "p6"));
+            Equal(0, s.Revision);
+            True(Json(Table(t, s, "tab", "p1", "p2")).Contains("\"columns\":3"));
+            var api = new FakePage(s.Page); Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+            var cells = api.Page.Descendants(One + "Cell").Select(cell => AgentCode.PlainText(cell.Descendants(One + "OE").Single())).ToArray();
+            Equal("名称|说明|备注|甲|乙|", string.Join("|", cells));
+        });
+        Test("structure, format and code conversion in one text box commit together and undo restores all at once", () =>
+        {
+            var s = Snapshot(CodePage()); var t = Tools(s); Read(t, s);
+            Code(t, s, "python", "p2", "p3", "p4");
+            Style(t, s);
+            Move(t, s, new[] { "p5" }, "p1", "before");
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, api.Writes); Equal(1, r.Applied); Equal(1, r.CodeBlocks); Equal(1, r.Moved);
+            Equal(1, r.OutlineUndo.Count); Equal(0, r.Undo.Count + r.CodeUndo.Count);
+            Equal("结尾", AgentCode.PlainText(api.Page.Descendants(One + "OE").First())); True(api.Page.Descendants(One + "Table").Any());
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(2, api.Writes); True(!api.Page.Descendants(One + "Table").Any());
+            Equal("示例：|def f(x):||    return x + 1|结尾", Texts(api.Page));
+            Equal((string)AgentCommitter.Find(s.Page, "a").Attribute("style"), (string)AgentCommitter.Find(api.Page, "a").Attribute("style"));
+        });
+        Test("user edit in the same text box skips structure changes but still applies formats", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "第一段"), Paragraph("b", "第二段"), Paragraph("c", "第三段"))); var t = Tools(s); Read(t, s);
+            Style(t, s); Move(t, s, new[] { "p3" }, "p2", "before");
+            var api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "b").Element(One + "T").Value = "用户改了第二段";
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("PartiallyApplied", r.Status); Equal(1, r.Applied); Equal(0, r.Moved); True(r.ConflictIds.Contains("p3"));
+            Equal("第一段|用户改了第二段|第三段", Texts(api.Page)); Equal(1, r.Undo.Count); Equal(0, r.OutlineUndo.Count);
+        });
+        Test("undo skips a text box edited after the structure change", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "第一段"), Paragraph("b", "第二段"))); var t = Tools(s); Read(t, s);
+            Move(t, s, new[] { "p2" }, "p1", "before");
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status);
+            AgentCommitter.Find(api.Page, "a").Element(One + "T").Value = "之后改过";
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("NoChange", undo.Status); Equal(1, undo.Conflicts); Equal(1, api.Writes); Equal("第二段|之后改过", Texts(api.Page));
+        });
+        Test("OneNote changing a moved paragraph's format is not reported verified", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "第一段"), Paragraph("b", "第二段"))); var t = Tools(s); Read(t, s);
+            Move(t, s, new[] { "p2" }, "p1", "before");
+            var api = new FakePage(s.Page); api.AfterSave = () => AgentCommitter.Find(api.Page, "b").SetAttributeValue("style", "font-size:30pt");
+            Equal("CommitOutcomeUnknown", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+        });
+        Test("structure changes that would break a staged conversion are rejected", () =>
+        {
+            var s = Snapshot(CodePage()); var t = Tools(s); Read(t, s); Code(t, s, "python", "p2", "p3", "p4");
+            Rejects("打断", () => Indent(t, s, "in", "p5"));
+            Rejects("代码框或表格转换", () => Move(t, s, new[] { "p3" }, "p1", "before"));
+            Rejects("代码框或表格转换", () => Move(t, s, new[] { "p5" }, "p2", "after"));
+            Equal(1, s.Revision); Equal(0, s.LayoutChanges.Count);
+        });
+        Test("lists in a restructured text box: removal rebuilds, undo restores both lists", () =>
+        {
+            var s = Snapshot(Page(Listed("l", "已有列表", "2"), Paragraph("a", "第一段"), Paragraph("e", ""), Paragraph("b", "第二段"))); var t = Tools(s); Read(t, s);
+            Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, list = "none" });
+            Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, list = "bullet" });
+            Invoke(t, "remove_blank_lines", new { snapshot_id = s.SnapshotId, mode = "all" });
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(2, r.Applied); Equal(1, r.Removed);
+            True(AgentCommitter.Find(api.Page, "l") == null); Equal("none|bullet|none", string.Join("|", api.Page.Descendants(One + "OE").Select(AgentMarks.ListKind)));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+            Equal("bullet|none|none|none", string.Join("|", api.Page.Descendants(One + "OE").Select(AgentMarks.ListKind)));
+            Equal("已有列表|第一段||第二段", Texts(api.Page)); True(AgentCommitter.Find(api.Page, "a") == null && AgentCommitter.Find(api.Page, "b") != null);
+        });
+        Test("switches remove structure tools and prompts; step descriptions", () =>
+        {
+            var names = new[] { "remove_blank_lines", "set_indent", "move_blocks", "insert_blocks", "text_to_table" };
+            var page = Page(Paragraph("a", "正文"), Paragraph("e", ""));
+            var off = Tools(new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = false, EnableIndent = false, EnableMoves = false, EnableInsert = false, EnableTextTables = false }));
+            var on = Tools(Snapshot(page));
+            foreach (var name in names)
+            {
+                True(!Json(off.Definitions).Contains(name)); True(!AgentRunner.SystemPrompt(off).Contains(name));
+                True(Json(on.Definitions).Contains(name)); True(AgentRunner.SystemPrompt(on).Contains(name));
+            }
+            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><EnableMoves>false</EnableMoves></Agent></AiConfig>"));
+            True(!c.Agent.EnableMoves); True(c.Agent.EnableInsert && c.Agent.EnableIndent && c.Agent.EnableBlankLineRemoval && c.Agent.EnableTextTables);
+            Equal(("删除空行 · 3 行", AgentStepState.Done), AgentTools.DescribeStep("remove_blank_lines", "{\"mode\":\"collapse\"}", "{\"ok\":true,\"removed\":[\"p1\",\"p2\",\"p3\"]}"));
+            Equal(("调整缩进 · 增加缩进 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("set_indent", "{\"block_ids\":[\"a\",\"b\"],\"direction\":\"in\"}", "{\"ok\":true}"));
+            Equal(("移动段落 · 3 段", AgentStepState.Done), AgentTools.DescribeStep("move_blocks", "{\"block_ids\":[\"a\",\"b\",\"c\"]}", "{\"ok\":true}"));
+            Equal(("插入段落 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("insert_blocks", "{\"paragraphs\":[{},{}]}", "{\"ok\":true}"));
+            Equal(("转换为表格 · 4 段", AgentStepState.Done), AgentTools.DescribeStep("text_to_table", "{\"block_ids\":[\"a\",\"b\",\"c\",\"d\"]}", "{\"ok\":true}"));
+        });
         Console.WriteLine($"Agent: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
     }
@@ -750,6 +989,17 @@ internal static class Program
     private static XElement Listed(string id, string text, string bullet)
     { var oe = Paragraph(id, text); oe.AddFirst(new XElement(One + "List", new XElement(One + "Bullet", new XAttribute("bullet", bullet)))); return oe; }
     private static string Json(object value) => AgentChatClient.Serializer().Serialize(value);
+    /// <summary>页面上各文字段落的纯文字，按页面顺序用 | 连接。</summary>
+    private static string Texts(XElement page) => string.Join("|", page.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).Select(AgentCode.PlainText));
+    private static string Ids(XElement page) => string.Join(",", page.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")));
+    private static object Move(AgentTools tools, AgentPageSnapshot s, string[] ids, string target, string position) =>
+        Invoke(tools, "move_blocks", new { snapshot_id = s.SnapshotId, block_ids = ids, target_id = target, position });
+    private static object Indent(AgentTools tools, AgentPageSnapshot s, string direction, params string[] ids) =>
+        Invoke(tools, "set_indent", new { snapshot_id = s.SnapshotId, block_ids = ids, direction });
+    private static object Insert(AgentTools tools, AgentPageSnapshot s, string target, string text) =>
+        Invoke(tools, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = target, position = "after", paragraphs = new[] { new { text, preset_id = "body" } } });
+    private static object Table(AgentTools tools, AgentPageSnapshot s, string delimiter, params string[] ids) =>
+        Invoke(tools, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, delimiter, header_shading = "#DEEAF6" });
     private static AgentTools Tools(AgentPageSnapshot s) => new AgentTools(s, new AgentCommitter(new FakePage(s.Page)), CancellationToken.None);
     private static object Invoke(AgentTools tools, string name, object args) => tools.Execute(new AgentToolCall { Id = "test", Name = name, Arguments = AgentChatClient.Serializer().Serialize(args) });
     private static void Read(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = s.Blocks.Where(b => b.Editable).Select(b => b.Id).ToArray() });
@@ -801,13 +1051,17 @@ internal static class Program
         internal int Attempts, Writes, ConflictsRemaining;
         internal bool ThrowAfterSave, FailReadAfterSave;
         internal Action OnConflict, AfterSave;
+        /// <summary>最近一次提交的 XML。</summary>
+        internal string LastXml;
         private int _ids;
         internal FakePage(XElement page) { Page = new XElement(page); }
+        /// <summary>直接提交快照里的草稿，返回写入后的页面。</summary>
+        internal XElement Commit(AgentPageSnapshot snapshot) { new AgentCommitter(this).Commit(snapshot, CancellationToken.None); return Page; }
         public string GetPageContent(string id, PageInfo info)
         { if (FailReadAfterSave && Writes > 0) throw new Exception("read failed"); return Page.ToString(); }
         public void UpdatePageContent(string xml, DateTime expected)
         {
-            Attempts++; True(expected != DateTime.MinValue);
+            Attempts++; True(expected != DateTime.MinValue); LastXml = xml;
             if (ConflictsRemaining-- > 0) { OnConflict?.Invoke(); throw new COMException("conflict", unchecked((int)0x80042010)); }
             foreach (var c in XElement.Parse(xml).Elements())
             {

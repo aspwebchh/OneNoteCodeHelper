@@ -7,10 +7,12 @@ using System.Xml.Linq;
 
 namespace OneNoteCodeHelper.Services.Agent
 {
-    /// <summary>草稿里的一处「连续段落 → 高亮代码框」。提交时在重新读取的页面上重放。</summary>
+    /// <summary>草稿里的一处「连续段落 → 高亮代码框或表格」。提交时在重新读取的页面上重放。</summary>
     internal sealed class AgentCodeConversion
     {
         internal List<AgentBlock> Blocks;
+        /// <summary>text_to_table 转成的普通表格；否则是代码框。</summary>
+        internal bool TextTable;
         internal string LanguageId;
         internal string Code;
         internal XElement Table;
@@ -20,6 +22,8 @@ namespace OneNoteCodeHelper.Services.Agent
     internal sealed class AgentCodeUndoItem
     {
         internal string TableId;
+        /// <summary>撤销的是 text_to_table 转成的表格。</summary>
+        internal bool TextTable;
         internal string Fingerprint;
         internal List<XElement> Originals;
         internal List<XElement> Styles;
@@ -34,28 +38,29 @@ namespace OneNoteCodeHelper.Services.Agent
     {
         private static XNamespace One => OneNoteApi.One;
 
-        internal static CodeSelection Select(XElement page, ICollection<string> objectIds)
+        /// <param name="target">转换成什么，出现在错误说明里：代码框或表格。</param>
+        internal static CodeSelection Select(XElement page, ICollection<string> objectIds, string target = "代码框")
         {
             var ids = new HashSet<string>(objectIds);
             var paragraphs = page.Descendants(One + "OE").Where(e => ids.Contains((string)e.Attribute("objectID") ?? "")).ToList();
             if (paragraphs.Count != ids.Count) throw new AiException("找不到目标段落。");
             var block = PageEditor.TextBlockOf(paragraphs[0]);
-            if (block == null || block.Name == One + "Title") throw new AiException("页面标题不能转换为代码框。");
-            if (paragraphs.Any(oe => PageEditor.TextBlockOf(oe) != block)) throw new AiException("代码段落必须在同一个文本框或表格单元格里。");
+            if (block == null || block.Name == One + "Title") throw new AiException("页面标题不能转换为" + target + "。");
+            if (paragraphs.Any(oe => PageEditor.TextBlockOf(oe) != block)) throw new AiException("段落必须在同一个文本框或表格单元格里。");
             var outline = block.AncestorsAndSelf(One + "Outline").FirstOrDefault();
-            if (outline == null || string.IsNullOrEmpty((string)outline.Attribute("objectID"))) throw new AiException("代码段落不在可编辑的文本框里。");
+            if (outline == null || string.IsNullOrEmpty((string)outline.Attribute("objectID"))) throw new AiException("段落不在可编辑的文本框里。");
             var lines = block.Descendants(One + "OE").Where(oe => PageEditor.TextBlockOf(oe) == block).ToList();
             if (lines.IndexOf(paragraphs[paragraphs.Count - 1]) - lines.IndexOf(paragraphs[0]) + 1 != paragraphs.Count)
-                throw new AiException("代码段落必须连续，中间不能夹着其他段落或对象。");
+                throw new AiException("段落必须连续，中间不能夹着其他段落或对象。");
             var selected = new HashSet<XElement>(paragraphs);
             if (paragraphs.Any(oe => oe.Descendants(One + "OE").Any(child => !selected.Contains(child))))
-                throw new AiException("段落的下级段落必须一起转换为代码框。");
+                throw new AiException("段落的下级段落必须一起转换为" + target + "。");
             if (paragraphs.Any(oe => oe.Elements(One + "List").Any() || oe.Elements(One + "Tag").Any()))
-                throw new AiException("带项目符号、编号或标记的段落不能转换为代码框。");
+                throw new AiException("带项目符号、编号或标记的段落不能转换为" + target + "。");
             var depth = Depth(paragraphs[0], block);
-            if (paragraphs.Any(oe => Depth(oe, block) < depth)) throw new AiException("代码的第一段不能比后面的段落缩进更深。");
+            if (paragraphs.Any(oe => Depth(oe, block) < depth)) throw new AiException("第一段不能比后面的段落缩进更深。");
             var selection = new CodeSelection(paragraphs, block, outline);
-            if (string.IsNullOrWhiteSpace(selection.Code)) throw new AiException("目标段落里没有代码文字。");
+            if (string.IsNullOrWhiteSpace(selection.Code)) throw new AiException("目标段落里没有文字。");
             return selection;
         }
 

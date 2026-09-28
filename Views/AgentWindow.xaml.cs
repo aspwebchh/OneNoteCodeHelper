@@ -242,6 +242,8 @@ namespace OneNoteCodeHelper.Views
             }
 
             var codeSettings = _settings.Clone();
+            // 选区里的空行也交给 Agent：删空行和代码框转换都要用到。
+            selection?.UnionWith(_selectedBlankLines);
             await StartJob(token =>
             {
                 var xml = _api.GetPageContent(_pageId, Microsoft.Office.Interop.OneNote.PageInfo.piBasic);
@@ -415,7 +417,7 @@ namespace OneNoteCodeHelper.Views
             await StartJob(token => Task.FromResult(new AgentCommitter(_api).Undo(_pageId, previous, options, token)),
                 "正在撤销…", false, report => { _report = report; ShowReport(report, true); });
             // 只撤销最近一次执行；不把撤销的逆操作继续暴露为撤销。
-            if (_report != null) { _report.Undo.Clear(); _report.CodeUndo.Clear(); }
+            _report?.ClearUndo();
             if (!_closed) UndoButton.Visibility = Visibility.Collapsed;
         }
 
