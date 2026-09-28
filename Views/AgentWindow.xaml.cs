@@ -257,6 +257,14 @@ namespace OneNoteCodeHelper.Views
             }, "正在读取固定目标页…", false, report => { _report = report; ShowReport(report, false); });
         }
 
+        /// <summary>需求框里按回车直接执行，Shift+回车换行。输入法组字时按的回车是 ImeProcessed，不会触发。</summary>
+        private void OnRequestKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Enter || Keyboard.Modifiers != ModifierKeys.None) return;
+            e.Handled = true;
+            OnExecute(sender, e);
+        }
+
         private IProgress<T> CreateProgress<T>(Action<T, bool> show)
         {
             // 在后台调用此工厂也只通过 Dispatcher 更新 UI，不捕获线程池上下文。流式进度已在各自的客户端里限频。

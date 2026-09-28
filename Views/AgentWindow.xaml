@@ -346,6 +346,7 @@
                              TextWrapping="Wrap"
                              VerticalScrollBarVisibility="Auto"
                              MaxLength="8000"
+                             PreviewKeyDown="OnRequestKeyDown"
                              Text="将该页面上的内容排版下，要美观。统一正文格式，突出标题，修正错别字。" />
                     <TextBox x:Name="PromptText"
                              Style="{StaticResource InputBox}"
@@ -430,7 +431,7 @@
                                    Foreground="{StaticResource Muted}"
                                    TextTrimming="CharacterEllipsis"
                                    ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"
-                                   Text="选好功能和范围后点「执行」。" />
+                                   Text="选好功能和范围后点「执行」，需求框里按回车也可执行。" />
                     </StackPanel>
                 </Grid>
 
