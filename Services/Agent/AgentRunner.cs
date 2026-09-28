@@ -36,8 +36,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal const string MergePrompt = "用户明确要求把整个文本框并入另一个文本框时用 merge_outlines，它会删掉空了的源文本框；只挪一部分段落用 move_blocks。" +
             "文本框见 get_page_overview 的 outlines；不要自行合并文本框。";
         internal const string InsertPrompt = "用户明确要求添加摘要、目录或小标题时用 insert_blocks 插入新段落，内容要忠于原文、简短；不要用它复制、改写或替换原有段落。";
-        internal const string TextTablePrompt = "用户明确要求把段落整理成表格时，先 read_blocks 再用 text_to_table，按内容选 delimiter：制表符用 tab，竖线用 pipe，" +
-            "单元格里没有空格的空格分隔内容用 space；标题等不含分隔符的段落不要放进 block_ids。第一行是数据不是列名时 header_row 设为 false；" +
+        internal const string TextTablePrompt = "用户明确要求把段落整理成表格时，先 read_blocks 再用 text_to_table。文本规整时用 delimiter：制表符用 tab，竖线用 pipe，" +
+            "单元格里没有空格的空格分隔内容用 space；每条记录固定分成几行（如名称一行、地址一行）时用 lines_per_row 按记录合行，整行一格时 delimiter 用 none。" +
+            "分隔方式不统一、键值对、有缺项或会错位等其他情况用 rows 逐格给出：每格逐字复制原文、按原文顺序，除分隔符外不删字，缺项用空字符串；" +
+            "要把「名称：值」里的名称变成列名时，用 header 给出和原文相同的名称。工具报单元格找不到或文字没放进单元格时，按提示修正后重试。" +
+            "中间的空行一并传入 block_ids；标题等不属于表格的段落不要放进 block_ids。第一行是数据不是列名时 header_row 设为 false；" +
             "用户要求加表头或列名时用 header 给出简短、忠于内容的列名。一组连续的行调用一次。" +
             "列数不一致时照常转换，缺的单元格留空；padded_rows 大于 0 时在回复里告诉用户有几行补了空单元格。";
         internal const string LayoutPrompt = "结构调整也只改草稿，之后用 get_page_overview 查看新的段落顺序和层级；新插入的段落 ID 为 n1、n2…。";

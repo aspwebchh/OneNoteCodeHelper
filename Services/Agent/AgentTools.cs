@@ -23,6 +23,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int MaxItems = 100;
         internal int MaxLength = 40000;
         internal bool NonEmpty;
+        /// <summary>字符串可以为空，如 text_to_table rows 里的空单元格。</summary>
+        internal bool AllowEmpty;
         internal static AgentSchema Obj(Dictionary<string, AgentSchema> props, params string[] required) => new AgentSchema { Type = "object", Properties = props, Required = required };
         internal static AgentSchema Str(params string[] values) => new AgentSchema { Type = "string", Enum = values.Length == 0 ? null : values };
         internal static AgentSchema Short(int maxLength) => new AgentSchema { Type = "string", MaxLength = maxLength };
@@ -42,7 +44,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (Items != null) { value["items"] = Items.Json(); value["minItems"] = MinItems; value["maxItems"] = MaxItems; }
             if (Enum != null) value["enum"] = Enum;
             if (Type == "number" || Type == "integer") { value["minimum"] = Min; value["maximum"] = Max; }
-            if (Type == "string") { value["minLength"] = 1; value["maxLength"] = MaxLength; }
+            if (Type == "string") { value["minLength"] = AllowEmpty ? 0 : 1; value["maxLength"] = MaxLength; }
             return value;
         }
 
@@ -60,7 +62,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     foreach (var item in list) Items.Validate(item, path + "[]");
                     return;
                 case "string":
-                    if (!(value is string s) || s.Length == 0 || s.Length > MaxLength || (Enum != null && !Enum.Contains(s))) throw new AiException(path + " 的字符串无效。");
+                    if (!(value is string s) || (s.Length == 0 && !AllowEmpty) || s.Length > MaxLength || (Enum != null && !Enum.Contains(s))) throw new AiException(path + " 的字符串无效。");
                     return;
                 case "boolean":
                     if (!(value is bool)) throw new AiException(path + " 必须是布尔值。");
@@ -232,18 +234,29 @@ namespace OneNoteCodeHelper.Services.Agent
                 var table = WithIds();
                 table.Properties["block_ids"].MaxItems = 200;
                 table.Properties["delimiter"] = AgentSchema.Str(AgentTextTable.Delimiters);
+                table.Properties["lines_per_row"] = AgentSchema.Num(1, AgentTextTable.MaxColumns, true);
                 table.Properties["header_row"] = new AgentSchema { Type = "boolean" };
                 table.Properties["borders"] = new AgentSchema { Type = "boolean" };
                 table.Properties["header_shading"] = AgentSchema.Str(TableLook.Shadings.Concat(new[] { "none" }).ToArray());
                 var header = AgentSchema.Array(AgentSchema.Short(AgentTextTable.MaxHeaderChars));
                 header.MaxItems = AgentTextTable.MaxColumns;
                 table.Properties["header"] = header;
-                table.Required = new[] { "snapshot_id", "block_ids", "delimiter" };
-                Register("text_to_table", "把同一文本框里连续的、用制表符（tab）、竖线（pipe）或空格（space）分隔的段落转成表格：每行文字一行（段内 Shift+Enter 换行的也各成一行），" +
-                    "中间的空行和 Markdown 分隔行去掉，单元格保留原有文字格式和链接；先完整读取有文字的段落。space 按连续空白拆分。" +
+                var cells = AgentSchema.Array(new AgentSchema { Type = "string", MaxLength = AgentTextTable.MaxCellChars, AllowEmpty = true });
+                cells.MaxItems = AgentTextTable.MaxColumns;
+                var rows = AgentSchema.Array(cells);
+                rows.MaxItems = AgentTextTable.MaxRows;
+                table.Properties["rows"] = rows;
+                table.Required = new[] { "snapshot_id", "block_ids" };
+                Register("text_to_table", "把同一文本框里连续的段落转成表格，单元格保留原有文字格式和链接；先完整读取有文字的段落。delimiter 和 rows 二选一。" +
+                    "用 delimiter 按规则拆分：tab 为制表符，pipe 为竖线，space 按连续空白拆分；每行文字一行（段内 Shift+Enter 换行的也各成一行），" +
+                    "中间的空行和 Markdown 分隔行去掉。一条记录分成几行（如名称一行、地址一行，中间可以有空行）时，lines_per_row 设为每条记录的行数（空行不算），" +
+                    "每几行合成表格的一行，各行不再拆分时 delimiter 用 none；记录里除最后一行外，行尾的冒号去掉。" +
+                    "分隔不统一、键值对、有缺项等 delimiter 处理不了的文本用 rows 逐行给出单元格：每格逐字复制原文、按原文顺序排列，不改写、不合并、不重复，" +
+                    "缺项用空字符串，单元格不能含换行。单元格之间的空白、制表符、| : ， ; 、 = 等分隔符可以省略；「IP：10.0.0.1」里的标签只有等于该列 header 时才能省略，" +
+                    "其余文字都要放进单元格，工具会逐字核验。" +
                     "各行列数不一致时按最多的列数建表，缺的单元格留空，结果里的 padded_rows 是补了空单元格的行数。" +
-                    "标题等不含分隔符的段落不要放进 block_ids。header_row、borders 默认 true，第一行是数据不是列名时 header_row 设为 false；header_shading 是首行底色。" +
-                    "只有用户要求加表头时才用 header 在首行前新增一行列名，个数应等于列数，少了补空，多了按 header 加列。" +
+                    "标题等不属于表格的段落不要放进 block_ids。header_row、borders 默认 true，第一行是数据不是列名时 header_row 设为 false；header_shading 是首行底色。" +
+                    "只有用户要求加表头或要把标签挪成列名时才用 header 在首行前新增一行列名，个数应等于列数，少了补空，多了按 header 加列。" +
                     $"最多 {AgentTextTable.MaxRows} 行、{AgentTextTable.MaxColumns} 列。", table, TextToTable);
             }
             Register("get_pending_changes", "检查草稿修订号、改动和尚未读取的段落。", SnapshotOnly(), Pending);
@@ -746,9 +759,12 @@ namespace OneNoteCodeHelper.Services.Agent
                 language = language.Id, discarded_format = discarded };
         }
 
-        /// <summary>把用制表符、竖线或空格分隔的连续段落排入草稿，提交时换成表格；和代码框一样整段替换，撤销时换回原段落。</summary>
+        /// <summary>把连续段落按分隔符或模型给出的单元格排入草稿，提交时换成表格；和代码框一样整段替换，撤销时换回原段落。</summary>
         private object TextToTable(IDictionary<string, object> args)
         {
+            var byRows = args.TryGetValue("rows", out var given);
+            if (byRows == args.ContainsKey("delimiter")) throw new AiException("delimiter 和 rows 须二选一：规整的文本用 delimiter，其他用 rows 逐格给出。");
+            if (byRows && args.ContainsKey("lines_per_row")) throw new AiException("lines_per_row 只能配合 delimiter 使用；用 rows 时每行直接给出一条记录的全部单元格。");
             var blocks = Ids(args, "block_ids").Select(id => _snapshot.Blocks.FirstOrDefault(b => b.Id == id) ?? throw new AiException("目标不存在。")).ToList();
             foreach (var b in blocks)
             {
@@ -763,8 +779,14 @@ namespace OneNoteCodeHelper.Services.Agent
             if (selection.Block.Name == OneNoteApi.One + "Cell") throw new AiException("表格单元格里的段落不能再转换为表格。");
             var shading = args.TryGetValue("header_shading", out var shade) && (string)shade != "none" ? TableLook.Shade((string)shade) : null;
             var names = args.TryGetValue("header", out var header) ? ((IList)header).Cast<string>().ToList() : null;
-            var table = AgentTextTable.Build(selection.Paragraphs, (string)args["delimiter"],
-                !args.TryGetValue("header_row", out var headerRow) || (bool)headerRow, !args.TryGetValue("borders", out var borders) || (bool)borders, shading, names, out var padded);
+            var headerRow = !args.TryGetValue("header_row", out var hasHeader) || (bool)hasHeader;
+            var borders = !args.TryGetValue("borders", out var bordered) || (bool)bordered;
+            int padded;
+            var table = byRows
+                ? AgentTextTable.BuildFromRows(selection.Paragraphs, ((IList)given).Cast<IList>().Select(r => (IList<string>)r.Cast<string>().ToList()).ToList(),
+                    headerRow, borders, shading, names, out padded)
+                : AgentTextTable.Build(selection.Paragraphs, (string)args["delimiter"], args.TryGetValue("lines_per_row", out var group) ? Convert.ToInt32(group) : 1,
+                    headerRow, borders, shading, names, out padded);
             var ordered = selection.Paragraphs.Select(oe => blocks.First(b => b.Id == AgentLayout.KeyOf(oe))).ToList();
             var conversion = new AgentCodeConversion { Blocks = ordered, TextTable = true, Code = selection.Code, Table = table };
             // 转换后这些段落就不在了，之前给它们排的格式和文字修正作废。

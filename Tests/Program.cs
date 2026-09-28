@@ -952,6 +952,63 @@ internal static class Program
             var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
             Equal("Verified", undo.Status); True(!api.Page.Descendants(One + "Table").Any()); Equal(Texts(s.Page), Texts(api.Page));
         });
+        Test("text_to_table joins multi-line records into rows, drops label colons and keeps links", () =>
+        {
+            const string login = "http://login.example.com", center = "http://center.example.com";
+            var s = Snapshot(Page(Paragraph("a", "登录服"), Paragraph("b", ""), Paragraph("c", $"<a href=\"{login}\">{login}</a>"), Paragraph("d", ""),
+                Paragraph("e", "中心服"), Paragraph("f", ""), Paragraph("g", center), Paragraph("h", ""),
+                Paragraph("i", "充值回调地址："), Paragraph("j", ""), Paragraph("k", center + "/recharge")));
+            var t = Tools(s); Read(t, s);
+            var all = Enumerable.Range(1, 11).Select(i => "p" + i).ToArray();
+            Rejects("lines_per_row", () => Table(t, s, "none", all));
+            var result = Json(Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = all, delimiter = "none", lines_per_row = 2, header = new[] { "名称", "地址" } }));
+            True(result.Contains("\"rows\":4")); True(result.Contains("\"columns\":2")); True(result.Contains("\"padded_rows\":0"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.TextTables);
+            var cells = api.Page.Descendants(One + "Table").Single().Descendants(One + "Cell").Select(cell => cell.Descendants(One + "OE").Single()).ToList();
+            Equal($"名称|地址|登录服|{login}|中心服|{center}|充值回调地址|{center}/recharge", string.Join("|", cells.Select(AgentCode.PlainText)));
+            True(cells[3].Element(One + "T").Value.Contains("href=\"" + login + "\""));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); True(!api.Page.Descendants(One + "Table").Any()); Equal(Texts(s.Page), Texts(api.Page));
+            // 缺了最后一个值的记录补空。
+            var odd = Snapshot(Page(Paragraph("a", "登录服"), Paragraph("b", login), Paragraph("c", "中心服：")));
+            var ot = Tools(odd); Read(ot, odd);
+            True(Json(Invoke(ot, "text_to_table", new { snapshot_id = odd.SnapshotId, block_ids = new[] { "p1", "p2", "p3" }, delimiter = "none", lines_per_row = 2, header_row = false }))
+                .Contains("\"padded_rows\":1"));
+            var oapi = new FakePage(odd.Page); Equal("Verified", new AgentCommitter(oapi).Commit(odd, CancellationToken.None).Status);
+            Equal($"登录服|{login}|中心服|", string.Join("|", oapi.Page.Descendants(One + "Cell").Select(cell => AgentCode.PlainText(cell.Descendants(One + "OE").Single()))));
+        });
+        Test("text_to_table builds rows given by the model and verifies them against the original", () =>
+        {
+            const string link = "http://c.example.com";
+            var s = Snapshot(Page(Paragraph("a", "服务器：A，IP：10.0.0.1，端口：80"), Paragraph("b", ""), Paragraph("c", "服务器: B&nbsp;1  IP: 10.0.0.2"),
+                Paragraph("d", $"<a href=\"{link}\">C</a>&nbsp;10.0.0.3 端口=81"), Paragraph("e", "D 端口：82")));
+            var t = Tools(s); Read(t, s);
+            var ids = new[] { "p1", "p2", "p3", "p4", "p5" };
+            var header = new[] { "服务器", "IP", "端口" };
+            Func<string[][], object> call = rows => Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, rows, header });
+            var good = new[] { new[] { "A", "10.0.0.1", "80" }, new[] { "B 1", "10.0.0.2" }, new[] { "C", "10.0.0.3", "81" }, new[] { "D", "", "82" } };
+            // 改写、调换、重复、漏掉文字，或省略的标签不是列名，都不通过。
+            Rejects("没有在原文里按顺序找到", () => call(new[] { new[] { "A", "10.0.0.9", "80" } }.Concat(good.Skip(1)).ToArray()));
+            Rejects("没有在原文里按顺序找到", () => call(new[] { good[0], good[0] }.Concat(good.Skip(1)).ToArray()));
+            Rejects("没有放进任何单元格", () => call(new[] { new[] { "10.0.0.1", "A", "80" } }.Concat(good.Skip(1)).ToArray()));
+            Rejects("原文「D 端口：82」没有放进", () => call(good.Take(3).ToArray()));
+            Rejects("原文「服务器：A", () => Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, rows = good }));
+            Rejects("跨行", () => call(new[] { new[] { "A\n10.0.0.1" } }));
+            Rejects("二选一", () => Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, rows = good, delimiter = "space" }));
+            Rejects("二选一", () => Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids }));
+            Rejects("lines_per_row 只能", () => Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, rows = good, lines_per_row = 2 }));
+            Equal(0, s.Revision);
+            var result = Json(call(good));
+            True(result.Contains("\"rows\":5")); True(result.Contains("\"columns\":3")); True(result.Contains("\"padded_rows\":1"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.TextTables);
+            var cells = api.Page.Descendants(One + "Table").Single().Descendants(One + "Cell").Select(cell => cell.Descendants(One + "OE").Single()).ToList();
+            Equal("服务器|IP|端口|A|10.0.0.1|80|B 1|10.0.0.2||C|10.0.0.3|81|D||82", string.Join("|", cells.Select(AgentCode.PlainText)));
+            True(cells[9].Element(One + "T").Value.Contains("href=\"" + link + "\""));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); True(!api.Page.Descendants(One + "Table").Any()); Equal(Texts(s.Page), Texts(api.Page));
+        });
         Test("structure, format and code conversion in one text box commit together and undo restores all at once", () =>
         {
             var s = Snapshot(CodePage()); var t = Tools(s); Read(t, s);

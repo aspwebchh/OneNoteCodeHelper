@@ -114,8 +114,12 @@ namespace OneNoteCodeHelper.Services.Agent
     }
 
     /// <summary>
-    /// text_to_table：把用制表符、| 或空格分隔的文字拆成表格。每行文字成为表格的一行，段内换行（Shift+Enter）分开的行也各成一行；
-    /// 空行和 Markdown 分隔行（|---|:--:|）去掉。单元格复制源段落的样式和文字，按范围截取，保留加粗、链接等局部格式。
+    /// text_to_table：把段落拆成表格，有两种切法。
+    /// <see cref="Build"/> 按固定规则切：制表符、|、空格，或一条记录分成几行（名称一行、地址一行）。默认每行文字成为表格的一行，
+    /// 段内换行（Shift+Enter）分开的行也各成一行；linesPerRow 大于 1 时每几行合成一行，各行的单元格依次排开。空行和 Markdown 分隔行（|---|:--:|）去掉。
+    /// <see cref="BuildFromRows"/> 用模型逐格给出的切分结果，按顺序在原文里逐字定位每一格。原文的每个字要么进了单元格，要么是分隔符，
+    /// 要么是和该列 header 相同的标签（挪进了表头），否则报错；模型不能借此改写、调换、重复或丢掉文字。模型的字符串只用来定位，不写进页面。
+    /// 两种切法的单元格都复制源段落的样式和文字，按范围截取，保留加粗、链接等局部格式。
     /// 文本不规整时不报错：各行（含 header）按最多的列数建表，缺的单元格留空。
     /// </summary>
     internal static class AgentTextTable
@@ -123,17 +127,24 @@ namespace OneNoteCodeHelper.Services.Agent
         internal const int MaxRows = 100;
         internal const int MaxColumns = 10;
         internal const int MaxHeaderChars = 30;
-        internal static readonly string[] Delimiters = { "tab", "pipe", "space" };
+        internal const int MaxCellChars = 500;
+        /// <summary>none 不拆分，整行一格，配合 linesPerRow 使用。</summary>
+        internal static readonly string[] Delimiters = { "tab", "pipe", "space", "none" };
         private static readonly char[] Breaks = { '\n', '\r', '\t' };
+        /// <summary>rows 的单元格之间可以省略的分隔符；空白另算。</summary>
+        private static readonly char[] Separators = { '\t', '|', '｜', ':', '：', ',', '，', ';', '；', '、', '=' };
         private static XNamespace One => OneNoteApi.One;
 
         /// <param name="paragraphs">按页面顺序排好的源段落（含中间空行）。</param>
+        /// <param name="linesPerRow">一条记录占几行（空行不算），1 为每行一行。</param>
         /// <param name="shading">首行底色，null 为不设。</param>
         /// <param name="header">在首行前新增的列名，null 为不加；少于列数时补空，多于列数时按它加列。</param>
         /// <param name="padded">补了空单元格的行数（含 header 行）。</param>
-        internal static XElement Build(IEnumerable<XElement> paragraphs, string delimiter, bool headerRow, bool borders, string shading, IList<string> header, out int padded)
+        internal static XElement Build(IEnumerable<XElement> paragraphs, string delimiter, int linesPerRow, bool headerRow, bool borders, string shading,
+            IList<string> header, out int padded)
         {
-            var lines = new List<(XElement Source, List<(int Start, int Length)> Ranges)>();
+            var names = Names(header);
+            var lines = new List<(XElement Source, string Text, List<(int Start, int Length)> Ranges)>();
             foreach (var oe in paragraphs)
             {
                 var text = new AgentRichText(oe).Text;
@@ -143,29 +154,143 @@ namespace OneNoteCodeHelper.Services.Agent
                     var next = text.IndexOf('\n', from);
                     var to = next < 0 ? text.Length : next;
                     var ranges = string.IsNullOrWhiteSpace(text.Substring(from, to - from)) ? null : Split(text, from, to, delimiter);
-                    if (ranges != null) lines.Add((oe, ranges));
+                    if (ranges != null) lines.Add((oe, text, ranges));
                     if (next < 0) break;
                     from = next + 1;
                 }
             }
             if (lines.Count == 0) throw new AiException("目标段落里没有可以转换的行。");
-            if (lines.Count > MaxRows) throw new AiException($"表格最多 {MaxRows} 行。");
-            // 两列的检查只看原文：全都只有一列多半是分隔符选错了，补空也不成表。
-            var columns = lines.Max(l => l.Ranges.Count);
-            if (columns < 2) throw new AiException("按指定的分隔符分不出两列，请确认 delimiter。");
-            var names = header?.Select(h => (h ?? "").Trim()).ToList();
-            if (names != null) columns = System.Math.Max(columns, names.Count);
-            if (columns > MaxColumns) throw new AiException($"表格最多 {MaxColumns} 列。");
-            var rows = lines.Select(l => l.Ranges.Select(r => Cell(l.Source, r.Start, r.Length)).ToList()).ToList();
-            if (names != null)
+            var records = new List<List<(XElement Source, int Start, int Length)>>();
+            for (var i = 0; i < lines.Count; i += linesPerRow)
             {
-                if (names.Any(n => n.Length == 0 || n.Length > MaxHeaderChars || n.IndexOfAny(Breaks) >= 0))
-                    throw new AiException($"header 的每一项须是 1–{MaxHeaderChars} 字、不含换行和制表符的列名。");
-                // 新增的列名按纯文字转义，段落样式随第一行。
-                var source = lines[0].Source;
-                rows.Insert(0, names.Select(n => new XElement(One + "OE", source.Attribute("style"), source.Attribute("lang"),
-                    new XElement(One + "T", new XCData(OneNoteHtmlEncoder.EncodePlainText(n))))).ToList());
+                var record = new List<(XElement Source, int Start, int Length)>();
+                for (var k = 0; k < linesPerRow && i + k < lines.Count; k++)
+                {
+                    var (source, text, ranges) = lines[i + k];
+                    foreach (var (start, length) in ranges) record.Add((source, start, length));
+                    // 记录里不是最后一行的行尾冒号是「名称：」这类标签的分隔，和制表符、| 一样去掉。
+                    if (k < linesPerRow - 1)
+                    {
+                        var last = record[record.Count - 1];
+                        int from = last.Start, to = last.Start + last.Length;
+                        if (to > from && (text[to - 1] == ':' || text[to - 1] == '：')) { to--; Trim(text, ref from, ref to); }
+                        record[record.Count - 1] = (source, from, to - from);
+                    }
+                }
+                records.Add(record);
             }
+            if (records.Count > MaxRows) throw new AiException($"表格最多 {MaxRows} 行。");
+            // 两列的检查只看原文：全都只有一列多半是分隔符选错了，补空也不成表。
+            if (records.Max(r => r.Count) < 2) throw new AiException("按指定的分隔符分不出两列，请确认 delimiter；一条记录分成几行时用 lines_per_row；分隔不规整时用 rows 逐格给出。");
+            return Assemble(records, lines[0].Source, headerRow, borders, shading, names, out padded);
+        }
+
+        /// <param name="paragraphs">按页面顺序排好的源段落（含中间空行）。</param>
+        /// <param name="rows">模型给出的各行单元格，须逐字取自原文、按原文顺序；空字符串为空单元格。</param>
+        internal static XElement BuildFromRows(IReadOnlyList<XElement> paragraphs, IList<IList<string>> rows, bool headerRow, bool borders, string shading,
+            IList<string> header, out int padded)
+        {
+            var names = Names(header);
+            // 各段文字用 \n 连成一条，和 read_blocks 给模型看的一致；段内换行（<br>）也是 \n。
+            var texts = paragraphs.Select(oe => new AgentRichText(oe).Text).ToList();
+            var all = string.Join("\n", texts);
+            var starts = new List<int>();
+            for (int i = 0, at = 0; i < texts.Count; at += texts[i].Length + 1, i++) starts.Add(at);
+            if (rows.Count > MaxRows) throw new AiException($"表格最多 {MaxRows} 行。");
+            var records = new List<List<(XElement Source, int Start, int Length)>>();
+            var pos = 0;
+            for (var i = 0; i < rows.Count; i++)
+            {
+                var record = new List<(XElement Source, int Start, int Length)>();
+                for (var j = 0; j < rows[i].Count; j++)
+                {
+                    var cell = rows[i][j].Trim();
+                    if (cell.Length == 0) { record.Add((null, 0, 0)); continue; }
+                    if (cell.IndexOf('\n') >= 0 || cell.IndexOf('\r') >= 0) throw new AiException($"rows 第 {i + 1} 行第 {j + 1} 格含换行；单元格不能跨行，请拆成几格。");
+                    var at = Find(all, cell, pos, names != null && j < names.Count ? names[j] : null, out var stop);
+                    if (at < 0)
+                    {
+                        if (!Enumerable.Range(pos, System.Math.Max(0, all.Length - cell.Length - pos + 1)).Any(k => Matches(all, k, cell)))
+                            throw new AiException($"rows 第 {i + 1} 行第 {j + 1} 格「{Excerpt(cell, 0)}」没有在原文里按顺序找到：单元格须逐字复制原文、按原文顺序排列，不能改写、调换或重复。");
+                        throw Uncovered(all, stop);
+                    }
+                    var p = starts.FindLastIndex(s => s <= at);
+                    record.Add((paragraphs[p], at - starts[p], cell.Length));
+                    pos = at + cell.Length;
+                }
+                records.Add(record);
+            }
+            // 最后一格之后只能剩分隔符。
+            Find(all, null, pos, null, out var rest);
+            if (rest >= 0) throw Uncovered(all, rest);
+            return Assemble(records, paragraphs[0], headerRow, borders, shading, names, out padded);
+        }
+
+        /// <summary>
+        /// 从 pos 起找 cell（任何空白彼此相等，换行除外），它前面的文字去掉空白和分隔符后须为空或等于 label。
+        /// 找不到时返回 -1，stop 是第一个既不能省略、也没放进单元格的字，没有则为 -1。cell 为 null 时只找 stop。
+        /// </summary>
+        private static int Find(string text, string cell, int pos, string label, out int stop)
+        {
+            label = label == null ? null : new string(label.Where(ch => !Skippable(ch)).ToArray());
+            var kept = "";
+            var first = -1;
+            for (var k = pos; k < text.Length; k++)
+            {
+                if (cell != null && (kept.Length == 0 || kept == label) && Matches(text, k, cell)) { stop = -1; return k; }
+                if (Skippable(text[k])) continue;
+                // 省略的字只能拼成列名；一旦对不上就不会再对上。
+                if (first < 0) first = k;
+                kept += text[k];
+                if (label == null || !label.StartsWith(kept, System.StringComparison.Ordinal)) { stop = k; return -1; }
+            }
+            stop = first;
+            return -1;
+        }
+
+        private static bool Skippable(char ch) => char.IsWhiteSpace(ch) || System.Array.IndexOf(Separators, ch) >= 0;
+
+        private static bool Matches(string text, int start, string cell)
+        {
+            if (start + cell.Length > text.Length) return false;
+            for (var i = 0; i < cell.Length; i++)
+            {
+                char a = text[start + i], b = cell[i];
+                if (a != b && !(a != '\n' && a != '\r' && char.IsWhiteSpace(a) && char.IsWhiteSpace(b))) return false;
+            }
+            return true;
+        }
+
+        private static AiException Uncovered(string text, int start) =>
+            new AiException($"原文「{Excerpt(text, start)}」没有放进任何单元格：除分隔符和与该列 header 相同的标签外，所选段落的文字都要逐字放进单元格；标题等不属于表格的段落不要放进 block_ids。");
+
+        /// <summary>从 start 起摘一小段，到换行为止。</summary>
+        private static string Excerpt(string text, int start)
+        {
+            var end = text.IndexOf('\n', start);
+            var length = System.Math.Min((end < 0 ? text.Length : end) - start, 20);
+            return text.Substring(start, length) + (start + length < text.Length && text[start + length] != '\n' ? "…" : "");
+        }
+
+        private static List<string> Names(IList<string> header)
+        {
+            var names = header?.Select(h => (h ?? "").Trim()).ToList();
+            if (names != null && names.Any(n => n.Length == 0 || n.Length > MaxHeaderChars || n.IndexOfAny(Breaks) >= 0))
+                throw new AiException($"header 的每一项须是 1–{MaxHeaderChars} 字、不含换行和制表符的列名。");
+            return names;
+        }
+
+        /// <summary>按最多的列数建表，缺的单元格留空。Source 为 null 的是空单元格。</summary>
+        private static XElement Assemble(List<List<(XElement Source, int Start, int Length)>> records, XElement styleSource, bool headerRow, bool borders, string shading,
+            List<string> names, out int padded)
+        {
+            var columns = System.Math.Max(records.Max(r => r.Count), names?.Count ?? 0);
+            if (columns > MaxColumns) throw new AiException($"表格最多 {MaxColumns} 列。");
+            var rows = records.Select(r => r.Select(c => c.Source == null ? Blank() : Cell(c.Source, c.Start, c.Length)).ToList()).ToList();
+            // 新增的列名按纯文字转义，段落样式随第一段。
+            if (names != null)
+                rows.Insert(0, names.Select(n => new XElement(One + "OE", styleSource.Attribute("style"), styleSource.Attribute("lang"),
+                    new XElement(One + "T", new XCData(OneNoteHtmlEncoder.EncodePlainText(n))))).ToList());
             // 未锁定的列宽由 OneNote 按内容自动计算（本机实测），width 只是架构要求的占位值。
             var table = new XElement(One + "Table", new XAttribute("bordersVisible", borders ? "true" : "false"), new XAttribute("hasHeaderRow", headerRow ? "true" : "false"),
                 new XElement(One + "Columns", Enumerable.Range(0, columns).Select(i => new XElement(One + "Column", new XAttribute("index", i), new XAttribute("width", 100)))));
@@ -175,7 +300,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 var row = new XElement(One + "Row");
                 for (var j = 0; j < columns; j++)
                 {
-                    var cell = new XElement(One + "Cell", new XElement(One + "OEChildren", j < rows[i].Count ? rows[i][j] : new XElement(One + "OE", new XElement(One + "T", new XCData("")))));
+                    var cell = new XElement(One + "Cell", new XElement(One + "OEChildren", j < rows[i].Count ? rows[i][j] : Blank()));
                     if (i == 0 && shading != null) cell.SetAttributeValue("shadingColor", shading);
                     row.Add(cell);
                 }
@@ -184,9 +309,16 @@ namespace OneNoteCodeHelper.Services.Agent
             return table;
         }
 
+        private static XElement Blank() => new XElement(One + "OE", new XElement(One + "T", new XCData("")));
+
         /// <summary>一行文字 [start, end) 里各单元格的范围（已去掉两侧空白）。Markdown 分隔行返回 null。</summary>
         private static List<(int Start, int Length)> Split(string text, int start, int end, string delimiter)
         {
+            if (delimiter == "none")
+            {
+                Trim(text, ref start, ref end);
+                return new List<(int Start, int Length)> { (start, end - start) };
+            }
             if (delimiter == "space")
             {
                 // 连续的空白（含 &nbsp; 和全角空格）算一个分隔。
