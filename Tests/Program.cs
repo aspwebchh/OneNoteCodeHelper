@@ -558,6 +558,172 @@ internal static class Program
             var r = new AgentRunner(model, new AgentCommitter(api), new AddInSettings()).RunAsync(s, "排版", null, CancellationToken.None).GetAwaiter().GetResult();
             Equal("Verified", r.Status); Equal(1, r.CodeBlocks); Equal(1, api.Writes); True(model.SawCodeTool);
         });
+        Test("set_list numbers paragraphs with a style, verifies despite OneNote attributes and undo removes it", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "第一项"), Paragraph("b", "第二项"), Paragraph("c", "结尾"))); var t = Tools(s); Read(t, s);
+            Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2" }, list = "number" });
+            Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "body" });
+            Equal(2, s.Revision);
+            Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2" }, list = "number" }); Equal(2, s.Revision);
+            True(Json(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" } })).Contains("\"list\":\"number\""));
+            var api = new FakePage(s.Page);
+            api.AfterSave = () => { foreach (var n in api.Page.Descendants(One + "Number")) { n.SetAttributeValue("fontSize", "11.0"); n.SetAttributeValue("text", "1."); } };
+            var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(2, r.Applied);
+            Equal("number", AgentMarks.ListKind(AgentCommitter.Find(api.Page, "b")));
+            Equal("List", AgentCommitter.Find(api.Page, "a").Elements().First().Name.LocalName);
+            api.AfterSave = null;
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(2, undo.Applied); True(!api.Page.Descendants(One + "List").Any());
+            // 去掉列表要重建段落：文字和顺序不变，ID 换成 OneNote 新分配的。
+            True(AgentCommitter.Find(api.Page, "a") == null && AgentCommitter.Find(api.Page, "b") == null);
+            Equal("第一项|第二项|结尾", string.Join("|", api.Page.Descendants(One + "OE").Select(AgentCode.PlainText)));
+        });
+        Test("set_list none rebuilds only the listed paragraph; children keep IDs; undo restores the bullet in place", () =>
+        {
+            var parent = Listed("a", "父项", "2"); parent.Add(new XElement(One + "OEChildren", Paragraph("b", "子项")));
+            var s = Snapshot(Page(parent, Paragraph("c", "结尾"))); var t = Tools(s); Read(t, s);
+            Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, list = "none" });
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.Applied); True(AgentCommitter.Find(api.Page, "a") == null);
+            var rebuilt = api.Page.Descendants(One + "OE").First();
+            Equal("父项", AgentCode.PlainText(rebuilt)); Equal("none", AgentMarks.ListKind(rebuilt));
+            Equal("b", (string)rebuilt.Element(One + "OEChildren").Element(One + "OE").Attribute("objectID"));
+            Equal((string)rebuilt.Attribute("objectID"), r.Undo.Single().ObjectId);
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal("2", (string)AgentCommitter.Find(api.Page, (string)rebuilt.Attribute("objectID")).Descendants(One + "Bullet").Single().Attribute("bullet"));
+        });
+        Test("set_list keeps existing bullets and rejects title, unread and code paragraphs", () =>
+        {
+            var code = Paragraph("code", "int x = 1;"); code.SetAttributeValue("style", "font-family:Consolas");
+            var p = Page(Listed("l", "已有列表", "13"), Paragraph("a", "正文"), code); p.AddFirst(new XElement(One + "Title", Paragraph("title", "标题")));
+            var s = Snapshot(p); var t = Tools(s);
+            Rejects("请先完整读取", () => Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p3" }, list = "bullet" }));
+            Read(t, s);
+            Rejects("页面标题", () => Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, list = "bullet" }));
+            Rejects("代码段落", () => Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p3", "p4" }, list = "bullet" }));
+            Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, list = "bullet" });
+            Equal(0, s.Revision); Equal("13", (string)s.Blocks[1].Draft.Descendants(One + "Bullet").Single().Attribute("bullet"));
+        });
+        Test("set_tag reuses the page to-do definition, adds one for important, verifies and undo removes tags", () =>
+        {
+            var p = Page(Paragraph("a", "买菜"), Paragraph("b", "交报告"), Paragraph("c", "关键结论")); p.AddFirst(TagDef("0", 3, "待办事项"));
+            var s = Snapshot(p); var t = Tools(s); Read(t, s);
+            Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2" }, tag = "todo" });
+            Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, tag = "todo", completed = true });
+            Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p3" }, tag = "important" });
+            Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p3" }, tag = "important" });
+            Equal(3, s.Revision); Equal(2, s.DraftTags.Elements().Count()); Equal(1, s.Blocks[1].Draft.Elements(One + "Tag").Count());
+            Rejects("completed 只能", () => Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p3" }, tag = "important", completed = true }));
+            True(Json(Invoke(t, "get_page_overview", new { })).Contains("\"tags\":[\"todo:done\"]"));
+            var api = new FakePage(s.Page);
+            api.AfterSave = () => { foreach (var tag in api.Page.Descendants(One + "Tag")) tag.SetAttributeValue("creationDate", "2026-09-28T00:00:00.000Z"); };
+            var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(3, r.Applied); Equal(2, api.Page.Elements(One + "TagDef").Count());
+            var important = api.Page.Elements(One + "TagDef").Single(d => (string)d.Attribute("symbol") == "13");
+            Equal((string)important.Attribute("index"), (string)AgentCommitter.Find(api.Page, "c").Element(One + "Tag").Attribute("index"));
+            Equal("0", (string)AgentCommitter.Find(api.Page, "a").Element(One + "Tag").Attribute("index"));
+            Equal("true", (string)AgentCommitter.Find(api.Page, "b").Element(One + "Tag").Attribute("completed"));
+            api.AfterSave = null;
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); True(!api.Page.Descendants(One + "Tag").Any());
+        });
+        Test("set_tag none removes only the three supported tags", () =>
+        {
+            var oe = Paragraph("a", "事项"); oe.AddFirst(Tag("0"), Tag("1"));
+            var p = Page(oe); p.AddFirst(TagDef("0", 3, "待办事项"), TagDef("1", 99, "自定义"));
+            var s = Snapshot(p); var t = Tools(s); Read(t, s);
+            Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, tag = "none" });
+            Equal("1", (string)s.Blocks[0].Draft.Elements(One + "Tag").Single().Attribute("index"));
+            Equal("other", AgentMarks.Describe(s.Blocks[0].Draft, s.DraftTags).Single());
+            Equal("Verified", new AgentCommitter(new FakePage(s.Page)).Commit(s, CancellationToken.None).Status);
+        });
+        Test("concurrent tag added to a staged paragraph skipped", () => Conflict(p => AgentCommitter.Find(p, "a").AddFirst(Tag("0"))));
+        Test("OneNote changing the bullet of an unspecified paragraph is not reported verified", () =>
+        {
+            var s = Prepared(Page(Paragraph("a", "第一段"), Listed("b", "列表项", "2"))); var api = new FakePage(s.Page);
+            api.AfterSave = () => AgentCommitter.Find(api.Page, "b").Descendants(One + "Bullet").Single().SetAttributeValue("bullet", "5");
+            Equal("CommitOutcomeUnknown", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+        });
+        Test("TagDef renumbering keeps untouched tags verified", () =>
+        {
+            var tagged = Paragraph("b", "待办"); tagged.AddFirst(Tag("0"));
+            var p = Page(Paragraph("a", "第一段"), tagged); p.AddFirst(TagDef("0", 3, "待办事项"));
+            var s = Prepared(p); var api = new FakePage(s.Page);
+            api.AfterSave = () => { api.Page.Element(One + "TagDef").SetAttributeValue("index", "7"); AgentCommitter.Find(api.Page, "b").Element(One + "Tag").SetAttributeValue("index", "7"); };
+            Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+        });
+        Test("set_table_style changes borders, header row and shading, verifies and undo restores", () =>
+        {
+            var s = Snapshot(GridPage()); var t = Tools(s);
+            Equal(1, s.Tables.Count); Equal("t1", s.Blocks[0].TableId); Equal("名称 | 说明", s.Tables[0].Summary);
+            var style = new { borders = false, header_row = true, header_shading = "#DEEAF6" };
+            Invoke(t, "set_table_style", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" }, style }); Equal(1, s.Revision);
+            Invoke(t, "set_table_style", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" }, style }); Equal(1, s.Revision);
+            True(Json(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId })).Contains("\"tables_changed\":[\"t1\"]"));
+            var api = new FakePage(s.Page);
+            api.AfterSave = () =>
+            {
+                // OneNote 省略值为 false 的开关，颜色写成小写。
+                var written = api.Page.Descendants(One + "Table").Single(); written.Attribute("bordersVisible")?.Remove();
+                foreach (var cell in written.Element(One + "Row").Elements(One + "Cell")) cell.SetAttributeValue("shadingColor", "#deeaf6");
+            };
+            var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.Tables); Equal(1, r.TableUndo.Count); Equal(1, api.Writes);
+            var table = api.Page.Descendants(One + "Table").Single();
+            True(!TableLook.Flag(table, "bordersVisible")); True(TableLook.Flag(table, "hasHeaderRow"));
+            Equal("", TableLook.Shade((string)table.Elements(One + "Row").Last().Element(One + "Cell").Attribute("shadingColor")));
+            api.AfterSave = null;
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(1, undo.Tables);
+            table = api.Page.Descendants(One + "Table").Single();
+            True(TableLook.Flag(table, "bordersVisible")); True(!TableLook.Flag(table, "hasHeaderRow"));
+            Equal("none", TableLook.Read(table).ShadingName);
+        });
+        Test("table style: code boxes protected, appearance edits conflict, cell text edits do not", () =>
+        {
+            var box = new XElement(One + "OE", new XAttribute("objectID", "w"), CodeBlockBuilder.BuildTable("a = 1", LanguageRegistry.Find("python"), CodeThemes.Light, new AddInSettings()));
+            var n = 0; foreach (var e in box.Descendants().Where(e => e.Name.LocalName == "Table" || e.Name.LocalName == "Row" || e.Name.LocalName == "Cell" || e.Name.LocalName == "OE")) e.SetAttributeValue("objectID", "box" + n++);
+            var coded = Snapshot(Page(Paragraph("a", "正文"), box));
+            Equal("highlighted_code", coded.Tables.Single().ProtectedReason); True(!Json(Tools(coded).Definitions).Contains("set_table_style"));
+            var s = Snapshot(GridPage()); var t = Tools(s);
+            Invoke(t, "set_table_style", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" }, style = new { header_shading = "#F2F2F2" } });
+            var api = new FakePage(s.Page); api.Page.Descendants(One + "Table").Single().SetAttributeValue("bordersVisible", "false");
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None); Equal("NoChange", r.Status); Equal(1, r.Conflicts); Equal(0, api.Writes);
+            api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "d1").Element(One + "T").Value = "改过";
+            r = new AgentCommitter(api).Commit(s, CancellationToken.None); Equal("Verified", r.Status); Equal(1, r.Tables);
+            Equal("改过", new AgentRichText(AgentCommitter.Find(api.Page, "d1")).Text);
+        });
+        Test("read_image_text returns recognized text only when OneNote has OCR data", () =>
+        {
+            var image = new XElement(One + "OE", new XAttribute("objectID", "img"), new XElement(One + "Image", new XAttribute("objectID", "image1"),
+                new XElement(One + "OCRData", new XAttribute("lang", "en-US"), new XElement(One + "OCRText", new XCData("OCR sample " + new string('x', 4100))))));
+            var s = Snapshot(Page(Paragraph("a", "正文"), image)); var t = Tools(s);
+            Equal(1, s.Images.Count); Equal(AgentImage.MaxChars, s.Images[0].Text.Length);
+            var json = Json(Invoke(t, "read_image_text", new { snapshot_id = s.SnapshotId, image_ids = new[] { "i1" } }));
+            True(json.Contains("OCR sample")); True(json.Contains("\"truncated\":true"));
+            Rejects("没有识别出的文字", () => Invoke(t, "read_image_text", new { snapshot_id = s.SnapshotId, image_ids = new[] { "i2" } }));
+            True(Json(Invoke(t, "get_page_overview", new { })).Contains("\"images\":[{\"id\":\"i1\""));
+            True(AgentRunner.SystemPrompt(t).Contains("read_image_text"));
+            True(!Json(Tools(Snapshot()).Definitions).Contains("read_image_text"));
+        });
+        Test("switches remove list, tag and table tools and their prompts", () =>
+        {
+            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><EnableTags>false</EnableTags></Agent></AiConfig>"));
+            True(!c.Agent.EnableTags); True(c.Agent.EnableLists); True(c.Agent.EnableTableStyles);
+            var off = Tools(new AgentPageSnapshot(GridPage().ToString(), null, new AgentOptions { EnableLists = false, EnableTags = false, EnableTableStyles = false }));
+            var defs = Json(off.Definitions); var prompt = AgentRunner.SystemPrompt(off);
+            True(!defs.Contains("set_list") && !defs.Contains("set_tag") && !defs.Contains("set_table_style"));
+            True(!prompt.Contains("set_list") && !prompt.Contains("set_tag") && !prompt.Contains("set_table_style"));
+            var on = Tools(Snapshot(GridPage()));
+            True(Json(on.Definitions).Contains("set_table_style")); True(AgentRunner.SystemPrompt(on).Contains("set_list"));
+        });
+        Test("step descriptions for list, tag, table and image tools", () =>
+        {
+            Equal(("设置列表 · 编号 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("set_list", "{\"block_ids\":[\"a\",\"b\"],\"list\":\"number\"}", "{\"ok\":true}"));
+            Equal(("设置标记 · 待办已完成 · 1 段", AgentStepState.Done), AgentTools.DescribeStep("set_tag", "{\"block_ids\":[\"a\"],\"tag\":\"todo\",\"completed\":true}", "{\"ok\":true}"));
+            Equal(("设置表格样式 · 1 个表格", AgentStepState.Done), AgentTools.DescribeStep("set_table_style", "{\"table_ids\":[\"t1\"]}", "{\"ok\":true}"));
+            Equal(("读取图片文字 · 2 张", AgentStepState.Done), AgentTools.DescribeStep("read_image_text", "{\"image_ids\":[\"i1\",\"i2\"]}", "{}"));
+        });
         Console.WriteLine($"Agent: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
     }
@@ -570,6 +736,20 @@ internal static class Program
         new XElement(One + "Table", new XAttribute("objectID", "table"),
             new XElement(One + "Columns", new XElement(One + "Column", new XAttribute("index", "0"), new XAttribute("width", "200"), new XAttribute("isLocked", locked))),
             new XElement(One + "Row", new XAttribute("objectID", "row"), new XElement(One + "Cell", new XAttribute("objectID", "cell"), new XElement(One + "OEChildren", Paragraph("a", "第一段")))))));
+    /// <summary>两行两列、显示边框的表格：表头「名称 | 说明」，数据「甲 | 乙」。</summary>
+    private static XElement GridPage() => Page(new XElement(One + "OE", new XAttribute("objectID", "wrapper"),
+        new XElement(One + "Table", new XAttribute("objectID", "table"), new XAttribute("bordersVisible", "true"),
+            new XElement(One + "Columns", new XElement(One + "Column", new XAttribute("index", "0"), new XAttribute("width", "100")),
+                new XElement(One + "Column", new XAttribute("index", "1"), new XAttribute("width", "100"))),
+            new XElement(One + "Row", new XAttribute("objectID", "r1"), GridCell("h1", "名称"), GridCell("h2", "说明")),
+            new XElement(One + "Row", new XAttribute("objectID", "r2"), GridCell("d1", "甲"), GridCell("d2", "乙")))));
+    private static XElement GridCell(string id, string text) => new XElement(One + "Cell", new XAttribute("objectID", "cell-" + id), new XElement(One + "OEChildren", Paragraph(id, text)));
+    private static XElement TagDef(string index, int symbol, string name) => new XElement(One + "TagDef", new XAttribute("index", index), new XAttribute("type", "0"),
+        new XAttribute("symbol", symbol), new XAttribute("fontColor", "automatic"), new XAttribute("highlightColor", "none"), new XAttribute("name", name));
+    private static XElement Tag(string index) => new XElement(One + "Tag", new XAttribute("index", index), new XAttribute("completed", "false"), new XAttribute("disabled", "false"));
+    private static XElement Listed(string id, string text, string bullet)
+    { var oe = Paragraph(id, text); oe.AddFirst(new XElement(One + "List", new XElement(One + "Bullet", new XAttribute("bullet", bullet)))); return oe; }
+    private static string Json(object value) => AgentChatClient.Serializer().Serialize(value);
     private static AgentTools Tools(AgentPageSnapshot s) => new AgentTools(s, new AgentCommitter(new FakePage(s.Page)), CancellationToken.None);
     private static object Invoke(AgentTools tools, string name, object args) => tools.Execute(new AgentToolCall { Id = "test", Name = name, Arguments = AgentChatClient.Serializer().Serialize(args) });
     private static void Read(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = s.Blocks.Where(b => b.Editable).Select(b => b.Id).ToArray() });
@@ -631,10 +811,16 @@ internal static class Program
             if (ConflictsRemaining-- > 0) { OnConflict?.Invoke(); throw new COMException("conflict", unchecked((int)0x80042010)); }
             foreach (var c in XElement.Parse(xml).Elements())
             {
+                // 本机实测：已有段落省略 List 时 OneNote 保留原来的列表，只有重建的段落才没有列表。
+                foreach (var oe in c.DescendantsAndSelf(One + "OE").Where(e => e.Attribute("objectID") != null && e.Element(One + "List") == null))
+                {
+                    var list = Page.Descendants(One + "OE").FirstOrDefault(e => (string)e.Attribute("objectID") == (string)oe.Attribute("objectID"))?.Element(One + "List");
+                    if (list != null) oe.AddFirst(new XElement(list));
+                }
                 // OneNote 给新建的段落、表格分配 ID。
                 foreach (var e in c.DescendantsAndSelf().Where(e => new[] { "OE", "Table", "Row", "Cell" }.Contains(e.Name.LocalName) && e.Attribute("objectID") == null))
                     e.SetAttributeValue("objectID", "new-" + ++_ids);
-                var identity = c.Name == One + "QuickStyleDef" ? "index" : "objectID";
+                var identity = c.Name == One + "QuickStyleDef" || c.Name == One + "TagDef" ? "index" : "objectID";
                 var current = Page.Elements(c.Name).FirstOrDefault(e => (string)e.Attribute(identity) == (string)c.Attribute(identity));
                 if (current == null) Page.Add(new XElement(c)); else current.ReplaceWith(new XElement(c));
             }

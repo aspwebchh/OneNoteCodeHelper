@@ -45,6 +45,10 @@ internal static class Probe
                         new XElement(ns + "OE", new XElement(ns + "T", new XCData("public class Demo {"))),
                         new XElement(ns + "OE", new XElement(ns + "T", new XCData("&nbsp;&nbsp;&nbsp;&nbsp;int x = 1;"))),
                         new XElement(ns + "OE", new XElement(ns + "T", new XCData("}"))),
+                        // set_list / set_tag：项目符号加重要标记、编号、已完成的待办。
+                        new XElement(ns + "OE", new XElement(ns + "T", new XCData("第一步：检查环境"))),
+                        new XElement(ns + "OE", new XElement(ns + "T", new XCData("第二步：执行部署"))),
+                        new XElement(ns + "OE", new XElement(ns + "T", new XCData("通知测试同事"))),
                         new XElement(ns + "OE", new XElement(ns + "Table", new XAttribute("bordersVisible", "true"), new XAttribute("hasHeaderRow", "false"),
                             new XElement(ns + "Columns", new XElement(ns + "Column", new XAttribute("index", 0), new XAttribute("width", 200)),
                                 new XElement(ns + "Column", new XAttribute("index", 1), new XAttribute("width", 200), new XAttribute("isLocked", true))),
@@ -73,17 +77,30 @@ internal static class Probe
             Execute(tools, "highlight_code", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { mono.Id }, language = "java" });
             var plain = editable.Where(b => b.Text.StartsWith("public class", StringComparison.Ordinal) || b.Text.Contains("int x") || b.Text == "}").Select(b => b.Id).ToArray();
             Execute(tools, "highlight_code", new { snapshot_id = snapshot.SnapshotId, block_ids = plain, language = "auto" });
-            var expected = new XElement(snapshot.Page);
-            expected.Elements(ns + "QuickStyleDef").Remove();
-            expected.AddFirst(snapshot.DraftStyles.Elements().Select(e => new XElement(e)));
-            foreach (var b in snapshot.Blocks.Where(b => b.Changed)) AgentPageSnapshot.CopyFormat(b.Draft, AgentCommitter.Find(expected, b.ObjectId));
+            var first = editable.First(b => b.Text.StartsWith("第一步", StringComparison.Ordinal)).Id;
+            var second = editable.First(b => b.Text.StartsWith("第二步", StringComparison.Ordinal)).Id;
+            var todo = editable.First(b => b.Text == "通知测试同事").Id;
+            // 父段落带下级段落：撤销时去掉列表要重建它，下级段落应保持原 ID。
+            Execute(tools, "set_list", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { first, parent.Id }, list = "bullet" });
+            Execute(tools, "set_list", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { second }, list = "number" });
+            Execute(tools, "set_tag", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { first }, tag = "important" });
+            Execute(tools, "set_tag", new { snapshot_id = snapshot.SnapshotId, block_ids = new[] { todo }, tag = "todo", completed = true });
+            var grid = snapshot.Tables.Single(t => t.Editable);
+            Execute(tools, "set_table_style", new { snapshot_id = snapshot.SnapshotId, table_ids = new[] { grid.Id }, style = new { header_row = true, header_shading = "#DEEAF6" } });
+            var expected = snapshot.CreateDraftPage();
             File.WriteAllText(Path.Combine(directory, "expected.xml"), expected.ToString());
             Execute(tools, "finish_edit", new { snapshot_id = snapshot.SnapshotId, draft_revision = snapshot.Revision });
             File.WriteAllText(Path.Combine(directory, "after.xml"), api.GetPageContent(pageId, PageInfo.piBasic));
             Console.WriteLine("Test section: " + path);
             Console.WriteLine("Result: " + tools.Report.Status + " " + tools.Report.Message);
-            Console.WriteLine("Code blocks: " + tools.Report.CodeBlocks);
+            Console.WriteLine("Code blocks: " + tools.Report.CodeBlocks + ", tables: " + tools.Report.Tables);
             var actual = AgentPageSnapshot.ParsePage(api.GetPageContent(pageId, PageInfo.piBasic));
+            // OneNote 实际写回的列表、标记和表格外观，供对照 AgentMarks / TableLook 的写法。
+            foreach (var e in actual.Elements(ns + "TagDef").Concat(actual.Descendants(ns + "Tag")).Concat(actual.Descendants(ns + "List")))
+                Console.WriteLine("Written " + e.Name.LocalName + ": " + e.ToString(SaveOptions.DisableFormatting));
+            var writtenGrid = AgentTable.Find(actual, grid.ObjectId);
+            if (writtenGrid != null) Console.WriteLine("Written table: borders=" + (string)writtenGrid.Attribute("bordersVisible") + " header=" + (string)writtenGrid.Attribute("hasHeaderRow") +
+                " shading=" + string.Join(",", writtenGrid.Element(ns + "Row").Elements(ns + "Cell").Select(c => (string)c.Attribute("shadingColor"))));
             foreach (var b in snapshot.Blocks.Where(b => b.Changed))
             {
                 var left = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(expected, b.ObjectId), expected);
@@ -99,7 +116,13 @@ internal static class Probe
             File.WriteAllText(Path.Combine(directory, "after-undo.xml"), api.GetPageContent(pageId, PageInfo.piBasic));
             Console.WriteLine("Undo: " + undo.Status + " " + undo.Message);
             Console.WriteLine("The new test page is kept for visual inspection. No existing page was edited.");
-            return tools.Report.Status == "Verified" && undo.Status == "Verified" && tools.Report.CodeBlocks == 2 && undo.CodeBlocks == 2 ? 0 : 1;
+            var restored = AgentPageSnapshot.ParsePage(api.GetPageContent(pageId, PageInfo.piBasic));
+            var marksLeft = restored.Descendants(ns + "Tag").Count() + restored.Descendants(ns + "List").Count();
+            var child = snapshot.Blocks.Single(b => b.Text == "保留原样的子段落");
+            var childKept = AgentCommitter.Find(restored, child.ObjectId) != null;
+            Console.WriteLine("Tags and lists left after undo: " + marksLeft + ", child paragraph kept its ID: " + childKept);
+            return tools.Report.Status == "Verified" && undo.Status == "Verified" && tools.Report.CodeBlocks == 2 && undo.CodeBlocks == 2 &&
+                tools.Report.Tables == 1 && undo.Tables == 1 && marksLeft == 0 && childKept ? 0 : 1;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
         finally { if (app != null && Marshal.IsComObject(app)) Marshal.FinalReleaseComObject(app); }

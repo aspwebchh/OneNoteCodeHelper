@@ -6,16 +6,17 @@
 
 1. 「开始 → AI 助手 → Agent」通过 `AddIn.OnShowAgentWindow` 启动独立 STA 窗口，固定当前页及打开窗口时的选区。
 2. 用户选择整页或选中段落并输入需求。后台读取固定页面，构建短 ID、保护范围、内容和格式指纹。
-3. `AgentRunner` 把模型原生 `tool_calls` 映射到八个本地函数，完整读取后才能修改段落。模型的文字声明不能触发写回。
+3. `AgentRunner` 把模型原生 `tool_calls` 映射到本地函数（按能力开关和页面内容注册，最多十二个），完整读取后才能修改段落。模型的文字声明不能触发写回。
 4. 格式和改字工具只更新内存草稿。每个批量调用全部校验通过后才发布，返回修订号；参数错误不会留下半个工具调用的修改。
 5. 模型独立调用 `finish_edit` 后，提交器在页面锁内重读、识别冲突、重建完整的受影响容器、带时间戳提交，并回读核验。
 6. UI 展示实际核验结果，保存本次已确认段落的撤销记录。撤销再次校验指纹，避免覆盖后来编辑的内容。
 
 页面正文作为数据传给模型，不作为系统指令。工具不接受任意 XML、HTML、外部页面 ID、文件路径或脚本。修改范围不能超出快照；图片二进制、代码和受保护对象不传入模型。模型能读取的正文和富文本格式会发送给用户配置的模型接口。
 
-## 八个工具
+## 工具
 
 本地校验和 JSON Schema 共用 `AgentSchema` 定义；所有对象拒绝未知字段，限制数组长度、数值、枚举和字符串长度。
+系统提示词按本次实际注册的工具拼接（`AgentRunner.SystemPrompt`），没有提供的工具不提。
 
 | 工具 | 参数与执行规则 |
 |---|---|
@@ -25,11 +26,18 @@
 | `set_text_style` | `snapshot_id`、`targets`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、`style`；支持 bold/italic/underline/color |
 | `fix_text` | `snapshot_id`、`fixes`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、改后文字 `replacement`，两者各 1–30 字、不含换行，同一段的多处按顺序应用；代码段落拒绝。唯一能改文字的工具，系统提示词要求只在用户要求时修正错别字 |
 | `highlight_code` | `snapshot_id`、`block_ids`（最多 1000）、`language`（`auto` 或已支持的语言 id）；把连续的代码段落排入草稿，提交时换成高亮代码框。`Agent/EnableCodeHighlight=false` 时不注册 |
+| `set_list` | `snapshot_id`、`block_ids`、`list`（bullet/number/none）；已是同一种列表时不动，保留原符号样式。页面标题、未读和代码段落拒绝。`EnableLists=false` 时不注册 |
+| `set_tag` | `snapshot_id`、`block_ids`、`tag`（todo/important/question/none）、可选 `completed`（只用于 todo）；同类标记不重复添加，none 只去掉这三种。`EnableTags=false` 时不注册 |
+| `set_table_style` | `snapshot_id`、`table_ids`、`style`（`borders`、`header_row`、`header_shading` 至少一项）；不需要先读。`EnableTableStyles=false` 或页面没有可编辑表格时不注册 |
+| `read_image_text` | `snapshot_id`、`image_ids`；只读，返回 OneNote 识别出的图片文字，每张最多 4000 字并标记 `truncated`。页面上有带识别文字的图片时才注册 |
 | `get_pending_changes` | `snapshot_id`；返回草稿修订号、修改段落 ID、已排的文字修正、未完整读取的可编辑段落 ID、已排入的代码框、尚未转换的等宽代码及保护计数 |
 | `finish_edit` | `snapshot_id`、`draft_revision`；必须是当轮唯一工具，修订号匹配后冻结草稿，只提交一次 |
 
 段落 overrides：`alignment` 为 left/center/right；`font_family` 为 Microsoft YaHei/Calibri/Arial 且需已安装；字号 8–32 pt；段前后间距 0–36 pt；颜色限于 `#1F4E79`、`#365F91`、`#222222`、`#666666`。
 局部文字按精确匹配定位，重复短语的出现序号按不重叠匹配计数。切开代理对、组合字符或常见 emoji 序列的请求会拒绝。
+
+`get_page_overview` 另外返回每段的 `list`、`tags`、`table_id`，以及 `tables`（t1…，行列数、当前外观、首行前 40 字、是否可编辑）和 `images`（i1…，识别文字字数）；
+`read_blocks` 每段也带 `list`、`tags`，`get_pending_changes` 带 `tables_changed`。
 
 `fix_text` 在原文和改后文字之间逐字比对：没变的字连同格式、链接原样保留，新字沿用被替换的字（纯插入时沿用前一个字）的格式。修正后 `read_blocks`、概况摘要和局部格式定位都按草稿里的新文字。
 提交时只有排过文字修正的段落可以改正文，而且必须和草稿一致；其他段落仍要求正文和链接不变。冲突检测、回读核验照旧，撤销记录带上修正，撤销时文字一起还原。修正清单只进窗口里的结果，日志只记条数。
@@ -44,6 +52,24 @@
 
 撤销时代码框指纹不变才换回原段落：去掉 objectID 和编辑记录让 OneNote 新建，`quickStyleIndex` 按当前页面的样式定义重新对应，再核验文字和格式。
 
+## 列表、标记和表格样式
+
+2026-09-28 追加，三者都不改变段落数量、顺序和嵌套，沿用草稿、提交、回读核验和撤销流程。
+
+- **列表**：新建时写 `<one:List><one:Bullet bullet="2"/></one:List>` 或 `<one:List><one:Number numberSequence="0" numberFormat="##."/></one:List>`，不写字体属性，OneNote 回存时自己补上编号文字。
+  列表类型可以在原段落上直接切换；但 OneNote 不接受在原段落上去掉列表（见 README「几个踩过的坑」），所以取消列表和撤销新加的列表时，
+  提交器去掉这一段的 objectID 和编辑记录，让 OneNote 重建它（`AgentCode.StripIdentity`）。下级段落保持原 ID；
+  回读时重建的段落按位置对应，撤销记录记新 ID。
+- **标记**：预设按 OneNote 默认标记库，todo = symbol 3、important = 13、question = 15，本机回存与预期一致。
+  草稿里按图标复用页面已有的 TagDef（包括用户的中文「待办事项」），没有才新增；提交时按完整定义对应到重新读取的页面，只有新增了 TagDef 才把 TagDef 一起提交。
+  省略 `one:Tag` 可以删掉标记，OneNote 会一并清掉不再引用的 TagDef。
+- **核验**：`SemanticFormat` 追加列表种类和「标记图标:完成状态」（`AgentMarks.Projection`），不看 OneNote 补上的字号、编号文字、时间。
+  本次写入的段落和重建的段落不逐字比较 List/Tag 的 XML；其余段落仍严格比较，标记按引用的 TagDef 内容比较，不受 TagDef 重新编号影响。
+- **表格**：外观为 `bordersVisible`、`hasHeaderRow` 和首行各单元格的 `shadingColor`，逐格记录，撤销能还原各格不同的底色。
+  指纹只含表格 ID、外观、行列数和首行单元格 ID，处理期间改单元格文字不算冲突。外观比较把缺省的开关当 false、把缺省/none/automatic 底色当无底色。
+  单行单格且全是等宽段落的表格是代码框，只保护。
+- **图片文字**：读 `one:Image/one:OCRData/one:OCRText`；合成页面上产生不了 OCR，真实识别结果需要在 OneNote 里人工验收。
+
 ## 代码位置
 
 | 文件 | 职责 |
@@ -52,7 +78,9 @@
 | `Views/AgentWindow.xaml(.cs)` | 功能（Agent 或文字功能）、模型、思考强度、范围、需求、进度（轮次、思考摘录、执行步骤）、取消、结果、会话撤销；窗口高度固定 |
 | `Services/Agent/AgentRunner.cs` | 模型循环、历史消息、工具分派、调用幂等和预算 |
 | `Services/Agent/AgentChatClient.cs` | Chat Completions、HTTP/SSE、工具片段聚合、消息 DTO |
-| `Services/Agent/AgentTools.cs` | 八个工具、Schema 与本地校验、草稿发布 |
+| `Services/Agent/AgentTools.cs` | 工具注册、Schema 与本地校验、草稿发布 |
+| `Services/Agent/AgentMarks.cs` | 列表与标记：写法、TagDef 复用与对应、元素顺序、核验投影 |
+| `Services/Agent/AgentTables.cs` | 表格外观、表格快照项、指纹和撤销记录 |
 | `Services/Agent/AgentFormatting.cs` | 富文本解析与局部样式、等宽判定、CSS 归一化、预设、QuickStyleDef 管理 |
 | `Services/Agent/AgentCode.cs` | 代码框转换的范围校验、原段落记录、代码框指纹和撤销还原 |
 | `Services/Agent/AgentPageSnapshot.cs` | 范围、短 ID、保护对象、指纹、配置和语义投影 |
@@ -108,6 +136,10 @@
 
 代码框转换（2026-09-26 追加）：Agent 离线回归 61/61（新增代码分类、范围校验、冲突、与格式合并提交、撤销和 Runner 全流程），高亮选区 11/11，AI 合并 69/69，语言识别 106/106。
 探针已加入一段普通字体代码和一段整段 Consolas 代码的转换与撤销，但尚未在真实 OneNote 上重新运行；OneNote 回存代码行时的空白规范化仍需用探针确认。
+
+列表、标记和表格样式（2026-09-28 追加，OneNote `16.0.20326.20158`）：Agent 离线回归 83/83（FakePage 模拟了「省略 List 不去掉列表」），
+高亮选区 11/11，AI 合并 81/81，语言识别 106/106。真实 OneNote 探针新增项目符号、编号、重要标记、已完成待办、表格标题行和表头底色，
+执行和撤销都是 Verified；撤销后列表和标记全部去掉，重建的父段落下级段落保持原 ID。图片文字未在真实页面上验收。
 
 重现本次构建和离线测试：
 

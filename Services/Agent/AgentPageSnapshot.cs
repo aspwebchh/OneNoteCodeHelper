@@ -25,6 +25,10 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool EnableMixedOutlines { get; set; } = true;
         // 把未高亮的代码转换为插件代码框；关闭时整段等宽代码仍只保护。
         internal bool EnableCodeHighlight { get; set; } = true;
+        // 列表符号、待办等标记和表格外观；关闭时这些只保护、不修改。
+        internal bool EnableLists { get; set; } = true;
+        internal bool EnableTags { get; set; } = true;
+        internal bool EnableTableStyles { get; set; } = true;
         internal string FontFamily { get; set; } = "Microsoft YaHei";
 
         internal static AgentOptions Parse(XElement element)
@@ -43,6 +47,9 @@ namespace OneNoteCodeHelper.Services.Agent
             value.EnableNativeHeadings = Boolean(element, "EnableNativeHeadings", true);
             value.EnableMixedOutlines = Boolean(element, "EnableMixedOutlines", true);
             value.EnableCodeHighlight = Boolean(element, "EnableCodeHighlight", true);
+            value.EnableLists = Boolean(element, "EnableLists", true);
+            value.EnableTags = Boolean(element, "EnableTags", true);
+            value.EnableTableStyles = Boolean(element, "EnableTableStyles", true);
             var font = (string)element.Element("FontFamily");
             if (ParagraphStyles.Fonts.Contains(font)) value.FontFamily = font;
             return value;
@@ -68,6 +75,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string ProtectedReason;
         internal string ContainerId;
         internal string ParentId;
+        /// <summary>段落所在表格的短 ID（t1…），不在已登记的表格里为 null。</summary>
+        internal string TableId;
         internal int Depth;
         internal bool Read;
         /// <summary>已排入草稿的代码框转换；这些段落不再接受样式修改。</summary>
@@ -78,6 +87,16 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool Changed => !XNode.DeepEquals(Original, Draft);
     }
 
+    /// <summary>OneNote 已识别出文字的图片。只读，短 ID 为 i1、i2…</summary>
+    internal sealed class AgentImage
+    {
+        internal const int MaxChars = 4000;
+        internal string Id;
+        internal string ContainerId;
+        internal string Text;
+        internal bool Truncated;
+    }
+
     internal sealed class AgentPageSnapshot
     {
         internal readonly string SnapshotId = Guid.NewGuid().ToString("N");
@@ -85,9 +104,13 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<AgentCodeConversion> CodeConversions = new List<AgentCodeConversion>();
         /// <summary>撤销时要换回原段落的代码框。</summary>
         internal readonly List<AgentCodeUndoItem> CodeRestores = new List<AgentCodeUndoItem>();
+        internal readonly List<AgentTable> Tables = new List<AgentTable>();
+        internal readonly List<AgentImage> Images = new List<AgentImage>();
         internal readonly AgentOptions Options;
         internal readonly XElement Page;
         internal readonly XElement DraftStyles;
+        /// <summary>草稿里的 TagDef：页面原有的加上 set_tag 新增的。提交时按内容重新对应到页面上的编号。</summary>
+        internal readonly XElement DraftTags;
         internal string PageId => (string)Page.Attribute("ID");
         internal string Title => (string)Page.Attribute("name") ?? "当前页面";
         internal int Revision;
@@ -99,8 +122,11 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             Page = ParsePage(xml);
             DraftStyles = new XElement("styles", Page.Elements(One + "QuickStyleDef").Select(e => new XElement(e)));
+            DraftTags = new XElement("tags", Page.Elements(One + "TagDef").Select(e => new XElement(e)));
             Options = options;
             SelectionOnly = selection != null;
+            var tableIds = CollectTables(selection);
+            CollectImages(selection);
             var objects = Page.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).ToList();
             var duplicate = new HashSet<string>(objects.GroupBy(e => (string)e.Attribute("objectID")).Where(g => g.Count() > 1).Select(g => g.Key));
             foreach (var oe in objects)
@@ -108,10 +134,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 var objectId = (string)oe.Attribute("objectID");
                 if (selection != null && !selection.Contains(objectId ?? "")) continue;
                 var container = oe.Ancestors().FirstOrDefault(e => e.Parent == Page);
-                var reason = string.IsNullOrEmpty(objectId) || duplicate.Contains(objectId) ? "missing_or_duplicate_id" : null;
-                if (container == null || !(container.Name == One + "Title" || container.Name == One + "Outline")) reason = "unsupported_container";
-                if (!options.EnableMixedOutlines && container != null && container.Descendants().Any(IsBinary)) reason = "mixed_outline_not_verified";
-                if (container != null && container.Descendants().Any(e => IsBinary(e) && e.Name != One + "Image")) reason = "unsupported_outline_objects";
+                var reason = ContainerReason(container) ?? (string.IsNullOrEmpty(objectId) || duplicate.Contains(objectId) ? "missing_or_duplicate_id" : null);
                 if (oe.Elements().Any(IsBinary) || oe.Elements(One + "InkWord").Any()) reason = "unsupported_content";
                 var text = "";
                 try
@@ -131,6 +154,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     Text = text, ProtectedReason = reason, Fingerprint = Fingerprint(oe, Page),
                     ContainerId = container == null ? "" : (string)container.Attribute("objectID") ?? container.Name.LocalName,
                     ParentId = (string)oe.Ancestors(One + "OE").FirstOrDefault()?.Attribute("objectID"),
+                    TableId = oe.Ancestors(One + "Table").FirstOrDefault() is XElement table && tableIds.TryGetValue(table, out var tableId) ? tableId : null,
                     Depth = oe.Ancestors(One + "OE").Count()
                 });
             }
@@ -139,6 +163,70 @@ namespace OneNoteCodeHelper.Services.Agent
             // 待高亮代码也要发给模型读。放不下时按原来的方式只保护，不让整页失败。
             if (!options.EnableCodeHighlight || Blocks.Sum(b => b.Editable || b.CodeCandidate ? b.Text.Length : 0) > options.MaxPageChars)
                 foreach (var b in Blocks.Where(b => b.CodeCandidate)) b.ProtectedReason = "protected_code";
+        }
+
+        /// <summary>容器级的保护原因：只支持标题和文本框；图文混排要开关允许，墨迹、附件等对象所在的整个文本框跳过。</summary>
+        private string ContainerReason(XElement container)
+        {
+            string reason = null;
+            if (container == null || !(container.Name == One + "Title" || container.Name == One + "Outline")) reason = "unsupported_container";
+            if (!Options.EnableMixedOutlines && container != null && container.Descendants().Any(IsBinary)) reason = "mixed_outline_not_verified";
+            if (container != null && container.Descendants().Any(e => IsBinary(e) && e.Name != One + "Image")) reason = "unsupported_outline_objects";
+            return reason;
+        }
+
+        /// <summary>
+        /// 登记表格，返回表格元素到短 ID 的对应。选中范围时，表格里有文字的段落都选中了才算在范围内。
+        /// 代码框和不支持的文本框里的表格只保护。
+        /// </summary>
+        private Dictionary<XElement, string> CollectTables(ISet<string> selection)
+        {
+            var ids = new Dictionary<XElement, string>();
+            foreach (var table in Page.Descendants(One + "Table"))
+            {
+                var objectId = (string)table.Attribute("objectID");
+                if (string.IsNullOrEmpty(objectId)) continue;
+                if (selection != null)
+                {
+                    var lines = table.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any() && !string.IsNullOrWhiteSpace(PageEditor.ExtractPlainText(e))).ToList();
+                    if (lines.Count == 0 || lines.Any(e => !selection.Contains((string)e.Attribute("objectID") ?? ""))) continue;
+                }
+                var container = table.Ancestors().FirstOrDefault(e => e.Parent == Page);
+                var reason = IsCodeBox(table, Page) ? "highlighted_code" : ContainerReason(container);
+                var cells = table.Element(One + "Row")?.Elements(One + "Cell").Select(c =>
+                    PageEditor.ExtractPlainText(c.Descendants(One + "OE").FirstOrDefault(e => e.Elements(One + "T").Any()) ?? new XElement(One + "OE")).Trim());
+                var summary = reason == "highlighted_code" || cells == null ? null : string.Join(" | ", cells);
+                var item = new AgentTable
+                {
+                    Id = "t" + (Tables.Count + 1), ObjectId = objectId, ProtectedReason = reason,
+                    ContainerId = container == null ? "" : (string)container.Attribute("objectID") ?? container.Name.LocalName,
+                    Fingerprint = AgentTable.TakeFingerprint(table), Original = TableLook.Read(table), Draft = TableLook.Read(table),
+                    Rows = table.Elements(One + "Row").Count(), Columns = table.Element(One + "Columns")?.Elements(One + "Column").Count() ?? 0,
+                    Summary = summary == null || summary.Length <= 40 ? summary : summary.Substring(0, 40)
+                };
+                Tables.Add(item);
+                ids[table] = item.Id;
+            }
+            return ids;
+        }
+
+        /// <summary>登记 OneNote 已识别出文字的图片。选中范围时只收图片本身或所在段落被整体选中的。</summary>
+        private void CollectImages(ISet<string> selection)
+        {
+            foreach (var image in Page.Descendants(One + "Image"))
+            {
+                var text = image.Element(One + "OCRData")?.Element(One + "OCRText")?.Value?.Trim();
+                if (string.IsNullOrEmpty(text)) continue;
+                if (selection != null && (string)image.Attribute("selected") != "all" && (string)image.Parent?.Attribute("selected") != "all") continue;
+                var container = image.Parent == Page ? image : image.Ancestors().FirstOrDefault(e => e.Parent == Page);
+                var length = Math.Min(text.Length, AgentImage.MaxChars);
+                if (length < text.Length && char.IsHighSurrogate(text[length - 1])) length--;
+                Images.Add(new AgentImage
+                {
+                    Id = "i" + (Images.Count + 1), ContainerId = container == null ? "" : (string)container.Attribute("objectID") ?? container.Name.LocalName,
+                    Text = text.Substring(0, length), Truncated = length < text.Length
+                });
+            }
         }
 
         internal static XElement ParsePage(string xml)
@@ -161,7 +249,8 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             var page = new XElement(Page);
             page.Elements(One + "QuickStyleDef").Remove();
-            page.AddFirst(DraftStyles.Elements().Select(e => new XElement(e)));
+            page.Elements(One + "TagDef").Remove();
+            page.AddFirst(DraftTags.Elements().Concat(DraftStyles.Elements()).Select(e => new XElement(e)));
             foreach (var b in Blocks.Where(b => b.Changed)) CopyFormat(b.Draft, AgentCommitter.Find(page, b.ObjectId));
             return page;
         }
@@ -173,15 +262,21 @@ namespace OneNoteCodeHelper.Services.Agent
         /// </summary>
         private static string CodeKind(XElement oe, AgentRichText rich, XElement page)
         {
-            var cell = oe.Ancestors(One + "Cell").FirstOrDefault();
-            var table = cell?.Ancestors(One + "Table").FirstOrDefault();
-            if (table != null && table.Elements(One + "Row").Count() == 1 && table.Element(One + "Row").Elements(One + "Cell").Count() == 1 &&
-                cell.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).All(e => IsMonospaceParagraph(e, page))) return "highlighted_code";
+            var table = oe.Ancestors(One + "Cell").FirstOrDefault()?.Ancestors(One + "Table").FirstOrDefault();
+            if (table != null && IsCodeBox(table, page)) return "highlighted_code";
             var (any, all) = rich.Monospace(page);
             if (all) return "unhighlighted_code";
             if (any || (!string.IsNullOrWhiteSpace(rich.Text) && oe.AncestorsAndSelf(One + "OE").Any(PageEditor.IsCodeParagraph))) return "protected_code";
             return null;
         }
+        /// <summary>已有代码框：单行单格的表格，格内全是等宽段落。</summary>
+        internal static bool IsCodeBox(XElement table, XElement page)
+        {
+            var rows = table.Elements(One + "Row").ToList();
+            if (rows.Count != 1 || rows[0].Elements(One + "Cell").Count() != 1) return false;
+            return rows[0].Element(One + "Cell").Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).All(e => IsMonospaceParagraph(e, page));
+        }
+
         private static bool IsMonospaceParagraph(XElement oe, XElement page)
         {
             if (PageEditor.IsCodeParagraph(oe)) return true;
@@ -211,6 +306,7 @@ namespace OneNoteCodeHelper.Services.Agent
             // T 也可能直接引用 quick style。
             foreach (var index in oe.DescendantsAndSelf().Attributes("quickStyleIndex").Select(a => a.Value).Distinct())
                 data.Append(page.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == index));
+            foreach (var tag in oe.Elements(One + "Tag")) data.Append(AgentMarks.Definition(page, tag));
             using (var sha = SHA256.Create()) return Convert.ToBase64String(sha.ComputeHash(Encoding.UTF8.GetBytes(data.ToString())));
         }
 
@@ -223,6 +319,7 @@ namespace OneNoteCodeHelper.Services.Agent
 
         internal static void CopyFormat(XElement source, XElement target)
         {
+            AgentMarks.CopyMarks(source, target);
             foreach (var name in new[] { "style", "alignment", "spaceBefore", "spaceAfter", "quickStyleIndex" }) target.SetAttributeValue(name, (string)source.Attribute(name));
             var src = source.Elements(One + "T").ToList();
             var dst = target.Elements(One + "T").ToList();
@@ -246,7 +343,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var index = (string)oe.Attribute("quickStyleIndex");
             var role = (string)page.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == index)?.Attribute("name") ?? "p";
             return rich.Signature(page, true) + "|" + ((string)oe.Attribute("alignment") ?? "left") + "|" +
-                NormalizeSpacing(oe, "spaceBefore") + "|" + NormalizeSpacing(oe, "spaceAfter") + "|" + role;
+                NormalizeSpacing(oe, "spaceBefore") + "|" + NormalizeSpacing(oe, "spaceAfter") + "|" + role + "|" + AgentMarks.Projection(oe, page);
         }
         private static string NormalizeSpacing(XElement e, string key) => double.TryParse((string)e.Attribute(key), NumberStyles.Float, CultureInfo.InvariantCulture, out var n)
             ? n.ToString("0.###", CultureInfo.InvariantCulture) : "0";

@@ -89,6 +89,8 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>代码框的主题、字体、字号等，取自功能区当前设置，和「高亮选中」一致。</summary>
         private readonly AddInSettings _code;
         internal AgentReport Report { get; private set; }
+        /// <summary>本次注册了这个工具；系统提示词按实际提供的工具追加说明。</summary>
+        internal bool Has(string name) => _tools.ContainsKey(name);
         internal object[] Definitions => _tools.Select(t => (object)new { type = "function", function = new { name = t.Key, description = t.Value.Description, parameters = t.Value.Schema.Json() } }).ToArray();
 
         internal AgentTools(AgentPageSnapshot snapshot, AgentCommitter committer, CancellationToken cancellation, AddInSettings codeSettings = null)
@@ -97,6 +99,13 @@ namespace OneNoteCodeHelper.Services.Agent
             Register("get_page_overview", "获取当前固定页面的段落摘要、保护范围及样式。每页 100 项；通过 offset 翻页。", AgentSchema.Obj(new Dictionary<string, AgentSchema>
             { ["offset"] = AgentSchema.Num(0, 1000, true) }), Overview);
             Register("read_blocks", "完整读取段落正文及样式。修改前必须调用，不能修改受保护段落。", WithIds(), Read);
+            if (snapshot.Images.Count > 0)
+            {
+                var images = SnapshotOnly();
+                images.Properties["image_ids"] = AgentSchema.Array(AgentSchema.Str());
+                images.Required = new[] { "snapshot_id", "image_ids" };
+                Register("read_image_text", "读取 OneNote 已识别出的图片文字，只用来理解页面；图片本身不能修改。", images, ImageText);
+            }
             var fields = new Dictionary<string, AgentSchema>
             {
                 ["alignment"] = AgentSchema.Str("left", "center", "right"), ["font_family"] = AgentSchema.Str(ParagraphStyles.Fonts),
@@ -134,6 +143,36 @@ namespace OneNoteCodeHelper.Services.Agent
                         ["replacement"] = AgentSchema.Short(MaxFixChars)
                     }, "block_id", "quote", "occurrence", "replacement"))
                 }, "snapshot_id", "fixes"), FixText);
+            if (snapshot.Options.EnableLists)
+            {
+                var list = WithIds();
+                list.Properties["list"] = AgentSchema.Str(AgentMarks.ListKinds);
+                list.Required = new[] { "snapshot_id", "block_ids", "list" };
+                Register("set_list", "把完整读取的段落设为项目符号（bullet）、编号（number）列表，或取消列表（none）；只改段落前的符号，不改文字。", list, SetList);
+            }
+            if (snapshot.Options.EnableTags)
+            {
+                var tag = WithIds();
+                tag.Properties["tag"] = AgentSchema.Str(AgentMarks.TagKinds.Concat(new[] { "none" }).ToArray());
+                tag.Properties["completed"] = new AgentSchema { Type = "boolean" };
+                tag.Required = new[] { "snapshot_id", "block_ids", "tag" };
+                Register("set_tag", "给完整读取的段落加待办（todo）、重要（important）或问题（question）标记；completed 勾选或取消待办，只用于 todo。" +
+                    "none 去掉这三种标记，其他标记保留。", tag, SetTag);
+            }
+            if (snapshot.Options.EnableTableStyles && snapshot.Tables.Any(t => t.Editable))
+            {
+                var look = AgentSchema.Obj(new Dictionary<string, AgentSchema>
+                {
+                    ["borders"] = new AgentSchema { Type = "boolean" }, ["header_row"] = new AgentSchema { Type = "boolean" },
+                    ["header_shading"] = AgentSchema.Str(TableLook.Shadings.Concat(new[] { "none" }).ToArray())
+                });
+                look.NonEmpty = true;
+                Register("set_table_style", "设置表格边框（borders）、标题行（header_row）和首行底色（header_shading，none 为无底色）；不改单元格文字和行列。",
+                    AgentSchema.Obj(new Dictionary<string, AgentSchema>
+                    {
+                        ["snapshot_id"] = AgentSchema.Str(), ["table_ids"] = AgentSchema.Array(AgentSchema.Str()), ["style"] = look
+                    }, "snapshot_id", "table_ids", "style"), TableStyle);
+            }
             if (snapshot.Options.EnableCodeHighlight)
             {
                 var code = WithIds();
@@ -165,6 +204,10 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "set_paragraph_style": return "设置段落样式";
                 case "set_text_style": return "设置重点文字样式";
                 case "fix_text": return "修正错别字";
+                case "set_list": return "设置列表";
+                case "set_tag": return "设置标记";
+                case "set_table_style": return "设置表格样式";
+                case "read_image_text": return "读取图片文字";
                 case "highlight_code": return "高亮代码";
                 case "get_pending_changes": return "检查格式草稿";
                 case "finish_edit": return "写回并验证";
@@ -199,6 +242,18 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "fix_text":
                     detail = AiClient.Get(args, "fixes") is IList fixes ? $"{fixes.Count} 处" : null;
                     break;
+                case "set_list":
+                    detail = JoinDetail(ListName(AiClient.Get(args, "list") as string), CountOf(args, "block_ids"));
+                    break;
+                case "set_tag":
+                    detail = JoinDetail(TagName(AiClient.Get(args, "tag") as string, AiClient.Get(args, "completed") as bool?), CountOf(args, "block_ids"));
+                    break;
+                case "set_table_style":
+                    detail = AiClient.Get(args, "table_ids") is IList tables ? $"{tables.Count} 个表格" : null;
+                    break;
+                case "read_image_text":
+                    detail = AiClient.Get(args, "image_ids") is IList images ? $"{images.Count} 张" : null;
+                    break;
                 case "highlight_code":
                     detail = JoinDetail(LanguageName(AiClient.Get(outcome, "language") as string ?? AiClient.Get(args, "language") as string),
                         CountOf(args, "block_ids"));
@@ -226,6 +281,27 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "heading2": return "二级标题";
                 case "body": return "正文";
                 case "quote": return "引用";
+                default: return null;
+            }
+        }
+        private static string ListName(string kind)
+        {
+            switch (kind)
+            {
+                case "bullet": return "项目符号";
+                case "number": return "编号";
+                case "none": return "取消列表";
+                default: return null;
+            }
+        }
+        private static string TagName(string kind, bool? completed)
+        {
+            switch (kind)
+            {
+                case "todo": return completed == true ? "待办已完成" : completed == false ? "待办未完成" : "待办";
+                case "important": return "重要";
+                case "question": return "问题";
+                case "none": return "去掉标记";
                 default: return null;
             }
         }
@@ -262,10 +338,18 @@ namespace OneNoteCodeHelper.Services.Agent
                 draft_revision = _snapshot.Revision, presets = ParagraphStyles.Ids, native_headings = _snapshot.Options.EnableNativeHeadings,
                 paragraph_spacing = _snapshot.Options.EnableParagraphSpacing, code_highlight = _snapshot.Options.EnableCodeHighlight,
                 languages = _snapshot.Options.EnableCodeHighlight ? Languages : null,
+                list_edit = Has("set_list"), tag_edit = Has("set_tag"), table_style = Has("set_table_style"),
+                table_shadings = Has("set_table_style") ? TableLook.Shadings : null,
                 total = _snapshot.Blocks.Count, next_offset = offset + 100 < _snapshot.Blocks.Count ? (int?)(offset + 100) : null,
                 blocks = _snapshot.Blocks.Skip(offset).Take(100).Select(b => new { id = b.Id, container_id = b.ContainerId, parent_id = b.ParentId, depth = b.Depth,
-                    editable = b.Editable, reason = b.ProtectedReason,
-                    summary = b.Editable || b.CodeCandidate ? b.CurrentText.Substring(0, Math.Min(80, b.CurrentText.Length)) : null }).ToArray() };
+                    table_id = b.TableId, editable = b.Editable, reason = b.ProtectedReason,
+                    list = AgentMarks.ListKind(b.Draft), tags = AgentMarks.Describe(b.Draft, _snapshot.DraftTags),
+                    summary = b.Editable || b.CodeCandidate ? b.CurrentText.Substring(0, Math.Min(80, b.CurrentText.Length)) : null }).ToArray(),
+                // 表格和图片数量有限，不分页。
+                tables = _snapshot.Tables.Select(t => new { id = t.Id, container_id = t.ContainerId, rows = t.Rows, columns = t.Columns,
+                    borders = t.Draft.Borders, header_row = t.Draft.HeaderRow, header_shading = t.Draft.ShadingName,
+                    editable = t.Editable, reason = t.ProtectedReason, first_row = t.Summary }).ToArray(),
+                images = _snapshot.Images.Select(i => new { id = i.Id, container_id = i.ContainerId, chars = i.Text.Length }).ToArray() };
         }
         private List<AgentBlock> Targets(IDictionary<string, object> args)
         {
@@ -288,7 +372,8 @@ namespace OneNoteCodeHelper.Services.Agent
             var page = _snapshot.CreateDraftPage();
             foreach (var b in blocks) b.Read = true;
             return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.CurrentText, depth = b.Depth,
-                container_id = b.ContainerId, parent_id = b.ParentId, style = Css.Effective(AgentCommitter.Find(page, b.ObjectId), page),
+                container_id = b.ContainerId, parent_id = b.ParentId, table_id = b.TableId, style = Css.Effective(AgentCommitter.Find(page, b.ObjectId), page),
+                list = AgentMarks.ListKind(b.Draft), tags = AgentMarks.Describe(b.Draft, _snapshot.DraftTags),
                 runs = b.Draft.Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() }).ToArray() };
         }
 
@@ -341,6 +426,69 @@ namespace OneNoteCodeHelper.Services.Agent
                 rich.Format(start, quote.Length, css);
             }
             return Publish(drafts);
+        }
+
+        /// <summary>列表和标记是段落前的符号，页面标题上不能加。其余要求和格式工具一样：完整读取过、不受保护、不是代码。</summary>
+        private AgentBlock MarkTarget(AgentBlock b)
+        {
+            Block(b.Id, true);
+            if (AgentCommitter.Find(_snapshot.Page, b.ObjectId).Parent?.Name == OneNoteApi.One + "Title") throw new AiException("页面标题不能设置列表或标记。");
+            return b;
+        }
+
+        private object SetList(IDictionary<string, object> args)
+        {
+            var kind = (string)args["list"];
+            var drafts = new Dictionary<AgentBlock, XElement>();
+            foreach (var b in Targets(args).Select(MarkTarget))
+            {
+                var draft = new XElement(b.Draft);
+                AgentMarks.SetList(draft, kind);
+                drafts.Add(b, draft);
+            }
+            return Publish(drafts);
+        }
+
+        private object SetTag(IDictionary<string, object> args)
+        {
+            var kind = (string)args["tag"];
+            var completed = args.TryGetValue("completed", out var value) ? (bool?)(bool)value : null;
+            if (completed != null && kind != "todo") throw new AiException("completed 只能用于待办（todo）标记。");
+            var definitions = new XElement(_snapshot.DraftTags);
+            var drafts = new Dictionary<AgentBlock, XElement>();
+            foreach (var b in Targets(args).Select(MarkTarget))
+            {
+                var draft = new XElement(b.Draft);
+                AgentMarks.SetTag(draft, kind, completed, definitions);
+                drafts.Add(b, draft);
+            }
+            var result = Publish(drafts);
+            _snapshot.DraftTags.ReplaceNodes(definitions.Elements().Select(e => new XElement(e)));
+            return result;
+        }
+
+        private object TableStyle(IDictionary<string, object> args)
+        {
+            var ids = ((IList)args["table_ids"]).Cast<string>().ToList();
+            if (ids.Distinct().Count() != ids.Count) throw new AiException("目标表格重复。");
+            var tables = ids.Select(id => _snapshot.Tables.FirstOrDefault(t => t.Id == id) ?? throw new AiException("目标表格不存在。")).ToList();
+            if (tables.Any(t => !t.Editable)) throw new AiException("目标表格受到保护，不能设置样式。");
+            var style = (IDictionary<string, object>)args["style"];
+            // 全部算好再发布，失败时这个工具没有副作用。
+            var looks = tables.Select(t => (Table: t, Look: t.Draft.With(style))).ToList();
+            var changed = looks.Where(l => !l.Look.SameAs(l.Table.Draft)).ToList();
+            foreach (var l in changed) l.Table.Draft = l.Look;
+            if (changed.Count > 0) _snapshot.Revision++;
+            return new { ok = true, draft_revision = _snapshot.Revision, changed = changed.Select(l => l.Table.Id).ToArray(),
+                noop = looks.Except(changed).Select(l => l.Table.Id).ToArray() };
+        }
+
+        private object ImageText(IDictionary<string, object> args)
+        {
+            var ids = ((IList)args["image_ids"]).Cast<string>().ToList();
+            if (ids.Distinct().Count() != ids.Count) throw new AiException("目标图片重复。");
+            var images = ids.Select(id => _snapshot.Images.FirstOrDefault(i => i.Id == id) ?? throw new AiException("图片不存在或没有识别出的文字。")).ToList();
+            return new { snapshot_id = _snapshot.SnapshotId, images = images.Select(i => new { id = i.Id, text = i.Text, truncated = i.Truncated }).ToArray() };
         }
 
         /// <summary>quote 第 occurrence 次（从 1 开始，不重叠计数）出现的位置。</summary>
@@ -429,6 +577,7 @@ namespace OneNoteCodeHelper.Services.Agent
             foreach (var pair in drafts)
             {
                 if ((string)pair.Key.Draft.Attribute("quickStyleIndex") == (string)pair.Value.Attribute("quickStyleIndex") &&
+                    AgentMarks.DraftKey(pair.Key.Draft) == AgentMarks.DraftKey(pair.Value) &&
                     AgentPageSnapshot.SemanticFormat(pair.Key.Draft, _snapshot.Page) == AgentPageSnapshot.SemanticFormat(pair.Value, _snapshot.Page)) noop.Add(pair.Key.Id);
                 else { pair.Key.Draft = pair.Value; changed.Add(pair.Key.Id); }
             }
@@ -441,6 +590,7 @@ namespace OneNoteCodeHelper.Services.Agent
             unread = _snapshot.Blocks.Where(b => b.Editable && !b.Read && b.Conversion == null).Select(b => b.Id).ToArray(),
             code_blocks = _snapshot.CodeConversions.Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
             unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
+            tables_changed = _snapshot.Tables.Where(t => t.Changed).Select(t => t.Id).ToArray(),
             protected_count = _snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null) };
         private object Finish(IDictionary<string, object> args)
         {

@@ -88,14 +88,20 @@ namespace OneNoteCodeHelper.Services.Agent
             var restored = item.Originals.Select(o => new XElement(o)).ToList();
             foreach (var e in restored.SelectMany(r => r.DescendantsAndSelf()))
             {
-                foreach (var a in e.Attributes().Where(a => a.Name.LocalName == "objectID" || a.Name.LocalName == "selected" ||
-                    a.Name.LocalName == "creationTime" || a.Name.LocalName.StartsWith("lastModified", StringComparison.Ordinal) ||
-                    a.Name.LocalName.StartsWith("author", StringComparison.Ordinal)).ToList()) a.Remove();
+                StripIdentity(e);
                 var index = (string)e.Attribute("quickStyleIndex");
                 if (index != null && map.TryGetValue(index, out var mapped)) e.SetAttributeValue("quickStyleIndex", mapped);
             }
             wrapper.ReplaceWith(restored);
             return restored;
+        }
+
+        /// <summary>去掉 ID、选中状态和编辑记录，OneNote 收到后把这个对象当新对象建立。</summary>
+        internal static void StripIdentity(XElement e)
+        {
+            foreach (var a in e.Attributes().Where(a => a.Name.LocalName == "objectID" || a.Name.LocalName == "selected" ||
+                a.Name.LocalName == "creationTime" || a.Name.LocalName.StartsWith("lastModified", StringComparison.Ordinal) ||
+                a.Name.LocalName.StartsWith("author", StringComparison.Ordinal)).ToList()) a.Remove();
         }
 
         /// <summary>代码框的指纹：Table ID、底色和各行文字。不含列宽和外层段落 ID，这两样 OneNote 会自己改。</summary>
