@@ -333,7 +333,7 @@ namespace OneNoteCodeHelper.Services
                     new XComment(" Agent 工具调用：默认启用标题、段间距、图文容器、代码框转换、列表、标记、表格样式，以及删空行、缩进、移动（含跨文本框移动和合并文本框）、插入段落和转表格等结构调整，哪项回存有问题或不想让 Agent 改结构，就把对应的 Enable 开关设为 false。" +
                         "若接口不接受思考参数，可把 SendThinking 设为 false。旧配置不写此节点也可使用默认值。 "),
                     new XElement("Agent",
-                        new XElement("MaxTurns", 12), new XElement("MaxToolCalls", 48),
+                        new XElement("MaxTurns", 24), new XElement("MaxToolCalls", 96),
                         new XElement("TimeoutSeconds", 600), new XElement("MaxPageChars", 200000),
                         new XElement("MaxRequestChars", 1000000), new XElement("FontFamily", "Microsoft YaHei"),
                         new XElement("SendThinking", true), new XElement("ReplayReasoning", true),

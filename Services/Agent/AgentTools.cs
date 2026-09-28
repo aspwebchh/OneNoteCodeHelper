@@ -93,7 +93,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal AgentReport Report { get; private set; }
         /// <summary>本次注册了这个工具；系统提示词按实际提供的工具追加说明。</summary>
         internal bool Has(string name) => _tools.ContainsKey(name);
-        internal object[] Definitions => _tools.Select(t => (object)new { type = "function", function = new { name = t.Key, description = t.Value.Description, parameters = t.Value.Schema.Json() } }).ToArray();
+        internal object[] Definitions => _tools.Select(Definition).ToArray();
+        /// <summary>只取指定的工具定义，比如最后一轮只给 finish_edit。</summary>
+        internal object[] DefinitionsOf(params string[] names) => _tools.Where(t => names.Contains(t.Key)).Select(Definition).ToArray();
+        private static object Definition(KeyValuePair<string, Tool> t) =>
+            new { type = "function", function = new { name = t.Key, description = t.Value.Description, parameters = t.Value.Schema.Json() } };
 
         internal AgentTools(AgentPageSnapshot snapshot, AgentCommitter committer, CancellationToken cancellation, AddInSettings codeSettings = null)
         {

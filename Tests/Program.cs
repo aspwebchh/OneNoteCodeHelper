@@ -418,8 +418,24 @@ internal static class Program
         Test("runner turn budget discards uncommitted draft", () =>
         {
             var s = Snapshot(); s.Options.MaxTurns = 3; var api = new FakePage(s.Page);
-            Throws(() => new AgentRunner(new ScriptedClient(s), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult());
+            // 最后一轮只能 finish_edit，脚本仍去设样式，被拒绝后报轮数用完。
+            Rejects("MaxTurns", () => new AgentRunner(new ScriptedClient(s), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult());
             Equal(0, api.Writes);
+        });
+        Test("runner wraps up and commits the draft on the last turn", () =>
+        {
+            var s = Snapshot(); s.Options.MaxTurns = 4; var api = new FakePage(s.Page); var model = new WrapUpClient(s);
+            var r = new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
+            Equal("Verified", r.Status); Equal(1, api.Writes);
+            Equal(1, model.ToolCounts.Last()); True(model.ToolCounts.Take(3).All(n => n > 1));
+            True(model.LastJson.Contains("只剩 2 轮")); True(model.LastJson.Contains("这是最后一轮"));
+            True(r.Message.Contains("MaxTurns"));
+        });
+        Test("last turn text-only reply is NoChange, not an error", () =>
+        {
+            var s = Snapshot(); s.Options.MaxTurns = 2; var api = new FakePage(s.Page);
+            var r = new AgentRunner(new TextOnlyClient(), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
+            Equal("NoChange", r.Status); Equal(0, api.Writes); True(r.Message.Contains("最大轮数"));
         });
         Test("real HTTP client parses SSE and omits old JSON output mode", () =>
         {
@@ -508,7 +524,8 @@ internal static class Program
         Test("configuration absent Agent node preserves defaults", () =>
         {
             var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><MaxTurns>999</MaxTurns><ReplayReasoning>false</ReplayReasoning></Agent></AiConfig>"));
-            Equal(30, c.Agent.MaxTurns); True(!c.Agent.ReplayReasoning); True(c.Agent.EnableMixedOutlines);
+            Equal(60, c.Agent.MaxTurns); True(!c.Agent.ReplayReasoning); True(c.Agent.EnableMixedOutlines);
+            Equal(24, AgentOptions.Parse(null).MaxTurns); Equal(96, AgentOptions.Parse(null).MaxToolCalls);
         });
         Test("code classification: plain text, unhighlighted code, code box and inline code", () =>
         {
@@ -1484,6 +1501,28 @@ internal static class Program
             }
             var reply = new AgentReply { FinishReason = "tool_calls" };
             reply.Calls.Add(0, new AgentToolCall { Id = "k" + _turn, Name = name, Arguments = AgentChatClient.Serializer().Serialize(args) });
+            return Task.FromResult(reply);
+        }
+    }
+    /// <summary>一直不收尾的模型：设完样式后反复看概况，只剩 finish_edit 可用时才提交。</summary>
+    private sealed class WrapUpClient : IAgentChatClient
+    {
+        private readonly AgentPageSnapshot _s; private int _turn;
+        internal readonly List<int> ToolCounts = new List<int>();
+        internal string LastJson = "";
+        internal WrapUpClient(AgentPageSnapshot s) { _s = s; }
+        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
+        {
+            ToolCounts.Add(tools.Length);
+            LastJson = AgentJson.Serialize(messages);
+            string name; object args;
+            if (tools.Length == 1) { name = "finish_edit"; args = new { snapshot_id = _s.SnapshotId, draft_revision = _s.Revision }; }
+            else if (_turn == 0) { name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" } }; }
+            else if (_turn == 1) { name = "set_paragraph_style"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" }; }
+            else { name = "get_page_overview"; args = new { }; }
+            _turn++;
+            var reply = new AgentReply { FinishReason = "tool_calls" };
+            reply.Calls.Add(0, new AgentToolCall { Id = "w" + _turn, Name = name, Arguments = AgentChatClient.Serializer().Serialize(args) });
             return Task.FromResult(reply);
         }
     }

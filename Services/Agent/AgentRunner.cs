@@ -77,36 +77,54 @@ namespace OneNoteCodeHelper.Services.Agent
             using (var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, timeout.Token))
             {
                 var tools = new AgentTools(snapshot, _committer, linked.Token, _codeSettings);
-                var messages = new List<object> { new { role = "system", content = SystemPrompt(tools) }, new { role = "user", content = request } };
+                var options = snapshot.Options;
+                var budget = $"本任务最多 {options.MaxTurns} 轮、{options.MaxToolCalls} 次工具调用；互不依赖的读取和修改尽量放在同一轮一起调用" +
+                    "（比如一次 read_blocks 读完要处理的段落，同一轮设置几组样式），finish_edit 仍须单独调用。";
+                var messages = new List<object> { new { role = "system", content = SystemPrompt(tools) + budget }, new { role = "user", content = request } };
                 var cached = new Dictionary<string, (string Name, string Arguments, string Result)>();
                 var count = 0;
                 var steps = 0;
                 var reminded = false;
+                // 轮数快用完时进入收尾：剩 2 轮时提醒，最后一轮只提供 finish_edit，提交已完成的草稿而不是整个丢掉。
+                var wrapUp = false;
                 try
                 {
-                    for (var turn = 0; turn < snapshot.Options.MaxTurns; turn++)
+                    for (var turn = 0; turn < options.MaxTurns; turn++)
                     {
                         linked.Token.ThrowIfCancellationRequested();
+                        var left = options.MaxTurns - turn;
+                        var last = left == 1;
+                        if (left == 2 && turn > 0)
+                        {
+                            wrapUp = true;
+                            messages.Add(new { role = "user", content = "只剩 2 轮。本轮最多再做一步修改或检查，下一轮只能单独调用 finish_edit 提交已完成的草稿；没有可提交的修改就说明原因。" });
+                        }
+                        else if (last)
+                        {
+                            wrapUp = true;
+                            messages.Add(new { role = "user", content = $"这是最后一轮，只能调用 finish_edit，draft_revision 为 {snapshot.Revision}；没有修改可提交时直接说明原因。" });
+                        }
                         progress?.Report(new AgentProgress { Turn = turn + 1, Status = "模型正在分析页面…", Thinking = "" });
                         var used = AgentJson.Serialize(messages).Length;
-                        if (used > snapshot.Options.MaxRequestChars)
-                            throw new AiException($"Agent 上下文预算已用完（约 {used} 字，上限 {snapshot.Options.MaxRequestChars}），没有提交草稿。可以缩小处理范围，或在 ai-settings.xml 的 Agent 节点调大 MaxRequestChars。");
-                        var reply = await _client.CompleteAsync(messages, tools.Definitions, progress, linked.Token).ConfigureAwait(false);
+                        if (used > options.MaxRequestChars)
+                            throw new AiException($"Agent 上下文预算已用完（约 {used} 字，上限 {options.MaxRequestChars}），没有提交草稿。可以缩小处理范围，或在 ai-settings.xml 的 Agent 节点调大 MaxRequestChars。");
+                        var definitions = last ? tools.DefinitionsOf("finish_edit") : tools.Definitions;
+                        var reply = await _client.CompleteAsync(messages, definitions, progress, linked.Token).ConfigureAwait(false);
                         reply.Validate();
-                        messages.Add(reply.ToMessage(snapshot.Options.ReplayReasoning));
+                        messages.Add(reply.ToMessage(options.ReplayReasoning));
                         if (reply.Calls.Count == 0)
                         {
-                            if (!reminded)
+                            if (!reminded && !last)
                             {
                                 reminded = true;
                                 messages.Add(new { role = "user", content = "尚未应用任何修改。请通过工具完成需求并 finish_edit；不支持则说明原因。" });
                                 progress?.Report(new AgentProgress { Step = new AgentStep { Id = ++steps, Text = "模型没有调用工具，已提醒继续", State = AgentStepState.Note } });
                                 continue;
                             }
-                            return new AgentReport { Status = "NoChange", Message = "未应用任何修改。\n" + reply.Content };
+                            return new AgentReport { Status = "NoChange", Message = (last ? "Agent 达到最大轮数，" : "") + "未应用任何修改。\n" + reply.Content };
                         }
                         var finishTogether = reply.Calls.Count > 1 && reply.Calls.Values.Any(c => c.Name == "finish_edit");
-                        if (count + reply.Calls.Count > snapshot.Options.MaxToolCalls) throw new AiException("Agent 工具调用达到上限，没有提交草稿。");
+                        if (count + reply.Calls.Count > options.MaxToolCalls) throw new AiException("Agent 工具调用达到上限，没有提交草稿。");
                         foreach (var call in reply.Calls.Values)
                         {
                             linked.Token.ThrowIfCancellationRequested();
@@ -129,6 +147,7 @@ namespace OneNoteCodeHelper.Services.Agent
                                 try
                                 {
                                     if (finishTogether) throw new AiException("finish_edit 必须独立调用，本轮未执行任何操作。");
+                                    if (last && call.Name != "finish_edit") throw new AiException("最后一轮只能调用 finish_edit。");
                                     outcome = tools.Execute(call);
                                 }
                                 catch (AiException ex) when (!snapshot.Frozen) { outcome = new { ok = false, error = ex.Message }; }
@@ -140,6 +159,8 @@ namespace OneNoteCodeHelper.Services.Agent
                             messages.Add(new { role = "tool", tool_call_id = call.Id, content = result });
                             if (tools.Report != null)
                             {
+                                if (wrapUp)
+                                    tools.Report.Message += "\n已用完 Agent 轮数，提交的是到此为止的草稿；还有没处理的需求时，可以缩小范围再执行，或在 ai-settings.xml 的 Agent 节点调大 MaxTurns。";
                                 AddInLog.Info($"Agent 完成：工具 {count} 次，修改 {tools.Report.Applied}，修正文字 {tools.Report.TextFixes.Count}，代码框 {tools.Report.CodeBlocks}，" +
                                     $"表格 {tools.Report.Tables}，转表格 {tools.Report.TextTables}，删空行 {tools.Report.Removed}，移动 {tools.Report.Moved}，缩进 {tools.Report.Indented}，" +
                                     $"插入 {tools.Report.Inserted}，合并文本框 {tools.Report.Merged}，冲突 {tools.Report.Conflicts}，未验证 {tools.Report.Unverified}。");
@@ -147,7 +168,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             }
                         }
                     }
-                    throw new AiException("Agent 达到最大轮数，没有提交草稿。请缩小范围或明确需求。");
+                    throw new AiException($"Agent 达到最大轮数（{options.MaxTurns}），没有提交草稿。可以缩小范围、明确需求，或在 ai-settings.xml 的 Agent 节点调大 MaxTurns。");
                 }
                 catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellation.IsCancellationRequested)
                 { throw new AiException("Agent 达到任务总时限，没有继续执行。"); }

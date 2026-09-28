@@ -137,8 +137,8 @@ Agent 可在 `AiConfig` 根节点内增加下列配置。改完保存后，回�
 
 ```xml
 <Agent>
-  <MaxTurns>12</MaxTurns>
-  <MaxToolCalls>48</MaxToolCalls>
+  <MaxTurns>24</MaxTurns>
+  <MaxToolCalls>96</MaxToolCalls>
   <TimeoutSeconds>600</TimeoutSeconds>
   <MaxPageChars>200000</MaxPageChars>
   <MaxRequestChars>1000000</MaxRequestChars>
@@ -172,6 +172,7 @@ Agent 可在 `AiConfig` 根节点内增加下列配置。改完保存后，回�
 `MaxRequestChars` 限制每轮包含工具定义和历史的请求体字符数，可设 16000–3000000。
 两者的默认值按 DeepSeek 的 1M token 上下文估算（约 0.6 token/汉字，100 万字最多约 60 万 token），用上下文较短的模型（如 128K）时应调小，比如 120000。
 超限会停止并丢弃未提交草稿，报错里有实际字数和上限，可以缩小范围或调大预算再执行。另有固定的 1000 段上限。
+`MaxTurns` 可设 2–60，`MaxToolCalls` 可设 6–200。轮数快用完时 Agent 先收尾：剩 2 轮时提醒模型，最后一轮只能提交已完成的草稿，结果里会注明是提前提交的，没做完的部分可以缩小范围再执行一次。
 
 默认字体可选 `Microsoft YaHei`、`Calibri`、`Arial`；未安装时选择其中已安装的一种。
 `Enable...` 开关默认开启，已有本机 Office16 回存验证；其他 Office 构建如有兼容问题，可分别关闭原生标题、段间距、图文混排、代码框转换、列表、标记或表格样式支持。
