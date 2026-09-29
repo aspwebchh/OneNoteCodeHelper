@@ -1,0 +1,17 @@
+import React, { useState } from 'react';
+
+interface Props {
+  title: string;
+  onSave?: (value: string) => void;
+}
+
+export const Editor: React.FC<Props> = ({ title, onSave }) => {
+  const [text, setText] = useState<string>('');
+  return (
+    <div className="editor">
+      <h2>{title}</h2>
+      <textarea value={text} onChange={e => setText(e.target.value)} />
+      <button onClick={() => onSave?.(text)}>Save</button>
+    </div>
+  );
+};

@@ -1,7 +1,8 @@
 namespace OneNoteCodeHelper.Highlighting.Languages
 {
     /// <summary>
-    /// C 系语言（C#、C/C++、JavaScript）和 Python 共用的扫描片段：块注释、引号字符串、数字、插值字符串。
+    /// C 系语言（C#、C/C++、JavaScript/TypeScript、Go、Kotlin、Rust、PHP）和 Python 共用的扫描片段：
+    /// 块注释、引号字符串、数字、插值字符串。
     /// 各语言规则一致的部分放这里，差异通过参数表达。
     /// </summary>
     internal static class CommonScanners
@@ -18,17 +19,49 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             c.Advance(2);
         }
 
+        /// <summary>吃掉可以嵌套的 /* /* */ */（Kotlin、Rust），按层数配对；未闭合时吃到末尾。调用时当前位置在 / 上。</summary>
+        internal static void ScanNestedBlockComment(LexerCursor c)
+        {
+            c.Advance(2);
+            var depth = 1;
+            while (!c.AtEnd)
+            {
+                if (c.Current == '/' && c.Peek() == '*')
+                {
+                    depth++;
+                    c.Advance(2);
+                    continue;
+                }
+
+                if (c.Current == '*' && c.Peek() == '/')
+                {
+                    c.Advance(2);
+                    if (--depth == 0)
+                    {
+                        return;
+                    }
+
+                    continue;
+                }
+
+                c.Advance();
+            }
+        }
+
         /// <summary>/** ... */ 是文档注释，但 /**/ 只是个空的块注释。</summary>
         internal static bool IsDocBlockComment(LexerCursor c)
         {
             return c.Peek(2) == '*' && c.Peek(3) != '/';
         }
 
-        /// <summary>吃掉一段单行引号字面量，\ 是转义符。遇到换行就停，避免未闭合的引号吞掉整个文件。</summary>
-        internal static void ScanQuoted(LexerCursor c, char quote)
+        /// <summary>
+        /// 吃掉一段引号字面量，\ 是转义符。默认遇到换行就停，避免未闭合的引号吞掉整个文件；
+        /// Rust、PHP 的字符串本来就能跨行，传 multiLine。
+        /// </summary>
+        internal static void ScanQuoted(LexerCursor c, char quote, bool multiLine = false)
         {
             c.Advance();
-            while (!c.AtEnd && c.Current != '\n' && c.Current != '\r')
+            while (!c.AtEnd && (multiLine || (c.Current != '\n' && c.Current != '\r')))
             {
                 if (c.Current == '\\')
                 {
@@ -105,15 +138,22 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         /// </summary>
         /// <param name="terminator">结束符，如 "、"""、`。</param>
         /// <param name="escape">转义符；逐字字符串没有转义符，传 '\0'。</param>
-        /// <param name="holeOpen">插值洞的开头：C#/Python 是 {，JavaScript 是 ${。</param>
+        /// <param name="holeOpen">
+        /// 插值洞的开头：C#/Python 是 {，JavaScript、Kotlin 是 ${。PHP 的 {$ 以 $ 结尾，
+        /// 只有 { 算标点，$ 是洞里表达式的一部分。
+        /// </param>
         /// <param name="multiLine">能否跨行。单行字符串遇到换行就停。</param>
         /// <param name="doubledTerminator">C# 逐字字符串里 "" 表示一个引号。</param>
+        /// <param name="dollarVariables">$name 是简写的插值（Kotlin、PHP），标 Variable。</param>
         internal static void ScanInterpolatedBody(
             LexerCursor c, ILanguage self, int start, string terminator, char escape, string holeOpen,
-            bool multiLine, bool doubledTerminator = false)
+            bool multiLine, bool doubledTerminator = false, bool dollarVariables = false)
         {
             var segment = start;
             var braceEscapes = holeOpen == "{";
+            var holePunctuation = holeOpen.Length > 1 && holeOpen[holeOpen.Length - 1] == '$'
+                ? holeOpen.Length - 1
+                : holeOpen.Length;
 
             while (!c.AtEnd)
             {
@@ -160,12 +200,23 @@ namespace OneNoteCodeHelper.Highlighting.Languages
 
                     c.Emit(TokenKind.String, segment);
                     var braceStart = c.Position;
-                    c.Advance(holeOpen.Length);
+                    c.Advance(holePunctuation);
                     c.Emit(TokenKind.Punctuation, braceStart);
                     c.EmitEmbedded(self, holeEnd);
                     braceStart = c.Position;
                     c.Advance();
                     c.Emit(TokenKind.Punctuation, braceStart);
+                    segment = c.Position;
+                    continue;
+                }
+
+                if (dollarVariables && ch == '$' && (char.IsLetter(c.Peek()) || c.Peek() == '_'))
+                {
+                    c.Emit(TokenKind.String, segment);
+                    var variableStart = c.Position;
+                    c.Advance();
+                    c.SkipWhile(x => char.IsLetterOrDigit(x) || x == '_');
+                    c.Emit(TokenKind.Variable, variableStart);
                     segment = c.Position;
                     continue;
                 }
@@ -263,6 +314,21 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             }
 
             return c.Source.Substring(begin, end - begin);
+        }
+
+        /// <summary>
+        /// 当前位置后面隔着空格或制表符（不跨行）紧跟一个标识符。上下文关键字靠它判断：
+        /// TS 的 type Foo、Kotlin 的 data class 里是关键字，type = 1、{ data: x } 里只是普通名字。
+        /// </summary>
+        internal static bool IsFollowedByWord(LexerCursor c)
+        {
+            var i = c.Position;
+            while (i < c.Source.Length && (c.Source[i] == ' ' || c.Source[i] == '\t'))
+            {
+                i++;
+            }
+
+            return i > c.Position && i < c.Source.Length && (char.IsLetter(c.Source[i]) || c.Source[i] == '_');
         }
 
         /// <summary>当前位置往回跳过空白后的那个字符；到开头返回 '\0'。</summary>

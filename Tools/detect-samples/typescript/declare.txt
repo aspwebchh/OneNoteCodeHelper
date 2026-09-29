@@ -1,0 +1,22 @@
+import type { Request, Response } from 'express';
+
+declare global {
+  interface Window {
+    appConfig: Record<string, unknown>;
+  }
+}
+
+export enum Role {
+  Admin = 'admin',
+  User = 'user',
+}
+
+export abstract class BaseController {
+  protected readonly name: string;
+
+  constructor(name: string) {
+    this.name = name;
+  }
+
+  abstract handle(req: Request, res: Response): Promise<void>;
+}

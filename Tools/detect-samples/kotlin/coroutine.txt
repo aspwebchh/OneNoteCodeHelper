@@ -1,0 +1,12 @@
+class UserRepository(private val api: UserApi, private val dao: UserDao) {
+
+    suspend fun refresh(id: Long): Result<User> = withContext(Dispatchers.IO) {
+        runCatching {
+            val user = api.fetchUser(id)
+            dao.insert(user)
+            user
+        }
+    }
+
+    fun observe(id: Long): Flow<User?> = dao.observe(id)
+}

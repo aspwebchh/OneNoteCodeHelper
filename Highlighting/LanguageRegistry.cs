@@ -23,7 +23,12 @@ namespace OneNoteCodeHelper.Highlighting
             new CSharpLanguage(),
             new CppLanguage(),
             new JavaScriptLanguage(),
+            new TypeScriptLanguage(),
             new PythonLanguage(),
+            new GoLanguage(),
+            new KotlinLanguage(),
+            new RustLanguage(),
+            new PhpLanguage(),
             new SqlLanguage(),
             new LuaLanguage(),
             new PowerShellLanguage(),
@@ -40,10 +45,11 @@ namespace OneNoteCodeHelper.Highlighting
         /// <summary>
         /// 高亮效果几乎一样的语言归成一族：彼此认错的代价很小，打平时不必因此放弃识别。
         /// C 系共用注释、字符串、数字的写法，只是关键字有出入；XML 和 HTML 共用同一个标记词法。
+        /// Go、Kotlin、Rust、PHP 的关键字差别大，认错了颜色会明显不对，不进族。
         /// </summary>
         private static readonly string[][] Families =
         {
-            new[] { "java", "csharp", "cpp", "javascript" },
+            new[] { "java", "csharp", "cpp", "javascript", "typescript" },
             new[] { "xml", "html" }
         };
 
@@ -86,12 +92,13 @@ namespace OneNoteCodeHelper.Highlighting
         /// <summary>
         /// 各候选语言的得分，从高到低；同分时按 <see cref="All"/> 的顺序。
         /// 整段是一份标记文档时只在 XML/HTML 之间选，里面的脚本和样式再像别的语言也不算。
+        /// PHP 例外：PHP 文件和模板也以 &lt;?php 或 HTML 标签开头。
         /// </summary>
         internal static IReadOnlyList<(ILanguage Language, int Score)> Rank(string source)
         {
             var sample = new DetectionSample(source);
             var candidates = sample.IsMarkupDocument
-                ? All.Where(l => FamilyOf(l) == MarkupFamily)
+                ? All.Where(l => FamilyOf(l) == MarkupFamily || l is PhpLanguage)
                 : All;
 
             return candidates

@@ -41,7 +41,8 @@ namespace OneNoteCodeHelper.Highlighting
 
         /// <summary>
         /// 整段是一份标记文档：以标签开头、以 &gt; 结尾（截断过的只看开头）。
-        /// 这种情况下里面的 &lt;script&gt;、&lt;style&gt; 再像别的语言，整段也还是 HTML/XML。
+        /// 这种情况下里面的 &lt;script&gt;、&lt;style&gt; 再像别的语言，整段也还是 HTML/XML；
+        /// 只有 PHP 例外，PHP 文件和模板也长这样。
         /// </summary>
         internal bool IsMarkupDocument { get; }
 

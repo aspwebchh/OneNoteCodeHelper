@@ -7,6 +7,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
     /// <summary>
     /// JavaScript 词法着色。两个难点：模板字符串 `...${expr}...` 里的表达式要按 JS 重新着色；
     /// / 既可能是除号也可能是正则字面量的开头，要看前一个有意义的符号来判断。
+    /// TypeScript 共用这套词法，只在给标识符分类时多认类型相关的写法，见 <see cref="TypeScriptLanguage"/>。
     /// </summary>
     internal sealed class JavaScriptLanguage : ILanguage
     {
@@ -42,6 +43,29 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             "class", "new", "extends", "implements", "instanceof"
         };
 
+        /// <summary>TypeScript 的上下文关键字：后面紧跟名字时才算（type Foo、readonly items），type = 1 里只是变量名。</summary>
+        private static readonly HashSet<string> TypeScriptContextualKeywords = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "type", "namespace", "module", "declare", "abstract", "readonly", "keyof", "infer", "is", "asserts",
+            "satisfies", "override", "unique", "accessor"
+        };
+
+        private static readonly HashSet<string> TypeScriptPrimitiveTypes = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "string", "number", "boolean", "any", "unknown", "never", "object", "symbol", "bigint"
+        };
+
+        private static readonly HashSet<string> TypeScriptTypeIntroducers = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "interface", "type", "enum", "namespace"
+        };
+
+        /// <summary>这些词后面的名字是变量，哪怕叫 number、string：const number = 5。</summary>
+        private static readonly HashSet<string> Declarators = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "const", "let", "var"
+        };
+
         private const string PunctuationChars = "(){}[];,.";
 
         public string Id => "javascript";
@@ -49,6 +73,12 @@ namespace OneNoteCodeHelper.Highlighting.Languages
         public string DisplayName => "JavaScript";
 
         public IEnumerable<Token> Tokenize(string source)
+        {
+            return Tokenize(source, this, typeScript: false);
+        }
+
+        /// <summary>JavaScript 与 TypeScript 共用的词法。self 是模板字符串插值洞里用来重新着色的语言。</summary>
+        internal static IEnumerable<Token> Tokenize(string source, ILanguage self, bool typeScript)
         {
             var c = new LexerCursor(source);
 
@@ -87,7 +117,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 if (ch == '`')
                 {
                     c.Advance();
-                    CommonScanners.ScanInterpolatedBody(c, this, start, "`", '\\', "${", multiLine: true);
+                    CommonScanners.ScanInterpolatedBody(c, self, start, "`", '\\', "${", multiLine: true);
                     continue;
                 }
 
@@ -118,7 +148,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 {
                     c.SkipWhile(LexerCursor.IsIdentifierPart);
                     var word = source.Substring(start, c.Position - start);
-                    c.Emit(ClassifyIdentifier(c, word, start), start);
+                    c.Emit(ClassifyIdentifier(c, word, start, typeScript), start);
                     continue;
                 }
 
@@ -136,11 +166,17 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return c.Finish();
         }
 
-        private static TokenKind ClassifyIdentifier(LexerCursor c, string word, int start)
+        private static TokenKind ClassifyIdentifier(LexerCursor c, string word, int start, bool typeScript)
         {
             var afterMember = start > 0 && c.Source[start - 1] == '.';
 
             if (!afterMember && Keywords.Contains(word))
+            {
+                return TokenKind.Keyword;
+            }
+
+            if (typeScript && !afterMember && TypeScriptContextualKeywords.Contains(word)
+                && CommonScanners.IsFollowedByWord(c))
             {
                 return TokenKind.Keyword;
             }
@@ -161,7 +197,15 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 return TokenKind.Function;
             }
 
-            if (TypeIntroducers.Contains(previousWord))
+            if (TypeIntroducers.Contains(previousWord)
+                || (typeScript && TypeScriptTypeIntroducers.Contains(previousWord)))
+            {
+                return TokenKind.Type;
+            }
+
+            // string、number 做类型标注；{ string: 1 } 的键、string(x) 这种调用、const number = 5 不算
+            if (typeScript && !afterMember && TypeScriptPrimitiveTypes.Contains(word)
+                && !c.NextNonWhitespaceIs('(') && !c.NextNonWhitespaceIs(':') && !Declarators.Contains(previousWord))
             {
                 return TokenKind.Type;
             }
@@ -233,7 +277,7 @@ namespace OneNoteCodeHelper.Highlighting.Languages
             return -1;
         }
 
-        /// <summary>TypeScript、JSX 也按 JavaScript 识别，下面有几条就是 TS 独有的写法。</summary>
+        /// <summary>JSX 也按 JavaScript 识别。TypeScript 在这个分数上再加它独有的写法，见 <see cref="TypeScriptLanguage"/>。</summary>
         public int ScoreLikelihood(DetectionSample sample)
         {
             var code = sample.Code;
@@ -261,13 +305,6 @@ namespace OneNoteCodeHelper.Highlighting.Languages
                 @"^[^\S\r\n]*(async\s+|static\s+|get\s+|set\s+)*" +
                 @"(?!(if|for|foreach|while|switch|catch|function|return|else|using|lock|synchronized|fixed|with)\b)" +
                 @"[A-Za-z_$][\w$]*[^\S\r\n]*\([^()\r\n]*\)[^\S\r\n]*\{");
-
-            // TypeScript：类型标注跟在名字后面，后面接 ; , ) = { |。行尾结束的不算，那是 YAML 的 type: string
-            score += 3 * Count(code,
-                @"[\w)?][^\S\r\n]*:[^\S\r\n]*(string|number|boolean|any|void|unknown|never)(\[\])?[^\S\r\n]*[;,)={|]");
-            // 不含 string：C# 的 List<string> 也长这样
-            score += 2 * Count(code, @"<(number|boolean|void|any|unknown)[,>]");
-            score += 3 * Count(code, @"^[^\S\r\n]*type\s+\w+(<[^>\r\n]*>)?\s*=");
             return score;
         }
 

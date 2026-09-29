@@ -1,0 +1,6 @@
+fun describe(x: Any): String = when (x) {
+    is Int -> "Int: $x"
+    is String -> "String of length ${x.length}"
+    in 1..10 -> "small"
+    else -> "unknown"
+}

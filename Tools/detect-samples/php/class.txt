@@ -1,0 +1,18 @@
+class Cart
+{
+    private array $items = [];
+
+    public function add(string $sku, int $qty = 1): void
+    {
+        $this->items[$sku] = ($this->items[$sku] ?? 0) + $qty;
+    }
+
+    public function total(array $prices): float
+    {
+        $sum = 0;
+        foreach ($this->items as $sku => $qty) {
+            $sum += $prices[$sku] * $qty;
+        }
+        return $sum;
+    }
+}

@@ -24,7 +24,10 @@ namespace OneNoteCodeHelper.Highlighting
         /// <summary>语言内置库、内置函数与内置命令（Lua 标准库、Bash/Bat 内置命令）。</summary>
         Builtin,
 
-        /// <summary>变量引用：$var、${var}、%VAR%、!VAR!、%%i、CSS 的 --custom-prop、YAML 的 &amp;anchor 与 *alias。</summary>
+        /// <summary>
+        /// 变量引用：$var、${var}、%VAR%、!VAR!、%%i、CSS 的 --custom-prop、YAML 的 &amp;anchor 与 *alias、
+        /// PHP 的 $name 以及 Kotlin/PHP 字符串里的 $name。
+        /// </summary>
         Variable,
 
         /// <summary>XML/HTML 标签名，以及 CSS 的元素选择器。</summary>
@@ -36,7 +39,7 @@ namespace OneNoteCodeHelper.Highlighting
         /// <summary>字符串字面量，含 Lua 长字符串、Java 文本块、here-string 与 heredoc。</summary>
         String,
 
-        /// <summary>Java 的字符字面量。</summary>
+        /// <summary>字符字面量：Java、C#、Kotlin 的 'a'，Go 的 rune，Rust 的 'a' 与 b'a'。</summary>
         Char,
 
         /// <summary>数字字面量。</summary>
@@ -48,7 +51,10 @@ namespace OneNoteCodeHelper.Highlighting
         /// <summary>Java 的 /** */ 文档注释。</summary>
         DocComment,
 
-        /// <summary>Java 注解（@Override）、Bat 标签（:label）、XML 声明（&lt;?xml ?&gt;）、CSS 伪类（:hover）。</summary>
+        /// <summary>
+        /// Java 注解（@Override）、Bat 标签（:label）、XML 声明（&lt;?xml ?&gt;）、CSS 伪类（:hover）、
+        /// Rust 的属性（#[derive]）与生命周期（'a）、PHP 的 &lt;?php ?&gt; 标签。
+        /// </summary>
         Annotation,
 
         /// <summary>运算符。</summary>

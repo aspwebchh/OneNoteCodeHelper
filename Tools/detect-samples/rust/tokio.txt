@@ -1,0 +1,7 @@
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let body = reqwest::get("https://example.com").await?.text().await?;
+    let words: Vec<&str> = body.split_whitespace().collect();
+    println!("{} words", words.len());
+    Ok(())
+}

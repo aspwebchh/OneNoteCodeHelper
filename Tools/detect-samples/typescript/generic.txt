@@ -1,0 +1,9 @@
+function groupBy<T, K extends keyof T>(items: T[], key: K): Map<T[K], T[]> {
+  const result = new Map<T[K], T[]>();
+  for (const item of items) {
+    const bucket = result.get(item[key]) ?? [];
+    bucket.push(item);
+    result.set(item[key], bucket);
+  }
+  return result;
+}

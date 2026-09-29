@@ -1,0 +1,17 @@
+type Status = 'idle' | 'loading' | 'success' | 'error';
+
+type ApiResult<T> =
+  | { status: 'success'; data: T }
+  | { status: 'error'; message: string };
+
+export const DEFAULT_OPTIONS = { retries: 3, timeout: 5000 } as const;
+
+export async function request<T>(url: string, options: Partial<RequestInit> = {}): Promise<ApiResult<T>> {
+  try {
+    const res = await fetch(url, options);
+    const data = (await res.json()) as T;
+    return { status: 'success', data };
+  } catch (e) {
+    return { status: 'error', message: String(e) };
+  }
+}

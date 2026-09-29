@@ -1,0 +1,4 @@
+data class User(val id: Long, val name: String, val email: String?)
+
+fun List<User>.findByName(name: String): User? =
+    firstOrNull { it.name.equals(name, ignoreCase = true) }

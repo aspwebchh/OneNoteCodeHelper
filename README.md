@@ -1,8 +1,9 @@
 # OneNote 代码高亮
 
 OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色的高亮代码框。
-目前支持 **Java**、**C#**、**C/C++**、**JavaScript**、**Python**、**SQL**、**Lua**、**PowerShell**、
-**Bat**、**Bash**、**XML**、**HTML**、**CSS**、**JSON**、**YAML**，以及不着色的 **纯文本**（只要等宽字体和代码框，适合放日志、命令输出）。
+目前支持 **Java**、**C#**、**C/C++**、**JavaScript**、**TypeScript**、**Python**、**Go**、**Kotlin**、**Rust**、**PHP**、
+**SQL**、**Lua**、**PowerShell**、**Bat**、**Bash**、**XML**、**HTML**、**CSS**、**JSON**、**YAML**，
+以及不着色的 **纯文本**（只要等宽字体和代码框，适合放日志、命令输出）。
 
 功能区「开始」选项卡上会多出一个「代码高亮」组：
 
@@ -10,7 +11,7 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 |---|---|
 | 高亮选中 | 选中页面上已有的代码文字，原地替换成高亮代码框 |
 | 插入代码 | 打开窗口粘贴代码，预览确认后插入到当前页 |
-| 语言 | 自动识别，或手动选上面列的任意一种。纯文本只能手动选，自动识别不会选它；TypeScript、JSX 按 JavaScript 识别 |
+| 语言 | 自动识别，或手动选上面列的任意一种。纯文本只能手动选，自动识别不会选它；JSX 按 JavaScript 识别，TSX 按 TypeScript 识别 |
 | 深色主题 | 在浅色（类 IntelliJ）与深色（类 VS Code Dark+）之间切换 |
 | 字体（插入窗口内） | 默认 Consolas。代码里有中文时改选「NSimSun」新宋体，中英文才能对齐 |
 | 诊断日志 | 打开日志文件 |
@@ -275,8 +276,9 @@ Highlighting/
   LikelihoodPatterns.cs     自动识别打分用的正则：实例缓存 + 匹配超时
   Languages/                每种语言一个 ILanguage 实现；XML 与 HTML 共用 MarkupLexer，
                             HTML 的 <style>/<script> 分别交给 CSS/JavaScript 着色；
-                            CommonScanners 放 C 系语言共用的注释、字符串、数字、插值字符串扫描；
-                            CFamilyFeatures 放 Java/C#/C++/JS 共有的识别特征
+                            TypeScript 共用 JavaScript 的词法；PHP 标签外的内容交给 HTML 着色；
+                            CommonScanners 放 C 系语言共用的注释（含可嵌套的块注释）、字符串、数字、插值字符串扫描；
+                            CFamilyFeatures 放 Java/C#/C++/JS/TS 共有的识别特征
   Themes/CodeTheme.cs, CodeThemes.cs
 Views/
   InsertCodeWindow.xaml     插入代码窗口
@@ -325,8 +327,9 @@ powershell -ExecutionPolicy Bypass -File Tools\agent-format-probe.ps1 -OutputDir
    - 要看注释标记或字符串内容的特征（C# 的 `///`、Bash 的 `"$1"`、JSON 的键）才用 `sample.Raw`。
    - 正则走 `LikelihoodPatterns`；多行模式下行首缩进写 `^[^\S\r\n]*`，
      不要写 `^\s*`（`\s` 会跨行，连续空行一多就是平方级回溯）。
-   - C 系语言先加上 `CFamilyFeatures.Score(sample)`，自己只写独有的特征。共有特征四种语言分数相同、
-     互相抵消，胜负才取决于独有写法。
+   - C 系族里的语言先加上 `CFamilyFeatures.Score(sample)`，自己只写独有的特征。共有特征各语言分数相同、
+     互相抵消，胜负才取决于独有写法。族外的语言哪怕语法像 C（比如 PHP）也不要调：族外打平会变成无法确定，
+     只靠共有特征取胜的 Java/C# 片段就认不出来了。
    - 可以扣分：本语言里不可能出现的写法（比如 Python 里的 `) {`）是很强的反证。
 3. 在 `LanguageRegistry.All` 里加一行。高亮效果和现有某一族几乎一样的，顺便加进 `LanguageRegistry` 的族表。
 4. 在 `Tools/detect-samples/<语言 id>/` 下放几段样本（短片段、长文件都要有），然后跑一遍回归测试，
@@ -345,9 +348,12 @@ powershell -ExecutionPolicy Bypass -File Tools\agent-format-probe.ps1 -OutputDir
 各语言打分后，最高分至少 3 分，而且要是次高分的 2 倍以上、或者高出 4 分以上，才算认出来；
 否则提示手动选，因为猜错语言比不猜更糟。有两个例外：
 
-- 整段以标签开头、以 `>` 结尾的，只在 XML 和 HTML 之间选，里面的 `<script>` 再像 JS 也不算。
-- 高亮效果几乎一样的语言算一族（C 系：Java/C#/C++/JavaScript；标记：XML/HTML）。整族当成一个候选
+- 整段以标签开头、以 `>` 结尾的，只在 XML、HTML 和 PHP 之间选，里面的 `<script>` 再像 JS 也不算。
+  PHP 文件和模板也以 `<?php` 或 HTML 标签开头；含 `<?php`、`<?=` 的页面把 HTML 的得分也记给 PHP，所以会认成 PHP。
+- 高亮效果几乎一样的语言算一族（C 系：Java/C#/C++/JavaScript/TypeScript；标记：XML/HTML）。整族当成一个候选
   跟族外的最高分比，比得过就取族内分最高的那个。族内打平时，认错的代价只是个别关键字颜色不对。
+  TypeScript 的分数是 JavaScript 的分数加上 TS 独有的写法，出现 TS 写法才认成 TS，否则两者打平、取 JavaScript。
+  Go、Kotlin、Rust、PHP 的关键字差别大，不进族。
 
 ## 几个踩过的坑
 

@@ -1,0 +1,5 @@
+match parse_port(&input) {
+    Some(port) if port > 1024 => println!("using {}", port),
+    Some(_) => eprintln!("port too low"),
+    None => eprintln!("invalid port"),
+}

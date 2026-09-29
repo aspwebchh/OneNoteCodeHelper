@@ -1,0 +1,30 @@
+use std::collections::HashMap;
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inventory {
+    items: HashMap<String, u32>,
+}
+
+impl Inventory {
+    pub fn new() -> Self {
+        Inventory { items: HashMap::new() }
+    }
+
+    pub fn add(&mut self, name: &str, count: u32) {
+        *self.items.entry(name.to_string()).or_insert(0) += count;
+    }
+
+    pub fn get(&self, name: &str) -> Option<u32> {
+        self.items.get(name).copied()
+    }
+}
+
+impl fmt::Display for Inventory {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for (name, count) in &self.items {
+            writeln!(f, "{}: {}", name, count)?;
+        }
+        Ok(())
+    }
+}

@@ -1,0 +1,8 @@
+<?php
+$pdo = new PDO('mysql:host=localhost;dbname=shop', 'root', '');
+$stmt = $pdo->prepare('SELECT id, name FROM products WHERE price > ?');
+$stmt->execute([$_GET['min'] ?? 0]);
+
+foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    echo "{$row['id']}: {$row['name']}\n";
+}

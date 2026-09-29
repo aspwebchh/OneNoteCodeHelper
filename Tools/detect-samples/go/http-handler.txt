@@ -1,0 +1,36 @@
+package main
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"time"
+)
+
+type User struct {
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type Server struct {
+	users map[int]*User
+}
+
+func (s *Server) handleUser(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.users[1]
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(user); err != nil {
+		log.Printf("encode: %v", err)
+	}
+}
+
+func main() {
+	s := &Server{users: make(map[int]*User)}
+	http.HandleFunc("/user", s.handleUser)
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
