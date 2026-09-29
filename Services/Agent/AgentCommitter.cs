@@ -24,6 +24,9 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string AfterFingerprint;
         /// <summary>这段写入时修正的文字；撤销时文字也一起还原。</summary>
         internal List<string> TextFixes = new List<string>();
+        /// <summary>Before 引用的 QuickStyleDef、TagDef 副本。OneNote 回存后会重新编号，撤销时按内容对应。</summary>
+        internal List<XElement> Styles = new List<XElement>();
+        internal List<XElement> Tags = new List<XElement>();
     }
 
     internal sealed class AgentReport
@@ -264,7 +267,8 @@ namespace OneNoteCodeHelper.Services.Agent
                             report.Applied++;
                             report.TextFixes.AddRange(item.Block.TextFixes);
                             report.Undo.Add(new AgentUndoItem { ObjectId = (string)written.Attribute("objectID"), Before = item.Before,
-                                AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual), TextFixes = item.Block.TextFixes.ToList() });
+                                AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual), TextFixes = item.Block.TextFixes.ToList(),
+                                Styles = AgentLayout.Styles(item.Before, original), Tags = AgentLayout.Tags(item.Before, original) });
                         }
                         catch (Exception) { report.Unverified++; }
                     }
@@ -362,7 +366,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     var block = snapshot.Blocks.FirstOrDefault(b => b.ObjectId == item.ObjectId);
                     if (block == null || !block.Editable || block.Fingerprint != item.AfterFingerprint)
                     { skipped.Add(item.ObjectId); continue; }
-                    AgentPageSnapshot.CopyFormat(item.Before, block.Draft);
+                    AgentPageSnapshot.CopyFormat(Renumbered(item, snapshot), block.Draft);
                     // 把修正过的文字改回去，提交时按改文字的段落核验。
                     block.TextFixes.AddRange(item.TextFixes);
                 }
@@ -378,6 +382,22 @@ namespace OneNoteCodeHelper.Services.Agent
                     $"跳过 {report.Conflicts} 处；未验证 {report.Unverified} 处。";
                 return report;
             }
+        }
+
+        /// <summary>
+        /// 撤销项里的段落改用当前页面的样式、标记编号。OneNote 回存后会给 QuickStyleDef、TagDef 重新编号，
+        /// 照搬执行前的编号会指到别的定义（比如正文的编号成了标题，撤销后整段变粗）。当前页面没有的定义加进草稿，提交时再对应到页面。
+        /// </summary>
+        private static XElement Renumbered(AgentUndoItem item, AgentPageSnapshot snapshot)
+        {
+            var before = new XElement(item.Before);
+            var styles = item.Styles.ToDictionary(d => (string)d.Attribute("index"), d => ParagraphStyles.EnsureDefinition(snapshot.DraftStyles, d));
+            var tags = item.Tags.ToDictionary(d => (string)d.Attribute("index"), d => AgentMarks.EnsureTagDefinition(snapshot.DraftTags, d));
+            foreach (var e in before.DescendantsAndSelf().Where(e => e.Attribute("quickStyleIndex") != null))
+                if (styles.TryGetValue((string)e.Attribute("quickStyleIndex"), out var mapped)) e.SetAttributeValue("quickStyleIndex", mapped);
+            foreach (var tag in before.Descendants(One + "Tag"))
+                if (tags.TryGetValue((string)tag.Attribute("index"), out var mapped)) tag.SetAttributeValue("index", mapped);
+            return before;
         }
 
         internal static XElement Find(XElement page, string id) => page.Descendants(One + "OE").SingleOrDefault(e => (string)e.Attribute("objectID") == id);

@@ -237,6 +237,33 @@ internal static class Program
             var undo = committer.Undo(s.PageId, r, s.Options, CancellationToken.None);
             Equal(1, undo.Applied); Equal((string)AgentCommitter.Find(s.Page, "a").Attribute("style"), (string)AgentCommitter.Find(api.Page, "a").Attribute("style"));
         });
+        Test("undo maps quick styles and tags by content after OneNote renumbers them", () =>
+        {
+            var todo = Paragraph("a", "第一段"); todo.AddFirst(Tag("0"));
+            var p = Page(todo, Paragraph("b", "第二段")); p.AddFirst(TagDef("0", 3, "待办事项"));
+            p.AddFirst(new XElement(One + "QuickStyleDef", new XAttribute("index", "0"), new XAttribute("name", "p"), new XAttribute("font", "Calibri"), new XAttribute("fontSize", "11")));
+            foreach (var oe in p.Descendants(One + "OE")) oe.SetAttributeValue("quickStyleIndex", "0");
+            var s = Snapshot(p); var t = Tools(s); Read(t, s); Style(t, s);
+            Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, tag = "important" });
+            Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, tag = "none" });
+            Invoke(t, "set_tag", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, tag = "important" });
+            var api = new FakePage(s.Page);
+            // OneNote 回存后按自己的顺序给样式和标记定义重新编号：新加的 h1、重要排到 0，原来的正文、待办变成 1。
+            api.AfterSave = () =>
+            {
+                foreach (var name in new[] { "QuickStyleDef", "TagDef" })
+                    foreach (var d in api.Page.Elements(One + name)) d.SetAttributeValue("index", (string)d.Attribute("index") == "0" ? "1" : "0");
+                foreach (var a in api.Page.Descendants().Attributes("quickStyleIndex")) a.Value = a.Value == "0" ? "1" : "0";
+                foreach (var tag in api.Page.Descendants(One + "Tag")) tag.SetAttributeValue("index", (string)tag.Attribute("index") == "0" ? "1" : "0");
+            };
+            var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None); Equal("Verified", r.Status);
+            api.AfterSave = null;
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+            string Named(XElement oe) => (string)api.Page.Elements(One + "QuickStyleDef").Single(d => (string)d.Attribute("index") == (string)oe.Attribute("quickStyleIndex")).Attribute("name");
+            var a0 = AgentCommitter.Find(api.Page, "a"); Equal("p", Named(a0)); Equal("p", Named(AgentCommitter.Find(api.Page, "b")));
+            Equal("3", (string)AgentMarks.Definition(api.Page, a0.Elements(One + "Tag").Single()).Attribute("symbol"));
+            True(!AgentCommitter.Find(api.Page, "b").Elements(One + "Tag").Any());
+        });
         Test("undo skips later user formatting", () =>
         {
             var s = Prepared(); var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
