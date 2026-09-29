@@ -59,7 +59,7 @@ namespace OneNoteCodeHelper.Highlighting.Themes
         /// <summary>
         /// 默认样式是不是就等于 OneNote 自己的默认文字样式（纯黑、不加粗不斜体）。
         /// 成立时，默认色的文字可以完全不包 span，输出能小一大截。
-        /// 深色主题不满足这个条件——那时必须显式上色，否则会变成深底黑字看不见。
+        /// 默认色不是纯黑时不满足这个条件——那时必须显式上色，否则会掉回黑色（深色主题里就是深底黑字看不见）。
         /// </summary>
         internal bool CanOmitDefaultSpans =>
             !DefaultStyle.Bold

@@ -4,63 +4,66 @@ using System.Linq;
 
 namespace OneNoteCodeHelper.Highlighting.Themes
 {
-    /// <summary>内置配色方案。加新主题只需在 All 里加一行。</summary>
+    /// <summary>
+    /// 内置配色方案。加新主题只需在 All 里加一行。
+    /// 两套都接近 GitHub 的代码配色：不加粗、不用斜体，只靠颜色区分，配合无边框的代码框更清爽。
+    /// </summary>
     internal static class CodeThemes
     {
-        /// <summary>浅色，接近 IntelliJ IDEA 默认配色，和 OneNote 白页最协调，打印也正常。</summary>
+        /// <summary>浅色，接近 GitHub 代码块：浅灰底色在白页上不用边框也分得清，打印也正常。</summary>
         internal static CodeTheme Light { get; } = new CodeTheme(
             id: "light",
-            displayName: "浅色（类 IntelliJ）",
-            background: "#F7F7F7",
-            border: "#D8D8D8",
-            defaultStyle: new TokenStyle("#000000"),
+            displayName: "浅色（GitHub）",
+            background: "#F6F8FA",
+            border: "#D0D7DE",
+            defaultStyle: new TokenStyle("#1F2328"),
             styles: new Dictionary<TokenKind, TokenStyle>
             {
-                [TokenKind.Keyword] = new TokenStyle("#7F0055", bold: true),
-                [TokenKind.Literal] = new TokenStyle("#7F0055", bold: true),
-                [TokenKind.Type] = new TokenStyle("#20999D"),
-                [TokenKind.Constant] = new TokenStyle("#660E7A", italic: true),
-                [TokenKind.Function] = new TokenStyle("#795E26"),
-                [TokenKind.Builtin] = new TokenStyle("#7A3E9D"),
-                [TokenKind.Variable] = new TokenStyle("#871094"),
-                [TokenKind.Tag] = new TokenStyle("#000080", bold: true),
-                [TokenKind.Attribute] = new TokenStyle("#0000FF"),
-                [TokenKind.String] = new TokenStyle("#008000"),
-                [TokenKind.Char] = new TokenStyle("#008000"),
-                [TokenKind.Number] = new TokenStyle("#1750EB"),
-                [TokenKind.Comment] = new TokenStyle("#808080", italic: true),
-                [TokenKind.DocComment] = new TokenStyle("#3F5FBF", italic: true),
-                [TokenKind.Annotation] = new TokenStyle("#808000"),
-                [TokenKind.Operator] = new TokenStyle("#000000"),
-                [TokenKind.Punctuation] = new TokenStyle("#000000")
+                [TokenKind.Keyword] = new TokenStyle("#CF222E"),
+                [TokenKind.Literal] = new TokenStyle("#0550AE"),
+                [TokenKind.Type] = new TokenStyle("#953800"),
+                [TokenKind.Constant] = new TokenStyle("#0550AE"),
+                [TokenKind.Function] = new TokenStyle("#8250DF"),
+                [TokenKind.Builtin] = new TokenStyle("#0550AE"),
+                [TokenKind.Variable] = new TokenStyle("#953800"),
+                [TokenKind.Tag] = new TokenStyle("#116329"),
+                [TokenKind.Attribute] = new TokenStyle("#0550AE"),
+                [TokenKind.String] = new TokenStyle("#0A3069"),
+                [TokenKind.Char] = new TokenStyle("#0A3069"),
+                [TokenKind.Number] = new TokenStyle("#0550AE"),
+                [TokenKind.Comment] = new TokenStyle("#6E7781"),
+                [TokenKind.DocComment] = new TokenStyle("#6E7781"),
+                [TokenKind.Annotation] = new TokenStyle("#116329"),
+                [TokenKind.Operator] = new TokenStyle("#1F2328"),
+                [TokenKind.Punctuation] = new TokenStyle("#1F2328")
             });
 
-        /// <summary>深色，接近 VS Code Dark+，和 IDE 里看到的一致。</summary>
+        /// <summary>深色，接近 GitHub Dimmed：蓝灰底色比纯黑柔和，放在白页上不刺眼。</summary>
         internal static CodeTheme Dark { get; } = new CodeTheme(
             id: "dark",
-            displayName: "深色（类 VS Code Dark+）",
-            background: "#1E1E1E",
-            border: "#3C3C3C",
-            defaultStyle: new TokenStyle("#D4D4D4"),
+            displayName: "深色（GitHub Dimmed）",
+            background: "#22272E",
+            border: "#444C56",
+            defaultStyle: new TokenStyle("#ADBAC7"),
             styles: new Dictionary<TokenKind, TokenStyle>
             {
-                [TokenKind.Keyword] = new TokenStyle("#569CD6"),
-                [TokenKind.Literal] = new TokenStyle("#569CD6"),
-                [TokenKind.Type] = new TokenStyle("#4EC9B0"),
-                [TokenKind.Constant] = new TokenStyle("#4FC1FF"),
-                [TokenKind.Function] = new TokenStyle("#DCDCAA"),
-                [TokenKind.Builtin] = new TokenStyle("#C586C0"),
-                [TokenKind.Variable] = new TokenStyle("#9CDCFE"),
-                [TokenKind.Tag] = new TokenStyle("#569CD6"),
-                [TokenKind.Attribute] = new TokenStyle("#9CDCFE"),
-                [TokenKind.String] = new TokenStyle("#CE9178"),
-                [TokenKind.Char] = new TokenStyle("#CE9178"),
-                [TokenKind.Number] = new TokenStyle("#B5CEA8"),
-                [TokenKind.Comment] = new TokenStyle("#6A9955", italic: true),
-                [TokenKind.DocComment] = new TokenStyle("#6A9955", italic: true),
-                [TokenKind.Annotation] = new TokenStyle("#DCDCAA"),
-                [TokenKind.Operator] = new TokenStyle("#D4D4D4"),
-                [TokenKind.Punctuation] = new TokenStyle("#D4D4D4")
+                [TokenKind.Keyword] = new TokenStyle("#F47067"),
+                [TokenKind.Literal] = new TokenStyle("#6CB6FF"),
+                [TokenKind.Type] = new TokenStyle("#F69D50"),
+                [TokenKind.Constant] = new TokenStyle("#6CB6FF"),
+                [TokenKind.Function] = new TokenStyle("#DCBDFB"),
+                [TokenKind.Builtin] = new TokenStyle("#6CB6FF"),
+                [TokenKind.Variable] = new TokenStyle("#F69D50"),
+                [TokenKind.Tag] = new TokenStyle("#8DDB8C"),
+                [TokenKind.Attribute] = new TokenStyle("#6CB6FF"),
+                [TokenKind.String] = new TokenStyle("#96D0FF"),
+                [TokenKind.Char] = new TokenStyle("#96D0FF"),
+                [TokenKind.Number] = new TokenStyle("#6CB6FF"),
+                [TokenKind.Comment] = new TokenStyle("#768390"),
+                [TokenKind.DocComment] = new TokenStyle("#768390"),
+                [TokenKind.Annotation] = new TokenStyle("#8DDB8C"),
+                [TokenKind.Operator] = new TokenStyle("#ADBAC7"),
+                [TokenKind.Punctuation] = new TokenStyle("#ADBAC7")
             });
 
         internal static IReadOnlyList<CodeTheme> All { get; } = new[] { Light, Dark };

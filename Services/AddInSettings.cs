@@ -20,6 +20,18 @@ namespace OneNoteCodeHelper.Services
         /// <summary>字号下拉里的备选（磅）。插入窗口和功能区共用，两边都还能手输列表外的值。</summary>
         internal static readonly double[] FontSizePresets = { 8, 9, 9.5, 10, 10.5, 11, 12, 14, 16, 18, 20 };
 
+        /// <summary>
+        /// 当前的设置版本，见 <see cref="Upgrade"/>。
+        /// 2：代码框改用 GitHub 风配色，默认不显示边框。
+        /// </summary>
+        internal const int CurrentSettingsVersion = 2;
+
+        /// <summary>
+        /// 这份设置是哪个版本存的。不给初始值：旧版本存的文件没有这一项，读出来是 0，
+        /// 由 <see cref="Upgrade"/> 按版本补上默认值的变化。
+        /// </summary>
+        public int SettingsVersion { get; set; }
+
         /// <summary>配色方案 id，见 <see cref="CodeThemes"/>。</summary>
         public string ThemeId { get; set; } = CodeThemes.Light.Id;
 
@@ -36,8 +48,8 @@ namespace OneNoteCodeHelper.Services
         /// <summary>插入新代码框时的宽度（磅）。</summary>
         public double CodeBlockWidth { get; set; } = 520;
 
-        /// <summary>代码框是否显示边框。</summary>
-        public bool ShowBorders { get; set; } = true;
+        /// <summary>代码框是否显示边框。默认只靠底色区分：OneNote 的表格边框颜色改不了，深灰细线显得生硬。</summary>
+        public bool ShowBorders { get; set; }
 
         /// <summary>
         /// Agent 窗口「功能」下拉选的是哪一项：<see cref="AiConfigStore.AgentFunctionName"/>，
@@ -57,6 +69,7 @@ namespace OneNoteCodeHelper.Services
         {
             return new AddInSettings
             {
+                SettingsVersion = SettingsVersion,
                 ThemeId = ThemeId,
                 LanguageId = LanguageId,
                 FontFamily = FontFamily,
@@ -95,6 +108,23 @@ namespace OneNoteCodeHelper.Services
 
             // 功能和模型的名字要对照 ai-settings.xml，那边随时会改，用的时候再兜底（找不到就取第一项）。
             AiEffort = AiEfforts.Normalize(AiEffort);
+        }
+
+        /// <summary>
+        /// 把旧版本存的设置升到当前版本，返回是否有改动。默认值变了的项在这里改一次，
+        /// 之后用户再改回去就一直保留。
+        /// </summary>
+        internal bool Upgrade()
+        {
+            if (SettingsVersion >= CurrentSettingsVersion)
+            {
+                return false;
+            }
+
+            // 版本 2：旧版本默认带边框，保存的设置里几乎都是 true，这里统一关掉一次。
+            ShowBorders = false;
+            SettingsVersion = CurrentSettingsVersion;
+            return true;
         }
 
         internal static string FormatFontSize(double size)
@@ -157,13 +187,24 @@ namespace OneNoteCodeHelper.Services
             {
                 if (File.Exists(SettingsPath))
                 {
+                    AddInSettings settings;
                     using (var stream = File.OpenRead(SettingsPath))
                     {
-                        if (Serializer.Deserialize(stream) is AddInSettings settings)
+                        settings = Serializer.Deserialize(stream) as AddInSettings;
+                    }
+
+                    if (settings != null)
+                    {
+                        settings.Normalize();
+
+                        // 升级后马上存回去，免得每次启动都当成旧文件再升一遍
+                        if (settings.Upgrade())
                         {
-                            settings.Normalize();
-                            return settings;
+                            Save(settings);
+                            AddInLog.Info($"设置升级到版本 {AddInSettings.CurrentSettingsVersion}：代码框默认不显示边框。");
                         }
+
+                        return settings;
                     }
                 }
             }
@@ -172,7 +213,8 @@ namespace OneNoteCodeHelper.Services
                 AddInLog.Warn("读取设置失败，改用默认值。", ex);
             }
 
-            return new AddInSettings();
+            // 默认值本身就是当前版本，不能留 0，否则用户打开边框后下次读取又会被 Upgrade 关掉。
+            return new AddInSettings { SettingsVersion = AddInSettings.CurrentSettingsVersion };
         }
 
         internal static void Save(AddInSettings settings)

@@ -41,7 +41,9 @@ namespace OneNoteCodeHelper.Views
                 Background = ToBrush(theme.Background),
                 BorderBrush = ToBrush(theme.Border),
                 BorderThickness = new Thickness(settings.ShowBorders ? 1 : 0),
-                Padding = new Thickness(10)
+
+                // OneNote 单元格自带的内边距很小，上下留白另由首尾两段的段前段后间距给出，见下面
+                Padding = new Thickness(8, 2, 8, 2)
             };
             document.Blocks.Add(frame);
 
@@ -61,6 +63,16 @@ namespace OneNoteCodeHelper.Views
                 }
 
                 frame.Blocks.Add(paragraph);
+            }
+
+            // 和 CodeBlockBuilder 一样：第一行加段前、最后一行加段后，只有一行时两个都加在它身上
+            var padding = ToDeviceUnits(CodeBlockBuilder.VerticalPadding);
+            var first = frame.Blocks.FirstBlock;
+            var last = frame.Blocks.LastBlock;
+            first.Margin = new Thickness(0, padding, 0, first == last ? padding : 0);
+            if (last != first)
+            {
+                last.Margin = new Thickness(0, 0, 0, padding);
             }
 
             return document;

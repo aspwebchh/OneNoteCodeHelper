@@ -20,6 +20,12 @@ namespace OneNoteCodeHelper.Services
         internal const string MarkerAttribute = "author";
 
         /// <summary>
+        /// 代码框上下留白（磅）。OneNote 不让改单元格的内边距，只能给第一行加段前、最后一行加段后间距撑出来。
+        /// 左右留白做不到：行首补空格就改了源码。
+        /// </summary>
+        internal const double VerticalPadding = 6;
+
+        /// <summary>
         /// 把源码渲染成一个 one:Table。
         /// </summary>
         internal static XElement BuildTable(
@@ -47,6 +53,11 @@ namespace OneNoteCodeHelper.Services
                     One + "OE",
                     new XAttribute("style", oeStyle),
                     new XElement(One + "T", new XCData(line)))));
+
+            // 只有一行时段前段后都加在这一行上
+            var padding = VerticalPadding.ToString("0.#", CultureInfo.InvariantCulture);
+            children.Elements(One + "OE").First().SetAttributeValue("spaceBefore", padding);
+            children.Elements(One + "OE").Last().SetAttributeValue("spaceAfter", padding);
 
             return new XElement(
                 One + "Table",
