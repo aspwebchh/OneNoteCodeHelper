@@ -30,6 +30,9 @@ namespace OneNoteCodeHelper.Views
     {
         private const string ThinkingPlaceholder = "等待模型输出…";
 
+        /// <summary>思考框里留几轮 Agent 之前的摘录。再往前的不显示，框里也放不下。</summary>
+        private const int PastThoughtTurns = 4;
+
         private const string AgentIntro =
             "Agent 会读取所选范围，调整字体、标题、间距等格式，需求里提到时也会修正错别字。完成后显示回读核验的结果，本窗口内可以撤销最近一次修改。";
 
@@ -55,6 +58,14 @@ namespace OneNoteCodeHelper.Views
         private readonly ObservableCollection<StepRow> _steps = new ObservableCollection<StepRow>();
         /// <summary>「已用时」前面的实时说明：Agent 是第几轮，文字功能是 AI 在思考 / 输出 / 已返回几段。null 不显示。</summary>
         private string _liveDetail;
+        /// <summary>Agent 前几轮最后的思考摘录，新一轮开始时存进来，只留最近 <see cref="PastThoughtTurns"/> 轮。</summary>
+        private readonly List<(int Turn, string Text)> _pastThoughts = new List<(int, string)>();
+        /// <summary>当前这一轮（文字功能就是整个处理过程）最新的思考摘录，还没有时为 null。</summary>
+        private string _thought;
+        /// <summary>Agent 当前是第几轮；文字功能为 0，不显示轮次标签。</summary>
+        private int _thoughtTurn;
+        /// <summary>思考框跟着新内容滚到最下面；用户往上翻了就不跟，翻回最下面再接着跟。</summary>
+        private bool _thinkingFollow = true;
         private bool _busy;
         private bool _closed;
         /// <summary>正在往下拉里填选项，这时的 SelectionChanged 不算用户改选。</summary>
@@ -75,7 +86,7 @@ namespace OneNoteCodeHelper.Views
             StepsList.ItemsSource = _steps;
             LoadChoices();
 
-            // 屏幕太矮时收一收，状态卡片里的滚动区跟着变矮。
+            // 屏幕太矮时收一收，状态卡片跟着变矮。
             var limit = SystemParameters.WorkArea.Height - 16;
             if (Height > limit) Height = Math.Max(MinHeight, limit);
 
@@ -242,7 +253,7 @@ namespace OneNoteCodeHelper.Views
                 var blankLines = selectionOnly ? new HashSet<string>(_selectedBlankLines) : null;
                 var optimizer = new AiOptimizer(_api, config, function, model, effort);
                 await StartJob(token => optimizer.RunAsync(_pageId, selection, blankLines, CreateProgress<AiProgress>(ShowAiProgress), token),
-                    "正在读取固定目标页…", true, ShowAiReport);
+                    "正在读取固定目标页…", true, true, ShowAiReport);
                 return;
             }
 
@@ -259,7 +270,7 @@ namespace OneNoteCodeHelper.Views
                         ?? throw new AiException("Agent 默认字体未安装，请在 AI 配置的 Agent/FontFamily 中选择已安装字体。");
                 var runner = new AgentRunner(new AgentChatClient(config, model, effort), new AgentCommitter(_api), codeSettings);
                 return runner.RunAsync(snapshot, request, CreateProgress<AgentProgress>(ShowAgentProgress), token);
-            }, "正在读取固定目标页…", false, report => { _report = report; ShowReport(report, false); });
+            }, "正在读取固定目标页…", false, true, report => { _report = report; ShowReport(report, false); });
         }
 
         /// <summary>需求框里按回车直接执行，Shift+回车换行。输入法组字时按的回车是 ImeProcessed，不会触发。</summary>
@@ -291,17 +302,19 @@ namespace OneNoteCodeHelper.Views
             public void Report(T value) => _report(value);
         }
 
-        private void ShowAgentProgress(AgentProgress progress, bool cancelling)
+        /// <summary>Agent 的进度。internal 是为了离屏预览（Tests/WindowPreview.cs）能摆出处理中的样子。</summary>
+        internal void ShowAgentProgress(AgentProgress progress, bool cancelling)
         {
             // 已点取消：状态行和说明留给「正在取消…」，步骤照常更新，写回中的那步要显示出结果。
             if (progress.Step != null) ShowStep(progress.Step);
             if (cancelling) return;
             if (progress.Turn > 0) { _liveDetail = $"第 {progress.Turn} 轮"; ShowElapsed(); }
             if (progress.Status != null) StatusText.Text = progress.Status;
+            if (progress.Turn > 0 && progress.Turn != _thoughtTurn) StartThoughtTurn(progress.Turn);
             if (progress.Thinking != null) ShowThinking(progress.Thinking);
         }
 
-        private void ShowAiProgress(AiProgress progress, bool cancelling)
+        internal void ShowAiProgress(AiProgress progress, bool cancelling)
         {
             if (cancelling) return;
             StatusText.Text = progress.Message;
@@ -310,13 +323,72 @@ namespace OneNoteCodeHelper.Views
             ShowThinking(progress.Thinking);
         }
 
-        /// <summary>思考摘录。处理期间摘录框一直占着位置，没有文字时显示占位，不收起。</summary>
+        /// <summary>Agent 进入新一轮：上一轮最后的摘录留在框里（颜色淡一些），新一轮另起一段。</summary>
+        private void StartThoughtTurn(int turn)
+        {
+            if (_thought != null)
+            {
+                _pastThoughts.Add((_thoughtTurn, _thought));
+                if (_pastThoughts.Count > PastThoughtTurns) _pastThoughts.RemoveAt(0);
+            }
+
+            _thoughtTurn = turn;
+            _thought = null;
+            RenderThinking();
+        }
+
+        /// <summary>换掉当前这一轮的摘录。处理期间思考框一直占着位置，没有文字时显示占位，不收起。</summary>
         private void ShowThinking(string text)
         {
-            var empty = string.IsNullOrEmpty(text);
-            ThinkingText.Text = empty ? ThinkingPlaceholder : text;
-            ThinkingText.Foreground = (Brush)FindResource(empty ? "Faint" : "Muted");
+            _thought = string.IsNullOrEmpty(text) ? null : text;
+            RenderThinking();
         }
+
+        /// <summary>按轮次重画思考框：前几轮用次要文字色，当前这一轮用正文色；Agent 每段前面标上第几轮。</summary>
+        private void RenderThinking()
+        {
+            ThinkingPanel.Children.Clear();
+            foreach (var past in _pastThoughts) AddThought(past.Turn, past.Text, "Muted");
+            AddThought(_thoughtTurn, _thought ?? ThinkingPlaceholder, _thought != null ? "Text" : "Faint");
+        }
+
+        private void AddThought(int turn, string text, string brush)
+        {
+            var gap = ThinkingPanel.Children.Count > 0 ? 10 : 0;
+            if (turn > 0)
+            {
+                ThinkingPanel.Children.Add(new TextBlock
+                {
+                    Style = (Style)FindResource("ThoughtLabel"),
+                    Margin = new Thickness(0, gap, 0, 2),
+                    Text = $"第 {turn} 轮"
+                });
+                gap = 0;
+            }
+
+            ThinkingPanel.Children.Add(new TextBlock
+            {
+                Style = (Style)FindResource("ThoughtText"),
+                Margin = new Thickness(0, gap, 0, 0),
+                Foreground = (Brush)FindResource(brush),
+                Text = text
+            });
+        }
+
+        /// <summary>内容变多或框变大时，原来就在最下面的话接着滚到最下面；用户自己滚动时记下是否还在最下面。顶上有文字滚出去时显示渐隐。</summary>
+        private void OnThinkingScrolled(object sender, ScrollChangedEventArgs e)
+        {
+            if (e.ExtentHeightChange == 0 && e.ViewportHeightChange == 0)
+                _thinkingFollow = ThinkingScroll.VerticalOffset >= ThinkingScroll.ScrollableHeight - 1;
+            else if (_thinkingFollow)
+                ThinkingScroll.ScrollToEnd();
+            ShowFade(ThinkingScroll, ThinkingFade);
+        }
+
+        private void OnStepsScrolled(object sender, ScrollChangedEventArgs e) => ShowFade(StepsScroll, StepsFade);
+
+        private static void ShowFade(ScrollViewer scroll, UIElement fade) =>
+            fade.Visibility = scroll.VerticalOffset > 0.5 ? Visibility.Visible : Visibility.Collapsed;
 
         /// <summary>按 Id 新增或替换一行步骤；新增时滚到最下面。</summary>
         private void ShowStep(AgentStep step)
@@ -329,8 +401,9 @@ namespace OneNoteCodeHelper.Views
                 return;
             }
             _steps.Add(row);
+            StepsPlaceholder.Visibility = Visibility.Collapsed;
             StepsPanel.Visibility = Visibility.Visible;
-            ContentScroll.ScrollToEnd();
+            StepsScroll.ScrollToEnd();
         }
 
         /// <summary>任务没做完就结束了（失败或取消）：还显示「执行中」的步骤改成失败。</summary>
@@ -375,8 +448,11 @@ namespace OneNoteCodeHelper.Views
             }
         }
 
-        /// <summary>在线程池上跑 job，结果交给 show。textFunction 决定取消、失败时的说明和日志写法。</summary>
-        private async Task StartJob<T>(Func<CancellationToken, Task<T>> job, string status, bool textFunction, Action<T> show)
+        /// <summary>
+        /// 在线程池上跑 job，结果交给 show。textFunction 决定取消、失败时的说明和日志写法。
+        /// thinking 为 false（撤销）时不显示思考框；Agent 执行时同时显示步骤区。
+        /// </summary>
+        private async Task StartJob<T>(Func<CancellationToken, Task<T>> job, string status, bool textFunction, bool thinking, Action<T> show)
         {
             _run?.Dispose();
             _run = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
@@ -384,7 +460,7 @@ namespace OneNoteCodeHelper.Views
             // 下一次执行开始后，上一次的撤销记录作废。
             _report = null;
             SetBusy(true);
-            StartRunning(status);
+            StartRunning(status, thinking, thinking && !textFunction);
             try
             {
                 var task = Task.Run(() => job(token));
@@ -428,7 +504,7 @@ namespace OneNoteCodeHelper.Views
             var previous = _report;
             var options = _config.Agent;
             await StartJob(token => Task.FromResult(new AgentCommitter(_api).Undo(_pageId, previous, options, token)),
-                "正在撤销…", false, report => { _report = report; ShowReport(report, true); });
+                "正在撤销…", false, false, report => { _report = report; ShowReport(report, true); });
             // 只撤销最近一次执行；不把撤销的逆操作继续暴露为撤销。
             _report?.ClearUndo();
             if (!_closed) UndoButton.Visibility = Visibility.Collapsed;
@@ -460,8 +536,8 @@ namespace OneNoteCodeHelper.Views
             SelectionScope.IsEnabled = !value && _selection.Count > 0;
         }
 
-        /// <summary>开始转圈和计时，收起说明、上一次的结果和步骤，摘录框从现在起一直占着位置。</summary>
-        private void StartRunning(string status)
+        /// <summary>开始转圈和计时，收起说明、上一次的结果和步骤，思考框和步骤区（按需）从现在起一直占着位置。</summary>
+        private void StartRunning(string status, bool thinking, bool steps)
         {
             ShowIcon(SpinnerIcon);
             StatusText.Text = status;
@@ -469,9 +545,12 @@ namespace OneNoteCodeHelper.Views
             ResultPanel.Visibility = Visibility.Collapsed;
             ErrorBox.Visibility = Visibility.Collapsed;
             _steps.Clear();
-            StepsPanel.Visibility = Visibility.Collapsed;
-            ThinkingBox.Visibility = Visibility.Visible;
+            StepsPlaceholder.Visibility = Visibility.Visible;
+            _pastThoughts.Clear();
+            _thoughtTurn = 0;
+            _thinkingFollow = true;
             ShowThinking(null);
+            ShowProgressLayout(thinking, steps);
             _liveDetail = null;
             _elapsed.Restart();
             ShowElapsed();
@@ -483,6 +562,24 @@ namespace OneNoteCodeHelper.Views
             _ticker.Start();
             SpinnerRotation.BeginAnimation(RotateTransform.AngleProperty,
                 new DoubleAnimation(0, 360, TimeSpan.FromSeconds(0.9)) { RepeatBehavior = RepeatBehavior.Forever });
+        }
+
+        /// <summary>
+        /// 下方卡片的布局。处理中的 Agent：思考框和步骤区按 3:2 分，步骤区从开始就占着位置（第一步出来前显示占位），
+        /// 不会中途把思考框挤矮；文字功能没有步骤，思考框占满。
+        /// 空闲、撤销中和出结果后：思考框收起；有步骤时步骤区按内容高、最多约 7 行，说明、结果和错误占满剩下的。
+        /// internal 是为了离屏预览。
+        /// </summary>
+        internal void ShowProgressLayout(bool thinking, bool steps)
+        {
+            ThinkingBox.Visibility = thinking ? Visibility.Visible : Visibility.Collapsed;
+            ThinkingRow.Height = thinking ? new GridLength(steps ? 3 : 1, GridUnitType.Star) : GridLength.Auto;
+            StepsPanel.Visibility = steps || (!thinking && _steps.Count > 0) ? Visibility.Visible : Visibility.Collapsed;
+            StepsRow.Height = steps ? new GridLength(2, GridUnitType.Star) : GridLength.Auto;
+            StepsScroll.MaxHeight = steps ? double.PositiveInfinity : 160;
+            ContentScroll.Visibility = thinking ? Visibility.Collapsed : Visibility.Visible;
+            ContentRow.Height = thinking ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
+            if (!thinking) StepsScroll.ScrollToEnd();
         }
 
         private void StopRunning()
@@ -537,7 +634,7 @@ namespace OneNoteCodeHelper.Views
             ResultLabel.Text = label;
             ResultText.Text = text ?? string.Empty;
             ResultPanel.Visibility = string.IsNullOrWhiteSpace(text) ? Visibility.Collapsed : Visibility.Visible;
-            ContentScroll.ScrollToEnd();
+            ContentScroll.ScrollToHome();
         }
 
         private void ShowFailure(string message)
@@ -545,17 +642,17 @@ namespace OneNoteCodeHelper.Views
             ShowOutcome(ErrorIcon, "没能完成", $"用时 {ElapsedSeconds()} 秒");
             ErrorText.Text = message;
             ErrorBox.Visibility = Visibility.Visible;
-            ContentScroll.ScrollToEnd();
+            ContentScroll.ScrollToHome();
         }
 
-        /// <summary>停掉转圈，换成结果图标和标题，收起摘录框；结果框和错误框先收起，由调用方按需打开。步骤列表保留。</summary>
+        /// <summary>停掉转圈，换成结果图标和标题，收起思考框；结果框和错误框先收起，由调用方按需打开。有步骤时步骤列表保留。</summary>
         private void ShowOutcome(FrameworkElement icon, string status, string detail)
         {
             StopRunning();
             ShowIcon(icon);
             StatusText.Text = status;
             ShowDetail(detail);
-            ThinkingBox.Visibility = Visibility.Collapsed;
+            ShowProgressLayout(false, false);
             ResultPanel.Visibility = Visibility.Collapsed;
             ErrorBox.Visibility = Visibility.Collapsed;
         }

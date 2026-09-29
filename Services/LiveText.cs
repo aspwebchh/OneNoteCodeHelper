@@ -13,11 +13,14 @@ namespace OneNoteCodeHelper.Services
     /// </summary>
     internal static class LiveText
     {
-        /// <summary>只看原文末尾这么多字，思考再长也不会整段 ToString。<see cref="KeepTail"/> 留下的比这多。</summary>
-        private const int GistWindow = 1500;
+        /// <summary>只看原文末尾这么多字，思考再长也不会整段 ToString。<see cref="KeepTail"/> 留下的不比这少。</summary>
+        private const int GistWindow = 4000;
 
-        /// <summary>摘录框三行，一行约 30 个汉字。宽度按 <see cref="Width"/> 估：全角算 2，其余算 1。</summary>
-        private const int GistLines = 3;
+        /// <summary>
+        /// 最多挑这么多行，一行按约 30 个汉字（窗口默认宽度下思考框的一行）估，宽度按 <see cref="Width"/> 算：全角算 2，其余算 1。
+        /// 窗口可以拖大，这里按拉高后也够用的行数给；框里放不下的旧句在窗口里往上滚走。
+        /// </summary>
+        private const int GistLines = 16;
 
         private const int LineUnits = 58;
 
@@ -59,7 +62,7 @@ namespace OneNoteCodeHelper.Services
         private static readonly Regex EnglishWord = new Regex(@"(?<![A-Za-z0-9_])(?:[a-z][A-Za-z]*|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*)");
 
         /// <summary>
-        /// 最新的几句核心内容：句与句换行，最新的在最下面，合起来不超过摘录框的三行。
+        /// 最新的几句核心内容：句与句换行，最新的在最下面，合起来不超过 <see cref="GistLines"/> 行。
         /// 没有可显示的句子时返回 null，调用方留着上一次的，摘录框不闪。
         /// finished 表示这段文字已经收完（模型开始回复或调用工具了），最后一句没有句末标点也算说完。
         /// localize 先把句子里认得的英文词（工具名、段落 ID 之类）换成中文，再判断是不是中英混杂。
@@ -96,7 +99,7 @@ namespace OneNoteCodeHelper.Services
                 lines += need;
             }
 
-            // 最新一句自己就超过三行：从头截，至少看得出这句在说什么。
+            // 最新一句自己就超过行数上限：从头截，至少看得出这句在说什么。
             return picked.Count > 0
                 ? string.Join("\n", picked)
                 : Shorten(sentences[sentences.Count - 1], GistLines * LineUnits - 2);
@@ -105,7 +108,7 @@ namespace OneNoteCodeHelper.Services
         /// <summary>
         /// 只保留末尾一段，长度超过 2 × keep 时把前面删掉。摘录只看末尾，没必要把整段思考都攒在内存里。
         /// </summary>
-        internal static void KeepTail(StringBuilder text, int keep = 2000)
+        internal static void KeepTail(StringBuilder text, int keep = GistWindow)
         {
             if (text.Length > keep * 2)
             {

@@ -251,11 +251,11 @@ Assert-Equal '摘录：JSON、表格行和代码块去掉，数字后的单位�
 Assert-Equal '摘录：整句英文、夹着英文小写单词的句子不显示，大写专有名词保留' `
     (Invoke-Gist 'The user wants a cleaner page. 需要 check 一下格式。用 Python 高亮这段代码。' $true) '用 Python 高亮这段代码。'
 Assert-Equal '摘录：语气词和空话去掉' (Invoke-Gist '嗯。Wait, 第 3 段其实是代码。让我想想。' $true) '第 3 段其实是代码。'
-Assert-Equal '摘录：放不下三行时只留最新几句' `
-    (Invoke-Gist '第一句话说的是页面结构。第二句话说的是标题层级。第三句话说的是正文字号。第四句话说的是段落间距。' $true) `
-    "第二句话说的是标题层级。`n第三句话说的是正文字号。`n第四句话说的是段落间距。"
-Assert-Equal '摘录：最新一句超过三行时从头截断' (Invoke-Gist (('很' * 100) + '。') $true) (('很' * 86) + '…')
-Assert-Equal '摘录：很长的思考只看末尾，截断的半句丢掉' (Invoke-Gist (('很' * 2000) + '。先读取段落。') $false) '先读取段落。'
+# 摘录最多 16 行，一行按 58 个宽度单位（约 29 个汉字）估；下面每句正好一行。
+$gistSentences = 1..20 | ForEach-Object { "第${_}句话说的是段落间距。" }
+Assert-Equal '摘录：放不下时只留最新几句' (Invoke-Gist ($gistSentences -join '') $true) ($gistSentences[4..19] -join "`n")
+Assert-Equal '摘录：最新一句超过行数上限时从头截断' (Invoke-Gist (('很' * 500) + '。') $true) (('很' * 463) + '…')
+Assert-Equal '摘录：很长的思考只看末尾，截断的半句丢掉' (Invoke-Gist (('很' * 5000) + '。先读取段落。') $false) '先读取段落。'
 Assert-Equal '摘录：只有空白时不显示' (Invoke-Gist "  `n `n" $false) ''
 
 Write-Host ''
