@@ -104,7 +104,7 @@ namespace OneNoteCodeHelper.Services.Agent
             _snapshot = snapshot; _committer = committer; _cancellation = cancellation; _code = codeSettings ?? new AddInSettings();
             Register("get_page_overview", "获取当前固定页面的段落摘要、保护范围及样式。每页 100 项；通过 offset 翻页。", AgentSchema.Obj(new Dictionary<string, AgentSchema>
             { ["offset"] = AgentSchema.Num(0, 1000, true) }), Overview);
-            Register("read_blocks", "完整读取段落正文及样式。修改前必须调用，不能修改受保护段落。", WithIds(), Read);
+            Register("read_blocks", "完整读取段落正文及样式。修改前必须调用，不能修改受保护段落；传入的受保护段落会跳过，列在 skipped 里并附原因。", WithIds(), Read);
             if (snapshot.Images.Count > 0)
             {
                 var images = SnapshotOnly();
@@ -366,7 +366,9 @@ namespace OneNoteCodeHelper.Services.Agent
                     detail = AiClient.Get(outcome, "total") is int total ? $"共 {total} 段" : null;
                     break;
                 case "read_blocks":
-                    detail = CountOf(args, "block_ids");
+                    detail = AiClient.Get(outcome, "blocks") is IList readBlocks
+                        ? JoinDetail($"{readBlocks.Count} 段", AiClient.Get(outcome, "skipped") is IList skippedBlocks ? $"跳过受保护 {skippedBlocks.Count} 段" : null)
+                        : CountOf(args, "block_ids");
                     break;
                 case "set_paragraph_style":
                     detail = JoinDetail(PresetName(AiClient.Get(args, "preset_id") as string), CountOf(args, "block_ids"));
@@ -563,10 +565,16 @@ namespace OneNoteCodeHelper.Services.Agent
         }
         private object Read(IDictionary<string, object> args)
         {
-            var blocks = Targets(args);
+            var ids = ((IList)args["block_ids"]).Cast<string>().ToList();
+            if (ids.Distinct().Count() != ids.Count) throw new AiException("目标段落重复。");
+            var found = ids.Select(id => _snapshot.Blocks.FirstOrDefault(x => x.Id == id) ?? throw new AiException($"段落 {id} 不存在。")).ToList();
+            // 读取没有副作用：按范围读时夹在中间的空行、代码框等受保护段落跳过并说明原因，不让整批失败再重试。
+            var blocks = found.Where(b => b.Editable || b.CodeCandidate).ToList();
+            var skipped = found.Where(b => !(b.Editable || b.CodeCandidate)).Select(b => new { id = b.Id, reason = b.ProtectedReason }).ToArray();
+            if (blocks.Count == 0) throw new AiException("目标段落都受到保护：" + string.Join("、", skipped.Select(s => $"{s.id}（{s.reason}）")) + "。");
             var page = _snapshot.CreateDraftPage();
             foreach (var b in blocks) b.Read = true;
-            return new { snapshot_id = _snapshot.SnapshotId, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.CurrentText,
+            return new { snapshot_id = _snapshot.SnapshotId, skipped = skipped.Length > 0 ? skipped : null, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.CurrentText,
                 depth = AgentLayout.Find(page, b.Id).Ancestors(OneNoteApi.One + "OE").Count(), container_id = ContainerOf(AgentLayout.Find(_snapshot.Layout, b.Id), b.ContainerId),
                 parent_id = ParentKey(AgentLayout.Find(page, b.Id)),
                 table_id = b.TableId, style = Css.Effective(AgentLayout.Find(page, b.Id), page),

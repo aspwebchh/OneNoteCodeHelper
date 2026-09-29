@@ -400,6 +400,8 @@ internal static class Program
         Test("step descriptions summarize arguments, results and failures", () =>
         {
             Equal(("读取段落 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("read_blocks", "{\"block_ids\":[\"a\",\"b\"]}", "{}"));
+            Equal(("读取段落 · 1 段 · 跳过受保护 2 段", AgentStepState.Done),
+                AgentTools.DescribeStep("read_blocks", "{\"block_ids\":[\"a\",\"b\",\"c\"]}", "{\"blocks\":[{}],\"skipped\":[{},{}]}"));
             Equal(("设置重点文字样式 · 2 处", AgentStepState.Done), AgentTools.DescribeStep("set_text_style", "{\"targets\":[{},{}]}", "{\"ok\":true}"));
             Equal(("修正错别字 · 3 处", AgentStepState.Done), AgentTools.DescribeStep("fix_text", "{\"fixes\":[{},{},{}]}", "{\"ok\":true}"));
             Equal(("高亮代码 · " + LanguageRegistry.Find("python").DisplayName + " · 3 段", AgentStepState.Done),
@@ -540,7 +542,13 @@ internal static class Program
             var t = Tools(s);
             Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" } });
             Throws(() => Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, preset_id = "body" }));
-            Throws(() => Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p5" } }));
+            Rejects("p5（highlighted_code）", () => Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p5" } }));
+            Rejects("p9 不存在", () => Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p9" } }));
+            // 受保护段落夹在范围里时跳过并说明原因，其余照常读取。
+            var mixed = AgentChatClient.Parse(Json(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p4", "p5" } })));
+            Equal("p1", (string)AiClient.Get(((object[])AiClient.Get(mixed, "blocks")).Single(), "id"));
+            Equal("p4:protected_code,p5:highlighted_code", string.Join(",", ((object[])AiClient.Get(mixed, "skipped")).Select(x => AiClient.Get(x, "id") + ":" + AiClient.Get(x, "reason"))));
+            True(s.Blocks[0].Read && !s.Blocks[3].Read && !s.Blocks[4].Read);
         });
         Test("code highlight disabled keeps whole monospace paragraphs protected", () =>
         {
