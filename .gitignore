@@ -1,6 +1,9 @@
-# 构建中间文件；bin/ 中的 exe、dll 等产物保留为可跟踪文件
+# 编译产物和中间文件
+bin/
 obj/
-Tests/bin/
+
+# PDF 文件
+*.[pP][dD][fF]
 
 # Visual Studio 本地文件
 .vs/
