@@ -360,6 +360,43 @@ internal static class Program
             var r = new AgentReply(); AgentChatClient.AbsorbEvent("[DONE]", r); Throws(r.Validate);
         });
         Test("length finish cannot execute tools", () => Throws(new AgentReply { FinishReason = "length" }.Validate));
+        Test("unfinished replies explain the finish reason", () =>
+        {
+            Rejects("MaxTokens", new AgentReply { FinishReason = "length", Done = true }.Validate);
+            Rejects("连接中途结束", new AgentReply().Validate);
+            Rejects("没有返回结束原因", new AgentReply { Done = true }.Validate);
+            Rejects("结束原因 aborted", new AgentReply { FinishReason = "aborted", Done = true }.Validate);
+            Rejects("结束原因 未知", new AgentReply { FinishReason = "<b>私有内容</b>", Done = true }.Validate);
+        });
+        Test("usage-only stream chunk is recorded and summarized without content", () =>
+        {
+            var r = new AgentReply();
+            AgentChatClient.AbsorbEvent("{\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"私有思考\"},\"finish_reason\":\"length\"}]}", r);
+            AgentChatClient.AbsorbEvent("{\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":16384,\"completion_tokens_details\":{\"reasoning_tokens\":15000}}}", r);
+            var line = AgentChatClient.Summarize(r, "m", "low", 100, 1.5);
+            True(line.Contains("finish=length")); True(line.Contains("12/16384/15000")); True(!line.Contains("私有思考"));
+            Throws(() => AgentChatClient.AbsorbEvent("{\"id\":\"x\"}", new AgentReply()));
+        });
+        Test("runner retries a truncated turn with a reminder and keeps the draft", () =>
+        {
+            var s = Snapshot(); var api = new FakePage(s.Page); var log = new ProgressLog();
+            // 第一轮和设样式前各截断一次：丢掉那轮、提醒分批，脚本接着往下走。
+            var model = new TruncatingClient(new ScriptedClient(s), 0, 3);
+            var r = new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "美化", log, CancellationToken.None).GetAwaiter().GetResult();
+            Equal("Verified", r.Status); Equal(1, api.Writes); Equal(7, model.Sent.Count);
+            Equal(2, log.Items.Count(p => p.Step?.State == AgentStepState.Note));
+            // 第一轮截断后提醒并进用户需求，不出现连续两条 user 消息；截断的思考和半截工具调用不进历史。
+            Equal(1, model.Sent[1].Split(new[] { "\"role\":\"user\"" }, StringSplitOptions.None).Length - 1);
+            True(model.Sent[1].Contains(AgentRunner.TruncatedPrompt));
+            True(model.Sent.All(json => !json.Contains("TRUNCATED_THOUGHT") && !json.Contains("\"cut")));
+        });
+        Test("runner stops after repeated truncation and names MaxTokens", () =>
+        {
+            var s = Snapshot(); var api = new FakePage(s.Page);
+            var model = new TruncatingClient(new ScriptedClient(s), Enumerable.Range(0, 24).ToArray());
+            Rejects("MaxTokens", () => new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult());
+            Equal(AgentRunner.MaxTruncatedRetries + 1, model.Sent.Count); Equal(0, api.Writes);
+        });
         Test("stream error or malformed JSON rejected", () =>
         {
             Throws(() => AgentChatClient.AbsorbEvent("{broken", new AgentReply()));
@@ -1942,6 +1979,21 @@ internal static class Program
     {
         internal readonly List<AgentProgress> Items = new List<AgentProgress>();
         public void Report(AgentProgress value) { lock (Items) Items.Add(value); }
+    }
+    /// <summary>在指定的几次请求上返回被 max_tokens 截断的输出（带半截工具调用），其余交给 inner；记下每次发出的消息。</summary>
+    private sealed class TruncatingClient : IAgentChatClient
+    {
+        private readonly IAgentChatClient _inner; private readonly HashSet<int> _cut; private int _call;
+        internal readonly List<string> Sent = new List<string>();
+        internal TruncatingClient(IAgentChatClient inner, params int[] cut) { _inner = inner; _cut = new HashSet<int>(cut); }
+        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
+        {
+            Sent.Add(AgentJson.Serialize(messages));
+            if (!_cut.Contains(_call++)) return _inner.CompleteAsync(messages, tools, progress, cancellation);
+            var reply = new AgentReply { FinishReason = "length", Reasoning = "TRUNCATED_THOUGHT" };
+            reply.Calls.Add(0, new AgentToolCall { Id = "cut" + _call, Name = "fix_text", Arguments = "{\"snapshot_id\":" });
+            return Task.FromResult(reply);
+        }
     }
     private sealed class TextOnlyClient : IAgentChatClient
     {

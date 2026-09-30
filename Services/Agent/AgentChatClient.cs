@@ -88,6 +88,10 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int ReasoningLength => ReasoningBuffer.Length;
         internal string FinishReason;
         internal bool Done;
+        /// <summary>接口返回的 usage，只用来写日志；没开 StreamUsage 或接口不给时为 null。</summary>
+        internal object Usage;
+        /// <summary>输出达到 max_tokens 被截断。本轮工具不能执行，但草稿没动，由 <see cref="AgentRunner"/> 决定是否提醒模型分批重试。</summary>
+        internal bool Truncated => FinishReason == "length";
         internal readonly SortedDictionary<int, AgentToolCall> Calls = new SortedDictionary<int, AgentToolCall>();
         internal object ToMessage(bool replayReasoning)
         {
@@ -98,12 +102,31 @@ namespace OneNoteCodeHelper.Services.Agent
         }
         internal void Validate()
         {
-            if (FinishReason != "stop" && FinishReason != "tool_calls") throw new AiException("Agent 输出未完整结束，未执行本轮工具。");
+            if (FinishReason != "stop" && FinishReason != "tool_calls") throw new AiException(Unfinished());
             if (Calls.Count > 0 && FinishReason != "tool_calls") throw new AiException("工具调用结束标记无效。");
             if (FinishReason == "tool_calls" && Calls.Count == 0) throw new AiException("接口没有返回工具调用。");
             if (Calls.Values.Any(c => string.IsNullOrEmpty(c.Id) || string.IsNullOrEmpty(c.Name) || string.IsNullOrWhiteSpace(c.Arguments)) ||
                 Calls.Values.Select(c => c.Id).Distinct().Count() != Calls.Count) throw new AiException("工具调用格式不完整。");
         }
+
+        /// <summary>没有正常结束时按结束原因说明，用户才知道该调哪一项、还是重试就行。</summary>
+        private string Unfinished()
+        {
+            switch (FinishReason)
+            {
+                case "length":
+                    return "模型本轮输出达到「最大输出 token」上限被截断，未执行本轮工具。可以在「AI 配置」调大「最大输出 token」（MaxTokens，0 表示用接口默认值）、" +
+                        "降低思考强度，或缩小处理范围。";
+                case "content_filter": return "模型输出被接口的内容审核拦截，未执行本轮工具。";
+                case "insufficient_system_resource": return "接口资源不足，模型输出被中断，未执行本轮工具。请稍后重试。";
+                case null: return Done ? "接口没有返回结束原因，未执行本轮工具。" : "Agent 连接中途结束，没有收到完整回复，未执行本轮工具。请重试。";
+                default: return $"Agent 输出没有正常结束（结束原因 {Reason(FinishReason)}），未执行本轮工具。";
+            }
+        }
+
+        /// <summary>结束原因来自接口，显示和写日志前只留短的英文标识。</summary>
+        internal static string Reason(string finish) =>
+            finish == null ? "-" : finish.Length <= 40 && finish.All(c => c < 128 && (char.IsLetterOrDigit(c) || c == '_' || c == '-')) ? finish : "未知";
     }
 
     internal interface IAgentChatClient
@@ -151,6 +174,7 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _config.ApiKey);
                 request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                var watch = Stopwatch.StartNew();
                 try
                 {
                     using (var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false))
@@ -208,7 +232,9 @@ namespace OneNoteCodeHelper.Services.Agent
                                 AbsorbWhole(Parse(text.ToString()), reply);
                             }
                         }
-                        reply.Validate();
+                        AddInLog.Info(Summarize(reply, _model, _effort, json.Length, watch.Elapsed.TotalSeconds));
+                        // 截断的一轮交给 AgentRunner：草稿没动，可以提醒模型分批后重试；其余情况在这里就拒绝。
+                        if (!reply.Truncated) reply.Validate();
                         return reply;
                     }
                 }
@@ -221,6 +247,13 @@ namespace OneNoteCodeHelper.Services.Agent
                 catch (IOException) { throw new AiException("Agent 连接中断，未提交草稿。"); }
             }
         }
+
+        /// <summary>每轮请求一行日志：结束原因、用量和各部分字数，不含模型原文、工具参数或笔记内容。</summary>
+        internal static string Summarize(AgentReply reply, string model, string effort, int requestChars, double seconds) =>
+            $"Agent 请求：model={model} effort={effort} 请求 {requestChars} 字，耗时 {seconds:0.0}s，finish={AgentReply.Reason(reply.FinishReason)}，" +
+            $"token 输入/输出/思考 = {AiClient.Get(reply.Usage, "prompt_tokens") ?? "-"}/{AiClient.Get(reply.Usage, "completion_tokens") ?? "-"}/" +
+            $"{AiClient.Get(AiClient.Get(reply.Usage, "completion_tokens_details"), "reasoning_tokens") ?? "-"}，" +
+            $"思考 {reply.ReasoningLength} 字，回复 {reply.ContentLength} 字，工具 {reply.Calls.Count} 个（参数 {reply.Calls.Values.Sum(c => c.ArgumentsLength)} 字）";
 
         /// <summary>
         /// 流式返回期间的进度：模型在准备哪个工具、在回复还是在思考，以及回复（没有时是思考）里最新的几句核心内容，
@@ -246,7 +279,14 @@ namespace OneNoteCodeHelper.Services.Agent
             if (data.Trim() == "[DONE]") { reply.Done = true; return; }
             var root = Parse(data);
             if (AiClient.Get(root, "error") != null) throw new AiException("Agent 接口在流中返回错误。");
-            if (!(AiClient.Get(root, "choices") is IList choices)) throw new AiException("Agent 流数据缺少 choices。");
+            var usage = AiClient.Get(root, "usage");
+            if (usage != null) reply.Usage = usage;
+            if (!(AiClient.Get(root, "choices") is IList choices))
+            {
+                // 有的网关把用量单独发一条，不带 choices。
+                if (usage != null) return;
+                throw new AiException("Agent 流数据缺少 choices。");
+            }
             foreach (var choice in choices)
             {
                 if (Convert.ToInt32(AiClient.Get(choice, "index") ?? 0) != 0) throw new AiException("Agent 只接受一个模型候选结果。");
@@ -286,6 +326,7 @@ namespace OneNoteCodeHelper.Services.Agent
             reply.Content = AiClient.Get(message, "content") as string ?? "";
             reply.Reasoning = AiClient.Get(message, "reasoning_content") as string ?? "";
             reply.FinishReason = AiClient.Get(choice, "finish_reason") as string;
+            reply.Usage = AiClient.Get(root, "usage");
             if (AiClient.Get(message, "tool_calls") is IList calls)
                 foreach (var c in calls) reply.Calls.Add(reply.Calls.Count, new AgentToolCall
                 { Id = AiClient.Get(c, "id") as string, Name = AiClient.Get(AiClient.Get(c, "function"), "name") as string,
