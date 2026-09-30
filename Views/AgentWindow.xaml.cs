@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,7 +11,6 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using OneNoteCodeHelper.Interop;
 using OneNoteCodeHelper.Services;
@@ -22,7 +20,7 @@ namespace OneNoteCodeHelper.Views
 {
     /// <summary>
     /// AI 助手窗口：「功能」下拉选 Agent 自定义排版，或 AI 配置里的文字功能（智能校正等），
-    /// 模型、思考强度也在这里选。页面和选区在打开窗口时固定。
+    /// 模型、思考强度也在这里选。页面和选区在打开窗口时固定。头部右上角的「AI 配置」打开配置窗口。
     ///
     /// 在 COM 代理进程的独立 STA 线程上 ShowDialog；真正的活（读页面、调接口、写回）在线程池上跑。
     /// </summary>
@@ -66,6 +64,8 @@ namespace OneNoteCodeHelper.Views
         private int _thoughtTurn;
         /// <summary>思考框跟着新内容滚到最下面；用户往上翻了就不跟，翻回最下面再接着跟。</summary>
         private bool _thinkingFollow = true;
+        /// <summary>开着的「AI 配置」窗口，没开时为 null。OneNote 关闭时先关它，不问要不要保存。</summary>
+        private AiSettingsWindow _settingsWindow;
         private bool _busy;
         private bool _closed;
         /// <summary>正在往下拉里填选项，这时的 SelectionChanged 不算用户改选。</summary>
@@ -90,9 +90,10 @@ namespace OneNoteCodeHelper.Views
             var limit = SystemParameters.WorkArea.Height - 16;
             if (Height > limit) Height = Math.Max(MinHeight, limit);
 
-            AppIcon.Source = LoadIcon("Agent");
+            AppIcon.Source = WindowIcons.Load("Agent");
             // 不设的话标题栏上是宿主进程（dllhost）的图标。
             if (AppIcon.Source != null) Icon = AppIcon.Source;
+            SettingsIcon.Source = WindowIcons.Load("AiConfig");
             var interop = new WindowInteropHelper(this);
             if (owner != IntPtr.Zero) interop.Owner = owner;
             SourceInitialized += (_, __) =>
@@ -130,7 +131,12 @@ namespace OneNoteCodeHelper.Views
         internal void CancelForShutdown()
         {
             _lifetime.Cancel();
-            if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished) Dispatcher.BeginInvoke(new Action(Close));
+            if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    _settingsWindow?.CloseWithoutSaving();
+                    Close();
+                }));
         }
 
         internal void WaitForJob()
@@ -228,10 +234,34 @@ namespace OneNoteCodeHelper.Views
             AddInLog.Info("Agent 窗口已重新读取 AI 配置。");
         }
 
-        private static DateTime ConfigStamp()
+        private static DateTime ConfigStamp() => AiConfigStore.Stamp();
+
+        /// <summary>
+        /// 在本窗口的线程上模态打开「AI 配置」窗口，居中在本窗口上，关掉后前台交还给本窗口。
+        /// 配置文件写坏了也照样打开，显示默认值和原因。关窗后按文件修改时间重新读，保存过的话下拉随即刷新。
+        /// </summary>
+        private void OnOpenSettings(object sender, RoutedEventArgs e)
         {
-            try { return File.GetLastWriteTimeUtc(AiConfigStore.ConfigPath); }
-            catch (Exception) { return DateTime.MinValue; }
+            if (_busy || _closed || _settingsWindow != null) return;
+            try
+            {
+                AiConfigStore.TryLoad(out var config, out var error);
+                _settingsWindow = new AiSettingsWindow(config, error, new WindowInteropHelper(this).Handle);
+                _settingsWindow.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                // 异常冒出去会连本窗口一起收掉，只在状态区说明。
+                AddInLog.Error("打开 AI 配置窗口失败。", ex);
+                if (!_closed) ShowOutcome(ErrorIcon, "AI 配置窗口打不开", "详情见日志：" + AddInLog.LogPath);
+                return;
+            }
+            finally
+            {
+                _settingsWindow = null;
+            }
+
+            RefreshConfig();
         }
 
         private async void OnExecute(object sender, RoutedEventArgs e)
@@ -242,7 +272,7 @@ namespace OneNoteCodeHelper.Views
             var function = TextFunction();
             var request = RequestText.Text.Trim();
             if (function == null && request.Length == 0) { ShowOutcome(WarningIcon, "请先输入需求。", null); return; }
-            if (string.IsNullOrWhiteSpace(config.ApiKey)) { ShowOutcome(WarningIcon, "请先在「AI 配置」中填写 ApiKey。", "保存后回到本窗口再点「执行」。"); return; }
+            if (string.IsNullOrWhiteSpace(config.ApiKey)) { ShowOutcome(WarningIcon, "请先在「AI 配置」中填写 ApiKey。", "点右上角的「AI 配置」填写，保存后再点「执行」。"); return; }
             var model = config.FindModel(_settings.AiModel).Id;
             var effort = AiEfforts.Normalize(_settings.AiEffort);
             var selectionOnly = SelectionScope.IsChecked == true;
@@ -525,6 +555,7 @@ namespace OneNoteCodeHelper.Views
         {
             _busy = value;
             ExecuteButton.IsEnabled = !value;
+            SettingsButton.IsEnabled = !value;
             CancelButton.IsEnabled = value;
             CancelButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
             UndoButton.Visibility = !value && _report?.CanUndo == true ? Visibility.Visible : Visibility.Collapsed;
@@ -671,33 +702,5 @@ namespace OneNoteCodeHelper.Views
         }
 
         private int ElapsedSeconds() => (int)Math.Round(_elapsed.Elapsed.TotalSeconds);
-
-        /// <summary>读嵌入资源里的图标（和功能区用的是同一张），找不到就不显示。</summary>
-        private static ImageSource LoadIcon(string name)
-        {
-            try
-            {
-                var assembly = typeof(AgentWindow).Assembly;
-                var resource = assembly.GetManifestResourceNames()
-                    .FirstOrDefault(n => n.EndsWith("." + name + ".png", StringComparison.OrdinalIgnoreCase));
-                if (resource == null) return null;
-
-                using (var stream = assembly.GetManifestResourceStream(resource))
-                {
-                    var image = new BitmapImage();
-                    image.BeginInit();
-                    image.CacheOption = BitmapCacheOption.OnLoad;
-                    image.StreamSource = stream;
-                    image.EndInit();
-                    image.Freeze();
-                    return image;
-                }
-            }
-            catch (Exception ex)
-            {
-                AddInLog.Warn("读取窗口图标失败：" + name, ex);
-                return null;
-            }
-        }
     }
 }

@@ -507,29 +507,6 @@ namespace OneNoteCodeHelper
             });
         }
 
-        /// <summary>
-        /// 用系统默认的程序打开 ai-settings.xml（没有就先生成默认的）。保存后切回 Agent 窗口时，
-        /// 窗口会重新读，新加、改名的功能和模型随即出现在下拉里。.xml 没有关联任何程序时退回记事本。
-        /// </summary>
-        public void OnOpenAiConfig(object control)
-        {
-            Guard("AI 配置", () =>
-            {
-                var path = AiConfigStore.EnsureFile();
-
-                try
-                {
-                    Process.Start(new ProcessStartInfo(path) { UseShellExecute = true })?.Dispose();
-                }
-                catch (System.ComponentModel.Win32Exception ex)
-                {
-                    AddInLog.Warn(".xml 没有可用的默认程序，改用记事本打开。", ex);
-                    Process.Start(new ProcessStartInfo("notepad.exe", "\"" + path + "\"") { UseShellExecute = false })
-                        ?.Dispose();
-                }
-            });
-        }
-
         public void OnOpenLog(object control)
         {
             Guard("打开日志", () =>

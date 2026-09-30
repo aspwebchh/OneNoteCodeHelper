@@ -1,0 +1,819 @@
+<Window x:Class="OneNoteCodeHelper.Views.AiSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AI 配置"
+        Width="820"
+        Height="640"
+        MinWidth="700"
+        MinHeight="540"
+        ResizeMode="CanResize"
+        FontFamily="Microsoft YaHei UI"
+        FontSize="13"
+        Foreground="#323130"
+        Background="#F3F2F1"
+        UseLayoutRounding="True"
+        TextOptions.TextFormattingMode="Display"
+        WindowStartupLocation="CenterScreen"
+        ShowInTaskbar="False">
+
+    <!--
+      ai-settings.xml 的图形界面，布局仿 Office「选项」对话框：左边选页，右边白卡片里改。
+      配色和控件样式同 Agent 窗口（OneNote 的浅灰底、白卡片、紫色主按钮）。类库里没有 App.xaml，样式只能就地定义。
+    -->
+    <Window.Resources>
+        <SolidColorBrush x:Key="Primary" Color="#7719AA" />
+        <SolidColorBrush x:Key="PrimaryHover" Color="#641592" />
+        <SolidColorBrush x:Key="PrimaryPressed" Color="#52117A" />
+        <SolidColorBrush x:Key="Border" Color="#C8C6C4" />
+        <SolidColorBrush x:Key="InputHover" Color="#A19F9D" />
+        <SolidColorBrush x:Key="ButtonBorder" Color="#8A8886" />
+        <SolidColorBrush x:Key="CardBorder" Color="#E1DFDD" />
+        <SolidColorBrush x:Key="Surface2" Color="#FAF9F8" />
+        <SolidColorBrush x:Key="Hover" Color="#F3F2F1" />
+        <SolidColorBrush x:Key="Pressed" Color="#EDEBE9" />
+        <SolidColorBrush x:Key="Text" Color="#323130" />
+        <SolidColorBrush x:Key="Muted" Color="#605E5C" />
+        <SolidColorBrush x:Key="Faint" Color="#A19F9D" />
+        <SolidColorBrush x:Key="Danger" Color="#A4262C" />
+
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+        </Style>
+
+        <!-- 每页顶上的标题和说明 -->
+        <Style x:Key="PageTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <!-- Agent 页里「预算」「接口兼容」这类小标题 -->
+        <Style x:Key="SectionLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{StaticResource Muted}" />
+        </Style>
+
+        <!-- 输入框上方或左边的字段名 -->
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{StaticResource Muted}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <!-- 字段下方的说明 -->
+        <Style x:Key="Hint" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="LineHeight" Value="18" />
+            <Setter Property="Foreground" Value="{StaticResource Muted}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <!-- 按钮：白底灰边，悬停、按下变灰；禁用时灰底淡字 -->
+        <Style x:Key="BaseButton" TargetType="Button">
+            <Setter Property="Height" Value="32" />
+            <Setter Property="MinWidth" Value="88" />
+            <Setter Property="Padding" Value="16,0" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="{StaticResource ButtonBorder}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource Hover}" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="{StaticResource Pressed}" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="{StaticResource Hover}" />
+                    <Setter Property="BorderBrush" Value="{StaticResource Hover}" />
+                    <Setter Property="Foreground" Value="{StaticResource Faint}" />
+                    <Setter Property="Cursor" Value="Arrow" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- 列表下面的小按钮 -->
+        <Style x:Key="SmallButton" TargetType="Button" BasedOn="{StaticResource BaseButton}">
+            <Setter Property="Height" Value="28" />
+            <Setter Property="MinWidth" Value="0" />
+            <Setter Property="Padding" Value="12,0" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+
+        <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource BaseButton}">
+            <Setter Property="Background" Value="{StaticResource Primary}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Primary}" />
+            <Setter Property="Foreground" Value="White" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource PrimaryHover}" />
+                    <Setter Property="BorderBrush" Value="{StaticResource PrimaryHover}" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="{StaticResource PrimaryPressed}" />
+                    <Setter Property="BorderBrush" Value="{StaticResource PrimaryPressed}" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="{StaticResource Hover}" />
+                    <Setter Property="BorderBrush" Value="{StaticResource Hover}" />
+                    <Setter Property="Foreground" Value="{StaticResource Faint}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- 输入框：白底灰边，悬停加深，获得焦点时描紫边 -->
+        <Style x:Key="InputBox" TargetType="TextBox">
+            <Setter Property="MinHeight" Value="30" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="{StaticResource Border}" />
+            <Setter Property="Padding" Value="6,5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border x:Name="Shell"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          Focusable="False" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource InputHover}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource Primary}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Shell" Property="Background" Value="{StaticResource Surface2}" />
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource CardBorder}" />
+                                <Setter Property="Foreground" Value="{StaticResource Muted}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 多行的提示词框：从顶上排，按回车换行 -->
+        <Style x:Key="MultiLineBox" TargetType="TextBox" BasedOn="{StaticResource InputBox}">
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+            <Setter Property="AcceptsReturn" Value="True" />
+            <Setter Property="AcceptsTab" Value="False" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+        </Style>
+
+        <!-- Key 框：外观和输入框一样 -->
+        <Style x:Key="PasswordInput" TargetType="PasswordBox">
+            <Setter Property="MinHeight" Value="30" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="{StaticResource Border}" />
+            <Setter Property="Padding" Value="6,5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="PasswordBox">
+                        <Border x:Name="Shell"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="Center"
+                                          Focusable="False" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource InputHover}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource Primary}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Office 样式的复选框：灰边方框，选中后紫底白勾 -->
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <Grid Background="{TemplateBinding Background}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border x:Name="Box"
+                                    Width="16"
+                                    Height="16"
+                                    VerticalAlignment="Center"
+                                    Background="White"
+                                    BorderBrush="{StaticResource Muted}"
+                                    BorderThickness="1"
+                                    CornerRadius="2"
+                                    SnapsToDevicePixels="True">
+                                <Path x:Name="Check"
+                                      Data="M 2.5,7 L 5.5,10 L 11.5,3.5"
+                                      Stroke="White"
+                                      StrokeThickness="1.8"
+                                      StrokeStartLineCap="Round"
+                                      StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round"
+                                      Visibility="Collapsed" />
+                            </Border>
+                            <ContentPresenter Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{StaticResource Text}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Box" Property="Background" Value="{StaticResource Primary}" />
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{StaticResource Primary}" />
+                                <Setter TargetName="Check" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{StaticResource Border}" />
+                                <Setter Property="Foreground" Value="{StaticResource Faint}" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 下拉框：外观和输入框一致，同 Agent 窗口 -->
+        <Style x:Key="PickerToggle" TargetType="ToggleButton">
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="ClickMode" Value="Press" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Shell"
+                                Background="White"
+                                BorderBrush="{StaticResource Border}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <Path Margin="0,0,10,0"
+                                  HorizontalAlignment="Right"
+                                  VerticalAlignment="Center"
+                                  Data="M 0,0 L 4,4 L 8,0"
+                                  Stroke="{StaticResource Muted}"
+                                  StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  StrokeLineJoin="Round" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource InputHover}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Shell" Property="BorderBrush" Value="{StaticResource Primary}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PickerItem" TargetType="ComboBoxItem">
+            <Setter Property="Padding" Value="10,6" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="Shell" Background="Transparent" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                            <ContentPresenter />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="{StaticResource Hover}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="{StaticResource Pressed}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="Picker" TargetType="ComboBox">
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="ItemContainerStyle" Value="{StaticResource PickerItem}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton Style="{StaticResource PickerToggle}"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />
+                            <ContentPresenter Margin="10,0,26,0"
+                                              HorizontalAlignment="Left"
+                                              VerticalAlignment="Center"
+                                              IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" />
+                            <Popup x:Name="PART_Popup"
+                                   Placement="Bottom"
+                                   HorizontalOffset="-8"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   PopupAnimation="Fade"
+                                   IsOpen="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}}">
+                                <Grid Margin="8,2,8,10"
+                                      MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                                      MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <Border Background="White" CornerRadius="4">
+                                        <Border.Effect>
+                                            <DropShadowEffect BlurRadius="10" ShadowDepth="2" Direction="270" Opacity="0.18" />
+                                        </Border.Effect>
+                                    </Border>
+                                    <Border Padding="0,4"
+                                            Background="White"
+                                            BorderBrush="{StaticResource CardBorder}"
+                                            BorderThickness="1"
+                                            CornerRadius="4"
+                                            SnapsToDevicePixels="True">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                            <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained" />
+                                        </ScrollViewer>
+                                    </Border>
+                                </Grid>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 左边的页面列表：选中项灰底、左侧一道紫条，同 Office「选项」对话框 -->
+        <Style x:Key="NavItem" TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="14,8" />
+            <Setter Property="Margin" Value="0,0,0,2" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Grid>
+                            <Border x:Name="Shell" Background="Transparent" CornerRadius="4" SnapsToDevicePixels="True" />
+                            <Border x:Name="Bar"
+                                    Width="3"
+                                    Margin="0,8"
+                                    HorizontalAlignment="Left"
+                                    Background="{StaticResource Primary}"
+                                    CornerRadius="1.5"
+                                    Visibility="Collapsed" />
+                            <ContentPresenter Margin="{TemplateBinding Padding}" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="{StaticResource Pressed}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="{StaticResource CardBorder}" />
+                                <Setter TargetName="Bar" Property="Visibility" Value="Visible" />
+                                <Setter Property="FontWeight" Value="SemiBold" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="NavList" TargetType="ListBox">
+            <Setter Property="ItemContainerStyle" Value="{StaticResource NavItem}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBox">
+                        <ItemsPresenter />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 模型、文字功能列表：白底灰边，选中项灰底加紫条 -->
+        <Style x:Key="ListRow" TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="12,6" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Grid>
+                            <Border x:Name="Shell" Background="Transparent" SnapsToDevicePixels="True" />
+                            <Border x:Name="Bar"
+                                    Width="3"
+                                    Margin="0,5"
+                                    HorizontalAlignment="Left"
+                                    Background="{StaticResource Primary}"
+                                    CornerRadius="1.5"
+                                    Visibility="Collapsed" />
+                            <ContentPresenter Margin="{TemplateBinding Padding}" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="{StaticResource Hover}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Shell" Property="Background" Value="{StaticResource Pressed}" />
+                                <Setter TargetName="Bar" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ListShell" TargetType="ListBox">
+            <Setter Property="ItemContainerStyle" Value="{StaticResource ListRow}" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBox">
+                        <Border Background="White"
+                                BorderBrush="{StaticResource Border}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <ScrollViewer Padding="0,4" Focusable="False" VerticalScrollBarVisibility="Auto">
+                                <ItemsPresenter />
+                            </ScrollViewer>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 细滚动条：只有滑块，没有箭头 -->
+        <Style x:Key="ScrollPage" TargetType="RepeatButton">
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RepeatButton">
+                        <Border Background="Transparent" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ScrollThumb" TargetType="Thumb">
+            <Setter Property="MinHeight" Value="24" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="Bar" Margin="2,0" Background="{StaticResource Border}" CornerRadius="3" />
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bar" Property="Background" Value="{StaticResource InputHover}" />
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="Bar" Property="Background" Value="{StaticResource Muted}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="ScrollBar">
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Vertical">
+                    <Setter Property="Width" Value="10" />
+                    <Setter Property="MinWidth" Value="10" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="ScrollBar">
+                                <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                    <Track.DecreaseRepeatButton>
+                                        <RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageUpCommand" />
+                                    </Track.DecreaseRepeatButton>
+                                    <Track.Thumb>
+                                        <Thumb Style="{StaticResource ScrollThumb}" />
+                                    </Track.Thumb>
+                                    <Track.IncreaseRepeatButton>
+                                        <RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageDownCommand" />
+                                    </Track.IncreaseRepeatButton>
+                                </Track>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="White" />
+            <Setter Property="BorderBrush" Value="{StaticResource CardBorder}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16,14,16,16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- ========== 头部：图标、标题、配置文件位置 ========== -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Image x:Name="AppIcon"
+                   Width="32"
+                   Height="32"
+                   VerticalAlignment="Center"
+                   RenderOptions.BitmapScalingMode="HighQuality" />
+            <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+                <TextBlock Text="AI 配置" FontSize="15" FontWeight="SemiBold" />
+                <TextBlock x:Name="PathText"
+                           Margin="0,1,0,0"
+                           FontSize="12"
+                           Foreground="{StaticResource Muted}"
+                           TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
+            </StackPanel>
+        </Grid>
+
+        <!-- 配置文件解析不了时的提示条 -->
+        <Border x:Name="LoadErrorBox"
+                Grid.Row="1"
+                Margin="0,12,0,0"
+                Padding="12,8"
+                Background="#FFF4CE"
+                BorderBrush="#F2E2A6"
+                BorderThickness="1"
+                CornerRadius="4"
+                Visibility="Collapsed">
+            <TextBlock x:Name="LoadErrorText" FontSize="12" LineHeight="18" TextWrapping="Wrap" />
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="150" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <ListBox x:Name="PageList" Style="{StaticResource NavList}" SelectionChanged="OnPageChanged">
+                <ListBoxItem Content="接口" />
+                <ListBoxItem Content="模型" />
+                <ListBoxItem Content="文字功能" />
+                <ListBoxItem Content="Agent" />
+            </ListBox>
+
+            <Border Grid.Column="1" Margin="12,0,0,0" Style="{StaticResource Card}">
+                <Grid>
+                    <!-- ========== 接口 ========== -->
+                    <ScrollViewer x:Name="ApiPage" VerticalScrollBarVisibility="Auto">
+                        <StackPanel Margin="20,16,20,20">
+                            <TextBlock Text="接口" Style="{StaticResource PageTitle}" />
+                            <TextBlock Margin="0,4,0,0" Style="{StaticResource Hint}"
+                                       Text="Agent 和文字功能共用的 OpenAI 兼容接口。" />
+
+                            <TextBlock Margin="0,18,0,6" Text="接口地址" Style="{StaticResource FieldLabel}" />
+                            <TextBox x:Name="ApiUrlBox" Style="{StaticResource InputBox}" />
+                            <TextBlock Margin="0,4,0,0" Style="{StaticResource Hint}"
+                                       Text="基础地址，插件会在后面加 /chat/completions；已写全该路径的地址也可以直接用。" />
+
+                            <TextBlock Margin="0,16,0,6" Text="API Key" Style="{StaticResource FieldLabel}" />
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <PasswordBox x:Name="ApiKeyBox" Style="{StaticResource PasswordInput}" />
+                                <TextBox x:Name="ApiKeyText" Style="{StaticResource InputBox}" Visibility="Collapsed" />
+                                <CheckBox x:Name="ShowKeyBox"
+                                          Grid.Column="1"
+                                          Margin="12,0,0,0"
+                                          Content="显示"
+                                          Checked="OnShowKeyChanged"
+                                          Unchecked="OnShowKeyChanged" />
+                            </Grid>
+                            <TextBlock Margin="0,4,0,0" Style="{StaticResource Hint}"
+                                       Text="以明文保存在配置文件里。不填时在 Agent 窗口点「执行」会提示。" />
+
+                            <TextBlock Margin="0,16,0,6" Text="请求超时（秒）" Style="{StaticResource FieldLabel}" />
+                            <TextBox x:Name="TimeoutBox" Width="140" HorizontalAlignment="Left" Style="{StaticResource InputBox}" />
+                            <TextBlock x:Name="TimeoutHint" Margin="0,4,0,0" Style="{StaticResource Hint}" />
+
+                            <TextBlock Margin="0,16,0,6" Text="最大输出 token" Style="{StaticResource FieldLabel}" />
+                            <TextBox x:Name="MaxTokensBox" Width="140" HorizontalAlignment="Left" Style="{StaticResource InputBox}" />
+                            <TextBlock x:Name="MaxTokensHint" Margin="0,4,0,0" Style="{StaticResource Hint}" />
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <!-- ========== 模型 ========== -->
+                    <Grid x:Name="ModelsPage" Margin="20,16,20,20" Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="模型" Style="{StaticResource PageTitle}" />
+                        <TextBlock Grid.Row="1" Margin="0,4,0,0" Style="{StaticResource Hint}"
+                                   Text="Agent 窗口「模型」下拉里的选项，填接口的模型名，按这里的顺序排。窗口里选过的模型被删掉后改用第一个。" />
+                        <ListBox x:Name="ModelList"
+                                 Grid.Row="2"
+                                 Margin="0,14,0,0"
+                                 Style="{StaticResource ListShell}"
+                                 SelectionChanged="OnModelSelectionChanged" />
+                        <StackPanel Grid.Row="3" Margin="0,8,0,0" Orientation="Horizontal">
+                            <Button x:Name="RemoveModelButton" Content="删除" Style="{StaticResource SmallButton}" Click="OnRemoveModel" />
+                            <Button x:Name="ModelUpButton" Margin="8,0,0,0" Content="上移" Style="{StaticResource SmallButton}" Click="OnMoveModelUp" />
+                            <Button x:Name="ModelDownButton" Margin="8,0,0,0" Content="下移" Style="{StaticResource SmallButton}" Click="OnMoveModelDown" />
+                        </StackPanel>
+                        <Grid Grid.Row="4" Margin="0,16,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="NewModelBox" Style="{StaticResource InputBox}" KeyDown="OnNewModelKeyDown" />
+                            <Button Grid.Column="1" Margin="8,0,0,0" Content="添加模型" Style="{StaticResource BaseButton}" Height="30" Click="OnAddModel" />
+                        </Grid>
+                    </Grid>
+
+                    <!-- ========== 文字功能 ========== -->
+                    <Grid x:Name="FunctionsPage" Margin="20,16,20,20" Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="文字功能" Style="{StaticResource PageTitle}" />
+                        <TextBlock Grid.Row="1" Margin="0,4,0,0" Style="{StaticResource Hint}"
+                                   Text="Agent 窗口「功能」下拉里排在「自定义排版（Agent）」后面的选项，AI 逐段改文字后直接写回。" />
+                        <Grid Grid.Row="2" Margin="0,14,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="190" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <ListBox x:Name="FunctionList"
+                                         Style="{StaticResource ListShell}"
+                                         SelectionChanged="OnFunctionSelectionChanged">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                                <!-- 四个按钮平分列表宽度，每个只有四十来像素，不留内边距 -->
+                                <UniformGrid Grid.Row="1" Margin="0,8,0,0" Columns="4">
+                                    <Button Content="添加" Style="{StaticResource SmallButton}" Padding="0" Click="OnAddFunction" />
+                                    <Button x:Name="RemoveFunctionButton" Margin="4,0,0,0" Content="删除" Style="{StaticResource SmallButton}" Padding="0" Click="OnRemoveFunction" />
+                                    <Button x:Name="FunctionUpButton" Margin="4,0,0,0" Content="上移" Style="{StaticResource SmallButton}" Padding="0" Click="OnMoveFunctionUp" />
+                                    <Button x:Name="FunctionDownButton" Margin="4,0,0,0" Content="下移" Style="{StaticResource SmallButton}" Padding="0" Click="OnMoveFunctionDown" />
+                                </UniformGrid>
+                                <Button x:Name="AddBuiltInButton"
+                                        Grid.Row="2"
+                                        Margin="0,6,0,0"
+                                        Content="补回内置功能"
+                                        Style="{StaticResource SmallButton}"
+                                        ToolTip="把配置里没有的内置功能（智能校正、错别字修复、排版优化）按默认提示词加回来"
+                                        Click="OnAddBuiltInFunctions" />
+                            </Grid>
+
+                            <Grid x:Name="FunctionEditor" Grid.Column="1" Margin="16,0,0,0">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="名称" Style="{StaticResource FieldLabel}" />
+                                <TextBox x:Name="FunctionNameBox"
+                                         Grid.Row="1"
+                                         Margin="0,6,0,0"
+                                         Style="{StaticResource InputBox}"
+                                         TextChanged="OnFunctionEdited" />
+                                <CheckBox x:Name="FunctionBlankLinesBox"
+                                          Grid.Row="2"
+                                          Margin="0,10,0,0"
+                                          Content="顺带删掉多余的空行（由插件处理，不经过 AI）"
+                                          Checked="OnFunctionEdited"
+                                          Unchecked="OnFunctionEdited" />
+                                <TextBlock Grid.Row="3" Margin="0,14,0,6" Text="提示词" Style="{StaticResource FieldLabel}" />
+                                <TextBox x:Name="FunctionPromptBox"
+                                         Grid.Row="4"
+                                         Style="{StaticResource MultiLineBox}"
+                                         TextChanged="OnFunctionEdited" />
+                                <TextBlock Grid.Row="5" Margin="0,6,0,0" Style="{StaticResource Hint}"
+                                           Text="只需写清楚要做什么。输入输出的 JSON 格式、只返回改动的段落、不许合并拆分段落等约定由插件自动接在后面。" />
+                            </Grid>
+                        </Grid>
+                    </Grid>
+
+                    <!-- ========== Agent：数值和开关按 AgentOptions 的表在后台代码里生成 ========== -->
+                    <ScrollViewer x:Name="AgentPage" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+                        <StackPanel Margin="20,16,20,20">
+                            <TextBlock Text="Agent" Style="{StaticResource PageTitle}" />
+                            <TextBlock Margin="0,4,0,0" Style="{StaticResource Hint}"
+                                       Text="「自定义排版（Agent）」的预算和工具开关，下次点「执行」时生效。" />
+
+                            <TextBlock Margin="0,18,0,0" Text="预算" Style="{StaticResource SectionLabel}" />
+                            <TextBlock Margin="0,4,0,10" Style="{StaticResource Hint}"
+                                       Text="超出后停止并丢弃未提交的草稿。默认值按 1M token 上下文估算，用上下文较短的模型（如 128K）时把页面字数和请求字符上限调小，比如 120000。任务总时限管整个任务，「接口」页的超时管每次请求。" />
+                            <StackPanel x:Name="AgentNumbersPanel" />
+
+                            <TextBlock Margin="0,14,0,0" Text="默认字体" Style="{StaticResource SectionLabel}" />
+                            <TextBlock Margin="0,4,0,8" Style="{StaticResource Hint}"
+                                       Text="设置正文、标题等样式时用的字体；没装时自动换成其中已装的一种。" />
+                            <ComboBox x:Name="FontPicker" Width="200" HorizontalAlignment="Left" Style="{StaticResource Picker}" />
+
+                            <TextBlock Margin="0,18,0,0" Text="格式工具" Style="{StaticResource SectionLabel}" />
+                            <TextBlock Margin="0,4,0,8" Style="{StaticResource Hint}"
+                                       Text="关掉后对应的内容只保护、不修改。其他 Office 版本回存有问题时可以分别关闭。" />
+                            <UniformGrid x:Name="FormatSwitchesPanel" Columns="2" />
+
+                            <TextBlock Margin="0,14,0,0" Text="结构工具" Style="{StaticResource SectionLabel}" />
+                            <TextBlock Margin="0,4,0,8" Style="{StaticResource Hint}"
+                                       Text="改变段落结构的工具，只在需求里提到时使用。不想让 Agent 动段落结构时全部关掉。" />
+                            <UniformGrid x:Name="StructureSwitchesPanel" Columns="2" />
+
+                            <TextBlock Margin="0,14,0,0" Text="接口兼容" Style="{StaticResource SectionLabel}" />
+                            <TextBlock Margin="0,4,0,8" Style="{StaticResource Hint}"
+                                       Text="兼容接口不接受这些扩展参数时再关掉。模型本身必须支持工具调用。" />
+                            <UniformGrid x:Name="CompatSwitchesPanel" Columns="2" />
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- ========== 底部：手改 XML 的入口、出错说明、取消 / 保存 ========== -->
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel VerticalAlignment="Center">
+                <TextBlock FontSize="12">
+                    <Hyperlink Foreground="{StaticResource Primary}" Click="OnOpenInEditor">用文本编辑器打开</Hyperlink>
+                </TextBlock>
+                <TextBlock x:Name="StatusText"
+                           Margin="0,4,12,0"
+                           FontSize="12"
+                           Foreground="{StaticResource Danger}"
+                           TextWrapping="Wrap"
+                           Visibility="Collapsed" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button Content="取消" Style="{StaticResource BaseButton}" Margin="0,0,8,0" Click="OnCancel" />
+                <Button Content="保存" Style="{StaticResource PrimaryButton}" Click="OnSave" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

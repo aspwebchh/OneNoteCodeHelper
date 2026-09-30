@@ -143,7 +143,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (_config.MaxTokens > 0) body["max_tokens"] = _config.MaxTokens;
             var json = AgentJson.Serialize(body);
             if (json.Length > _config.Agent.MaxRequestChars)
-                throw new AiException($"Agent 会话达到上下文预算（约 {json.Length} 字，上限 {_config.Agent.MaxRequestChars}），未提交草稿。可以缩小处理范围，或在 ai-settings.xml 的 Agent 节点调大 MaxRequestChars。");
+                throw new AiException($"Agent 会话达到上下文预算（约 {json.Length} 字，上限 {_config.Agent.MaxRequestChars}），未提交草稿。可以缩小处理范围，或在「AI 配置」的 Agent 页调大「请求字符上限」（MaxRequestChars）。");
             using (var total = new CancellationTokenSource(TimeSpan.FromSeconds(_config.TimeoutSeconds)))
             using (var idle = new CancellationTokenSource(TimeSpan.FromSeconds(AiClient.IdleTimeoutSeconds)))
             using (var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, total.Token, idle.Token))

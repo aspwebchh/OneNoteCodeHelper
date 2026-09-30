@@ -556,6 +556,45 @@ internal static class Program
             Equal(60, c.Agent.MaxTurns); True(!c.Agent.ReplayReasoning); True(c.Agent.EnableMixedOutlines);
             Equal(24, AgentOptions.Parse(null).MaxTurns); Equal(96, AgentOptions.Parse(null).MaxToolCalls);
         });
+        Test("AI settings window shows every option and builds the same configuration back", () =>
+        {
+            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://gw.test/v1</ApiUrl><ApiKey>k</ApiKey><TimeoutSeconds>90</TimeoutSeconds><MaxTokens>0</MaxTokens>" +
+                "<Agent><MaxTurns>30</MaxTurns><EnableMoves>false</EnableMoves><SendThinking>false</SendThinking><FontFamily>Arial</FontFamily></Agent>" +
+                "<Models><Model id='m1'/><Model id='m2'/></Models><Functions><Function name='甲' removeExtraBlankLines='true'><Prompt>第一行\n第二行</Prompt></Function><Function name='乙'><Prompt>p</Prompt></Function></Functions></AiConfig>"));
+            var window = new OneNoteCodeHelper.Views.AiSettingsWindow(c, null, IntPtr.Zero);
+            Equal(AgentOptions.Switches.Length, window.FormatSwitchesPanel.Children.Count + window.StructureSwitchesPanel.Children.Count + window.CompatSwitchesPanel.Children.Count);
+            Equal(AgentOptions.Numbers.Length, window.AgentNumbersPanel.Children.Count);
+            var ok = window.TryBuildConfig(out var built);
+            Equal("", window.StatusText.Text); True(ok);
+            Equal("https://gw.test/v1|k|90|0", $"{built.ApiUrl}|{built.ApiKey}|{built.TimeoutSeconds}|{built.MaxTokens}");
+            Equal("m1,m2", string.Join(",", built.Models.Select(m => m.Id)));
+            Equal("甲=第一行\n第二行=True|乙=p=False", string.Join("|", built.Functions.Select(f => f.Name + "=" + f.Prompt + "=" + f.RemoveExtraBlankLines)));
+            foreach (var option in AgentOptions.Numbers) Equal(option.Get(c.Agent), option.Get(built.Agent));
+            foreach (var option in AgentOptions.Switches) Equal(option.Get(c.Agent), option.Get(built.Agent));
+            Equal("Arial", built.Agent.FontFamily);
+
+            string Rejected() => window.TryBuildConfig(out _) ? "accepted" : window.StatusText.Text;
+            window.ApiUrlBox.Text = "ftp://gw.test";
+            Equal("接口地址要填以 http:// 或 https:// 开头的完整地址。", Rejected());
+            window.ApiUrlBox.Text = "https://gw.test/v1";
+            window.TimeoutBox.Text = "5";
+            Equal("请求超时要填 10–3600 之间的整数。", Rejected());
+            window.TimeoutBox.Text = "90";
+            window.FunctionList.SelectedIndex = 1;
+            Equal("乙|p|False", $"{window.FunctionNameBox.Text}|{window.FunctionPromptBox.Text}|{window.FunctionBlankLinesBox.IsChecked}");
+            window.FunctionNameBox.Text = " 甲 ";
+            Equal("有两个文字功能都叫「甲」，改一个名字。", Rejected());
+            window.FunctionNameBox.Text = AiConfigStore.AgentFunctionName;
+            Equal("「" + AiConfigStore.AgentFunctionName + "」是 Agent 自己的名字，文字功能换一个名字。", Rejected());
+        });
+        Test("Agent window has the AI settings entry in its header", () =>
+        {
+            var page = Page(Paragraph("a", "正文"));
+            var window = new OneNoteCodeHelper.Views.AgentWindow(new FakePage(page), "page", page.ToString(), AiConfigStore.Default, new AddInSettings(), IntPtr.Zero);
+            True(window.SettingsButton.IsEnabled);
+            True(window.SettingsIcon.Source != null);
+            window.Close();
+        });
         Test("code classification: plain text, unhighlighted code, code box and inline code", () =>
         {
             var mono = Paragraph("m", "int x = 1;"); mono.SetAttributeValue("style", "font-family:Consolas");

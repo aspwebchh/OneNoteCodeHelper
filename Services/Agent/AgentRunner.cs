@@ -107,7 +107,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         progress?.Report(new AgentProgress { Turn = turn + 1, Status = "模型正在分析页面…", Thinking = "" });
                         var used = AgentJson.Serialize(messages).Length;
                         if (used > options.MaxRequestChars)
-                            throw new AiException($"Agent 上下文预算已用完（约 {used} 字，上限 {options.MaxRequestChars}），没有提交草稿。可以缩小处理范围，或在 ai-settings.xml 的 Agent 节点调大 MaxRequestChars。");
+                            throw new AiException($"Agent 上下文预算已用完（约 {used} 字，上限 {options.MaxRequestChars}），没有提交草稿。可以缩小处理范围，或在「AI 配置」的 Agent 页调大「请求字符上限」（MaxRequestChars）。");
                         var definitions = last ? tools.DefinitionsOf("finish_edit") : tools.Definitions;
                         var reply = await _client.CompleteAsync(messages, definitions, progress, linked.Token).ConfigureAwait(false);
                         reply.Validate();
@@ -160,7 +160,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             if (tools.Report != null)
                             {
                                 if (wrapUp)
-                                    tools.Report.Message += "\n已用完 Agent 轮数，提交的是到此为止的草稿；还有没处理的需求时，可以缩小范围再执行，或在 ai-settings.xml 的 Agent 节点调大 MaxTurns。";
+                                    tools.Report.Message += "\n已用完 Agent 轮数，提交的是到此为止的草稿；还有没处理的需求时，可以缩小范围再执行，或在「AI 配置」的 Agent 页调大「最多轮数」（MaxTurns）。";
                                 AddInLog.Info($"Agent 完成：工具 {count} 次，修改 {tools.Report.Applied}，修正文字 {tools.Report.TextFixes.Count}，代码框 {tools.Report.CodeBlocks}，" +
                                     $"表格 {tools.Report.Tables}，转表格 {tools.Report.TextTables}，删空行 {tools.Report.Removed}，移动 {tools.Report.Moved}，缩进 {tools.Report.Indented}，" +
                                     $"插入 {tools.Report.Inserted}，合并文本框 {tools.Report.Merged}，冲突 {tools.Report.Conflicts}，未验证 {tools.Report.Unverified}。");
@@ -168,7 +168,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             }
                         }
                     }
-                    throw new AiException($"Agent 达到最大轮数（{options.MaxTurns}），没有提交草稿。可以缩小范围、明确需求，或在 ai-settings.xml 的 Agent 节点调大 MaxTurns。");
+                    throw new AiException($"Agent 达到最大轮数（{options.MaxTurns}），没有提交草稿。可以缩小范围、明确需求，或在「AI 配置」的 Agent 页调大「最多轮数」（MaxTurns）。");
                 }
                 catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellation.IsCancellationRequested)
                 { throw new AiException("Agent 达到任务总时限，没有继续执行。"); }

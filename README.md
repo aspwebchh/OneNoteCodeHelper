@@ -22,7 +22,9 @@ OneNote 桌面版的 COM 外接程序，把笔记里的代码渲染成带底色�
 | 控件 | 作用 |
 |---|---|
 | Agent | 打开 AI 助手窗口，在窗口里选功能、模型、思考强度和范围（当前页 / 选中段落），处理中可以取消 |
-| AI 配置 | 用系统默认的程序（.xml 关联的编辑器）打开配置文件；保存后切回 Agent 窗口，下拉随即刷新，下次执行使用新配置 |
+
+Agent 窗口右上角的「AI 配置」打开配置窗口，分「接口」「模型」「文字功能」「Agent」四页设置，保存后写回配置文件（见下面「AI 配置文件」）。
+关掉配置窗口回到 Agent 窗口，下拉随即刷新，下次执行使用新配置。处理中这个按钮不可用。
 
 Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 
@@ -37,7 +39,7 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 
 ### 文字功能（智能校正等）
 
-在 Agent 窗口的「功能」里选一个文字功能，需求框的位置换成这个功能的提示词（只读，在「AI 配置」里改），点「执行」后**直接写回**。
+在 Agent 窗口的「功能」里选一个文字功能，需求框的位置换成这个功能的提示词（只读，在「AI 配置」的「文字功能」页改），点「执行」后**直接写回**。
 范围选「当前页」处理整页（含标题）；打开窗口前选中了文字时可以选「选中段落」，只处理选中文字所在的段落。
 
 - 只改段内文字，不合并、不拆分段落。改动按字符合并回原段落，**加粗、颜色、链接、列表和缩进都保留**；
@@ -59,7 +61,7 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 
 ### Agent 页面排版
 
-在「AI 配置」中填写接口地址和 Key，然后点击「Agent」，在「功能」里选「自定义排版（Agent）」，「模型」选一个支持 Chat Completions `tools` 的模型。
+点击「Agent」，先在窗口右上角「AI 配置」的「接口」页填写接口地址和 Key，然后在「功能」里选「自定义排版（Agent）」，「模型」选一个支持 Chat Completions `tools` 的模型。
 窗口固定打开时的页面；之后切换 OneNote 页面，Agent 仍处理窗口里显示的目标页。
 输入需求并点击「执行」，例如：
 
@@ -119,7 +121,9 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 
 ### AI 配置文件
 
-`%APPDATA%\OneNoteCodeHelper\ai-settings.xml`，第一次点「AI 配置」时生成，里面每一项都有注释：
+`%APPDATA%\OneNoteCodeHelper\ai-settings.xml`。平时在 Agent 窗口右上角的「AI 配置」里改，配置窗口的每一项都对应这个文件里的一个字段（Agent 页的开关，鼠标停上去能看到对应的节点名）。
+文件在窗口第一次保存时生成，里面每一项都有注释。想直接改 XML 时，点窗口左下角的「用文本编辑器打开」：
+用系统默认的程序（.xml 关联的编辑器，没有就用记事本）打开，同时关掉窗口，免得两边同时改。
 
 | 字段 | 说明 |
 |---|---|
@@ -129,17 +133,27 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 | `MaxTokens` | 单次请求最多输出多少 token（含思考过程），默认 16384，0 表示用接口默认值 |
 | `Models/Model` | Agent 窗口「模型」下拉的选项，`id` 是接口的模型名，下拉里直接显示它 |
 | `Functions/Function` | Agent 窗口「功能」下拉里的文字功能，`name` 显示名（不要和「自定义排版（Agent）」重名，重名的会被跳过）、`Prompt` 提示词。`removeExtraBlankLines="true"` 表示顺带删多余的空行；不写时和同名的内置功能一致（「智能校正」「排版优化」默认开，旧配置里的「错别字 + 排版」也继续默认开），写 `false` 关掉 |
-| `Agent` | 可选的 Agent 配置；旧文件没有此节点也能使用默认值，不会自动重写已有配置 |
+| `Agent` | 可选的 Agent 配置；旧文件没有此节点也能使用默认值 |
 
 提示词只需写清楚要做什么。输入输出的 JSON 格式、只返回改动的段落、每段附一份改动说明、不许合并拆分段落、
 代码网址保持原样这些约定由插件自动接在后面（见 `AiOptimizer.Protocol`），改提示词不会把格式弄坏。
 
-这份文件和 `settings.xml` 分开放，是因为 `settings.xml` 在每次切功能区选项时都会被整体重写，
-手改的 Key、提示词放在那里会被覆盖。插件只在文件不存在时写一次默认值，之后只读。
-所以以后新增的内置功能（比如「智能校正」）不会自动进旧的配置文件：自己在 `Functions` 里加一项，
-或者把文件删掉让插件重新生成（Key 要重填）。
+窗口保存时在原文件上就地改，不整个重写：
 
-Agent 可在 `AiConfig` 根节点内增加下列配置。改完保存后，回到 Agent 窗口点「执行」时生效：
+- 手写的注释和窗口里没有的节点都保留。`Models`、`Functions` 两节按窗口里的列表重建，这两节里面的注释不保留；
+  `removeExtraBlankLines` 一律写明 `true` 或 `false`。
+- 原来没有 `Agent` 节点时，Agent 页的各项都是默认值就不加；改了其中一项才加上整个节点。
+- 先写临时文件再替换，Agent 窗口这时去读也不会读到写了一半的文件。
+- XML 写坏了读不了时，窗口顶部会提示并显示默认值；保存时先把原文件备份成 `ai-settings.xml.bak`，再重新写一份。
+- 窗口开着时文件在别处被改过：窗口里没有改动就切回来时自动重新读；有改动的话，保存前先确认是否覆盖。
+- 保存前会校验：接口地址要是 http(s) 地址，数值要在下面列的范围内，模型和功能至少各一个、名称不能重复，提示词不能为空。
+
+这份文件和 `settings.xml` 分开放，是因为 `settings.xml` 在每次切功能区选项时都会被整体重写，
+手改的 Key、提示词放在那里会被覆盖。插件自己只在文件不存在时写默认值，其余时候只有在窗口里点保存才会改它。
+所以以后新增的内置功能（比如「智能校正」）不会自动进旧的配置文件：在「文字功能」页点「补回内置功能」，
+或者自己在 `Functions` 里加一项。
+
+Agent 可在 `AiConfig` 根节点内增加下列配置，也就是「AI 配置」窗口 Agent 页里的各项。改完保存后，回到 Agent 窗口点「执行」时生效：
 
 ```xml
 <Agent>
@@ -266,7 +280,7 @@ Services/
   AddInSettings.cs          设置与持久化
   AddInLog.cs               文件日志
   RenderDiagnostics.cs      不碰 OneNote 就能跑通渲染链路的诊断入口（AI 助手的测试也走这里）
-  AiConfig.cs               ai-settings.xml 的模型与读写，思考强度的五档及其请求参数
+  AiConfig.cs               ai-settings.xml 的模型与读写（保存时就地更新、保留注释），思考强度的五档及其请求参数
   AiClient.cs               Chat Completions 接口（HttpClient + JavaScriptSerializer，流式 SSE）
   AiOptimizer.cs            文字功能的编排：读段落 → 分批并发问 AI → 写回；固定的输入输出约定
   LiveText.cs               Agent 窗口的思考摘录（挑出最新的中文核心句），以及边收边数 AI 已返回几段修改的 JSON 扫描
@@ -289,12 +303,14 @@ Views/
   InsertCodeWindow.xaml     插入代码窗口
   CodePreviewRenderer.cs    用同一套 token 流渲染 WPF 预览
   AgentWindow.xaml          AI 助手窗口：功能、模型、思考强度、范围，Agent 需求或文字功能提示词，进度、结果和撤销
+  AiSettingsWindow.xaml     AI 配置窗口：接口、模型、文字功能、Agent 四页，保存时写回 ai-settings.xml
+  WindowIcons.cs            窗口图标，和功能区按钮共用嵌入资源里的图片
 install.ps1                 一键构建 + 安装 / 卸载
 uninstall.ps1               一键卸载入口
 Tools/register.ps1          只做注册这一步
 Tools/unregister.ps1        只做注销这一步
 Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-samples/<语言 id>/ 下
-Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出解析；加 -Live 用本机配置真调一次接口
+Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出解析、配置保存；加 -Live 用本机配置真调一次接口
 Tools/highlight-selection-test.ps1  「高亮选中」回归测试：认选区、缩进的段落、换成代码框
 Tools/agent-test.ps1        Agent 离线回归，不调用真实接口或 OneNote
 Tools/agent-format-probe.ps1  显式创建专用测试分区和测试页，验证真实 OneNote 格式往返

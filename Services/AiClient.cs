@@ -154,7 +154,7 @@ namespace OneNoteCodeHelper.Services
                     {
                         throw new AiException(
                             $"AI 接口 {config.TimeoutSeconds} 秒内没有返回完，已超时。可以少选一些内容、降低思考强度，" +
-                            "或者在「AI 配置」里调大 TimeoutSeconds。");
+                            "或者在「AI 配置」的「接口」页调大请求超时（TimeoutSeconds）。");
                     }
 
                     throw new AiException(responded

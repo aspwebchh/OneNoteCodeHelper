@@ -172,6 +172,36 @@
             </Style.Triggers>
         </Style>
 
+        <!-- 头部右上角的「AI 配置」：没有边框，悬停、按下才显出底色。窗口底色就是 Hover，这里要再深一档才看得出来。禁用时整体变淡 -->
+        <Style x:Key="HeaderButton" TargetType="Button">
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="Foreground" Value="{StaticResource Text}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="4" SnapsToDevicePixels="True">
+                            <ContentPresenter Margin="{TemplateBinding Padding}" VerticalAlignment="Center" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource CardBorder}" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="{StaticResource Border}" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Opacity" Value="0.45" />
+                    <Setter Property="Cursor" Value="Arrow" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
         <!-- 需求输入框和提示词框：白底灰边，悬停加深，获得焦点时描紫边；只读的提示词框用浅灰底 -->
         <Style x:Key="InputBox" TargetType="TextBox">
             <Setter Property="Foreground" Value="{StaticResource Text}" />
@@ -432,11 +462,12 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- ========== 头部：图标、标题、目标页 ========== -->
+        <!-- ========== 头部：图标、标题、目标页，右上角是「AI 配置」 ========== -->
         <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
             <Image x:Name="AppIcon"
@@ -456,6 +487,24 @@
                            Foreground="{StaticResource Muted}"
                            TextTrimming="CharacterEllipsis" />
             </StackPanel>
+
+            <!-- 处理中不可用：配置在点「执行」时已经取定，模态的配置窗口还会挡住「取消」 -->
+            <Button x:Name="SettingsButton"
+                    Grid.Column="2"
+                    Margin="12,0,-4,0"
+                    VerticalAlignment="Center"
+                    Style="{StaticResource HeaderButton}"
+                    ToolTip="设置接口、模型、提示词和 Agent 选项"
+                    Click="OnOpenSettings">
+                <StackPanel Orientation="Horizontal">
+                    <Image x:Name="SettingsIcon"
+                           Width="16"
+                           Height="16"
+                           VerticalAlignment="Center"
+                           RenderOptions.BitmapScalingMode="HighQuality" />
+                    <TextBlock Margin="6,0,0,0" VerticalAlignment="Center" Text="AI 配置" />
+                </StackPanel>
+            </Button>
         </Grid>
 
         <!-- ========== 卡片：功能、模型、思考、范围、需求 ========== -->

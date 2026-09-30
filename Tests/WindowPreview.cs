@@ -3,6 +3,8 @@ using System.IO;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Xml;
+using System.Xml.Linq;
 using Microsoft.Office.Interop.OneNote;
 using OneNoteCodeHelper.Services;
 using OneNoteCodeHelper.Services.Agent;
@@ -13,6 +15,7 @@ internal static class WindowPreview
     // 只渲染内存中的窗口内容，不启动 OneNote、不调用接口、不显示原生窗口。
     // 出几张图：Agent 自定义排版、选了第一个文字功能；模拟处理中：Agent 第 3 轮（前两轮摘录留着）、Agent 刚开始还没有输出、
     // 文字功能（思考框占满）、思考内容超出思考框（滚到最下面、顶上渐隐）；Agent 做完（步骤和结果）。都按窗口默认大小渲染，几张应一样高。
+    // 另外是 AI 配置窗口的四页，以及配置文件读不了、保存前校验不过时的样子。
     internal static int Render(string directory)
     {
         Directory.CreateDirectory(directory);
@@ -32,7 +35,35 @@ internal static class WindowPreview
             "第 9 段的引用块字号偏大，改成和正文一致。\n表格里的文字不动，只调整表格前后的间距。\n第 12 段有错别字「帐号」，改成「账号」。",
             "接下来先读取第 4 到第 12 段，确认列表缩进不受影响。\n第 7 段是代码，保持等宽字体不动。\n最后核对一遍标题层级，再提交草稿。"));
         RenderOne(directory, "agent-window-done.png", xml, SimulateDone);
+        for (var page = 0; page < 4; page++)
+        {
+            var index = page;
+            RenderSettings(directory, $"ai-settings-{index}.png", AiConfigStore.Default, null, window => window.ShowPage(index));
+        }
+
+        // Agent 页滚到底：三组开关。
+        RenderSettings(directory, "ai-settings-3-switches.png", AiConfigStore.Default, null, window =>
+        {
+            window.ShowPage(3);
+            window.AgentPage.ScrollToEnd();
+        });
+
+        // 配置文件读不了时的提示条，以及保存前校验不过时底部的红字（配置里有和 Agent 同名的功能）。
+        var invalid = AiConfigStore.Parse(XElement.Parse("<AiConfig><Functions><Function name='智能校正'><Prompt>p</Prompt></Function>" +
+            "<Function name='" + AiConfigStore.AgentFunctionName + "'><Prompt>p</Prompt></Function></Functions></AiConfig>"));
+        RenderSettings(directory, "ai-settings-errors.png", invalid, new XmlException("根级别上的数据无效。 第 1 行，位置 1。"),
+            window => window.TryBuildConfig(out _));
         return 0;
+    }
+
+    /// <summary>
+    /// AI 配置窗口的一页。不关窗：界面改动过时关窗会弹框问要不要保存。
+    /// </summary>
+    private static void RenderSettings(string directory, string fileName, AiConfig config, Exception loadError, Action<AiSettingsWindow> setup)
+    {
+        var window = new AiSettingsWindow(config, loadError, IntPtr.Zero);
+        setup?.Invoke(window);
+        Snap(window, directory, fileName);
     }
 
     /// <summary>Agent 做完：思考框收起，步骤留着，下面是结果。</summary>
@@ -105,6 +136,12 @@ internal static class WindowPreview
         var settings = new AddInSettings { AiModel = "example-model", AiEffort = "medium" };
         var window = new AgentWindow(new NoAccess(), "preview", xml, AiConfigStore.Default, settings, IntPtr.Zero);
         setup?.Invoke(window);
+        Snap(window, directory, fileName);
+        window.Close();
+    }
+
+    private static void Snap(System.Windows.Window window, string directory, string fileName)
+    {
         // 按默认大小渲染：客户区约为窗口宽度减去 16px 边框、高度减去 39px 标题栏和边框。
         var width = (int)window.Width - 16;
         var height = (int)window.Height - 39;
@@ -125,7 +162,6 @@ internal static class WindowPreview
         var path = Path.Combine(directory, fileName);
         using (var file = File.Create(path)) encoder.Save(file);
         Console.WriteLine(path);
-        window.Close();
     }
 
     private sealed class NoAccess : IOneNotePageAccess

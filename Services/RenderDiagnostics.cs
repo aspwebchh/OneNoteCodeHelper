@@ -279,10 +279,33 @@ namespace OneNoteCodeHelper.Services
                 .Select(f => f.Name + "=" + f.RemoveExtraBlankLines));
         }
 
-        /// <summary>第一次点「AI 配置」时生成的那份默认配置。</summary>
+        /// <summary>配置文件不存在时生成的那份默认配置。</summary>
         internal static string DefaultAiConfigXml()
         {
             return AiConfigStore.BuildDefaultDocument().ToString();
+        }
+
+        /// <summary>按「AI 配置」窗口保存的方式，把 configXml 读出的配置写进 existingXml，返回写完的 XML。</summary>
+        internal static string ApplyAiConfig(string existingXml, string configXml)
+        {
+            var document = XDocument.Parse(existingXml);
+            AiConfigStore.Apply(document, AiConfigStore.Parse(XElement.Parse(configXml)));
+            return document.ToString();
+        }
+
+        /// <summary>把 configXml 读出的配置保存到 path（测试用的临时文件，不碰本机配置），返回保存后的文件内容。</summary>
+        internal static string SaveAiConfigFile(string path, string configXml)
+        {
+            AiConfigStore.Save(AiConfigStore.Parse(XElement.Parse(configXml)), path);
+            return System.IO.File.ReadAllText(path);
+        }
+
+        /// <summary>按一份 ai-settings.xml 读出的配置概要：地址|Key|超时|MaxTokens|模型|Agent 轮数|移动开关|字体。</summary>
+        internal static string DescribeAiConfig(string configXml)
+        {
+            var c = AiConfigStore.Parse(XElement.Parse(configXml));
+            return string.Join("|", c.ApiUrl, c.ApiKey, c.TimeoutSeconds, c.MaxTokens,
+                string.Join(",", c.Models.Select(m => m.Id)), c.Agent.MaxTurns, c.Agent.EnableMoves, c.Agent.FontFamily);
         }
 
         /// <summary>

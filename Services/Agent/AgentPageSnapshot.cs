@@ -9,65 +9,127 @@ using System.Xml.Linq;
 
 namespace OneNoteCodeHelper.Services.Agent
 {
+    /// <summary>ai-settings.xml 里 Agent 节点的一个数值项：节点名、默认值和允许的范围，超出范围按边界取。</summary>
+    internal sealed class AgentNumberOption
+    {
+        internal AgentNumberOption(string key, int fallback, int min, int max, Func<AgentOptions, int> get, Action<AgentOptions, int> set)
+        {
+            Key = key; Default = fallback; Min = min; Max = max; Get = get; Set = set;
+        }
+
+        internal string Key { get; }
+        internal int Default { get; }
+        internal int Min { get; }
+        internal int Max { get; }
+        internal Func<AgentOptions, int> Get { get; }
+        internal Action<AgentOptions, int> Set { get; }
+    }
+
+    /// <summary>ai-settings.xml 里 Agent 节点的一个开关，默认都是开。</summary>
+    internal sealed class AgentSwitchOption
+    {
+        internal AgentSwitchOption(string key, Func<AgentOptions, bool> get, Action<AgentOptions, bool> set)
+        {
+            Key = key; Get = get; Set = set;
+        }
+
+        internal string Key { get; }
+        internal Func<AgentOptions, bool> Get { get; }
+        internal Action<AgentOptions, bool> Set { get; }
+    }
+
     internal sealed class AgentOptions
     {
-        internal int MaxTurns { get; set; } = 24;
-        internal int MaxToolCalls { get; set; } = 96;
-        internal int TimeoutSeconds { get; set; } = 600;
-        // 按 DeepSeek 的 1M token 上下文估算（约 0.6 token/汉字），留出输出余量；上下文较短的模型在配置里调小。
-        internal int MaxPageChars { get; set; } = 200000;
-        internal int MaxRequestChars { get; set; } = 1000000;
-        internal bool SendThinking { get; set; } = true;
-        internal bool ReplayReasoning { get; set; } = true;
-        internal bool StreamUsage { get; set; } = true;
-        // 已经通过 Office16 往返探针；可为其他 Office 构建单独关闭。
-        internal bool EnableParagraphSpacing { get; set; } = true;
-        internal bool EnableNativeHeadings { get; set; } = true;
-        internal bool EnableMixedOutlines { get; set; } = true;
-        // 把未高亮的代码转换为插件代码框；关闭时整段等宽代码仍只保护。
-        internal bool EnableCodeHighlight { get; set; } = true;
-        // 列表符号、待办等标记和表格外观；关闭时这些只保护、不修改。
-        internal bool EnableLists { get; set; } = true;
-        internal bool EnableTags { get; set; } = true;
-        internal bool EnableTableStyles { get; set; } = true;
-        // 改变段落结构的工具：删空行、调整缩进、移动段落、插入段落、把分隔的文字转成表格。
-        internal bool EnableBlankLineRemoval { get; set; } = true;
-        internal bool EnableIndent { get; set; } = true;
-        internal bool EnableMoves { get; set; } = true;
-        internal bool EnableInsert { get; set; } = true;
-        internal bool EnableTextTables { get; set; } = true;
-        internal string FontFamily { get; set; } = "Microsoft YaHei";
+        internal const string DefaultFontFamily = "Microsoft YaHei";
+
+        /// <summary>数值项，顺序就是默认配置文件里的顺序。读配置、写默认文件、保存和 AI 配置窗口都按这张表。</summary>
+        internal static readonly AgentNumberOption[] Numbers =
+        {
+            new AgentNumberOption("MaxTurns", 24, 2, 60, o => o.MaxTurns, (o, v) => o.MaxTurns = v),
+            new AgentNumberOption("MaxToolCalls", 96, 6, 200, o => o.MaxToolCalls, (o, v) => o.MaxToolCalls = v),
+            new AgentNumberOption("TimeoutSeconds", 600, 30, 1800, o => o.TimeoutSeconds, (o, v) => o.TimeoutSeconds = v),
+            // 按 DeepSeek 的 1M token 上下文估算（约 0.6 token/汉字），留出输出余量；上下文较短的模型在配置里调小。
+            new AgentNumberOption("MaxPageChars", 200000, 1000, 1000000, o => o.MaxPageChars, (o, v) => o.MaxPageChars = v),
+            new AgentNumberOption("MaxRequestChars", 1000000, 16000, 3000000, o => o.MaxRequestChars, (o, v) => o.MaxRequestChars = v)
+        };
+
+        /// <summary>开关项，顺序同 <see cref="Numbers"/>，默认文件里写在 FontFamily 后面。</summary>
+        internal static readonly AgentSwitchOption[] Switches =
+        {
+            new AgentSwitchOption("SendThinking", o => o.SendThinking, (o, v) => o.SendThinking = v),
+            new AgentSwitchOption("ReplayReasoning", o => o.ReplayReasoning, (o, v) => o.ReplayReasoning = v),
+            new AgentSwitchOption("StreamUsage", o => o.StreamUsage, (o, v) => o.StreamUsage = v),
+            // 已经通过 Office16 往返探针；可为其他 Office 构建单独关闭。
+            new AgentSwitchOption("EnableNativeHeadings", o => o.EnableNativeHeadings, (o, v) => o.EnableNativeHeadings = v),
+            new AgentSwitchOption("EnableParagraphSpacing", o => o.EnableParagraphSpacing, (o, v) => o.EnableParagraphSpacing = v),
+            new AgentSwitchOption("EnableMixedOutlines", o => o.EnableMixedOutlines, (o, v) => o.EnableMixedOutlines = v),
+            // 把未高亮的代码转换为插件代码框；关闭时整段等宽代码仍只保护。
+            new AgentSwitchOption("EnableCodeHighlight", o => o.EnableCodeHighlight, (o, v) => o.EnableCodeHighlight = v),
+            // 列表符号、待办等标记和表格外观；关闭时这些只保护、不修改。
+            new AgentSwitchOption("EnableLists", o => o.EnableLists, (o, v) => o.EnableLists = v),
+            new AgentSwitchOption("EnableTags", o => o.EnableTags, (o, v) => o.EnableTags = v),
+            new AgentSwitchOption("EnableTableStyles", o => o.EnableTableStyles, (o, v) => o.EnableTableStyles = v),
+            // 改变段落结构的工具：删空行、调整缩进、移动段落、插入段落、把分隔的文字转成表格。
+            new AgentSwitchOption("EnableBlankLineRemoval", o => o.EnableBlankLineRemoval, (o, v) => o.EnableBlankLineRemoval = v),
+            new AgentSwitchOption("EnableIndent", o => o.EnableIndent, (o, v) => o.EnableIndent = v),
+            new AgentSwitchOption("EnableMoves", o => o.EnableMoves, (o, v) => o.EnableMoves = v),
+            new AgentSwitchOption("EnableInsert", o => o.EnableInsert, (o, v) => o.EnableInsert = v),
+            new AgentSwitchOption("EnableTextTables", o => o.EnableTextTables, (o, v) => o.EnableTextTables = v)
+        };
+
+        internal AgentOptions()
+        {
+            foreach (var option in Numbers) option.Set(this, option.Default);
+            foreach (var option in Switches) option.Set(this, true);
+        }
+
+        internal int MaxTurns { get; set; }
+        internal int MaxToolCalls { get; set; }
+        internal int TimeoutSeconds { get; set; }
+        internal int MaxPageChars { get; set; }
+        internal int MaxRequestChars { get; set; }
+        internal bool SendThinking { get; set; }
+        internal bool ReplayReasoning { get; set; }
+        internal bool StreamUsage { get; set; }
+        internal bool EnableParagraphSpacing { get; set; }
+        internal bool EnableNativeHeadings { get; set; }
+        internal bool EnableMixedOutlines { get; set; }
+        internal bool EnableCodeHighlight { get; set; }
+        internal bool EnableLists { get; set; }
+        internal bool EnableTags { get; set; }
+        internal bool EnableTableStyles { get; set; }
+        internal bool EnableBlankLineRemoval { get; set; }
+        internal bool EnableIndent { get; set; }
+        internal bool EnableMoves { get; set; }
+        internal bool EnableInsert { get; set; }
+        internal bool EnableTextTables { get; set; }
+        internal string FontFamily { get; set; } = DefaultFontFamily;
+
+        /// <summary>每一项都是默认值。</summary>
+        internal bool IsDefault =>
+            Numbers.All(o => o.Get(this) == o.Default) && Switches.All(o => o.Get(this)) && FontFamily == DefaultFontFamily;
 
         internal static AgentOptions Parse(XElement element)
         {
             var value = new AgentOptions();
             if (element == null) return value;
-            value.MaxTurns = Number(element, "MaxTurns", 24, 2, 60);
-            value.MaxToolCalls = Number(element, "MaxToolCalls", 96, 6, 200);
-            value.TimeoutSeconds = Number(element, "TimeoutSeconds", 600, 30, 1800);
-            value.MaxPageChars = Number(element, "MaxPageChars", 200000, 1000, 1000000);
-            value.MaxRequestChars = Number(element, "MaxRequestChars", 1000000, 16000, 3000000);
-            value.SendThinking = Boolean(element, "SendThinking", true);
-            value.ReplayReasoning = Boolean(element, "ReplayReasoning", true);
-            value.StreamUsage = Boolean(element, "StreamUsage", true);
-            value.EnableParagraphSpacing = Boolean(element, "EnableParagraphSpacing", true);
-            value.EnableNativeHeadings = Boolean(element, "EnableNativeHeadings", true);
-            value.EnableMixedOutlines = Boolean(element, "EnableMixedOutlines", true);
-            value.EnableCodeHighlight = Boolean(element, "EnableCodeHighlight", true);
-            value.EnableLists = Boolean(element, "EnableLists", true);
-            value.EnableTags = Boolean(element, "EnableTags", true);
-            value.EnableTableStyles = Boolean(element, "EnableTableStyles", true);
-            value.EnableBlankLineRemoval = Boolean(element, "EnableBlankLineRemoval", true);
-            value.EnableIndent = Boolean(element, "EnableIndent", true);
-            value.EnableMoves = Boolean(element, "EnableMoves", true);
-            value.EnableInsert = Boolean(element, "EnableInsert", true);
-            value.EnableTextTables = Boolean(element, "EnableTextTables", true);
+            foreach (var option in Numbers) option.Set(value, Number(element, option));
+            foreach (var option in Switches) option.Set(value, Boolean(element, option.Key, true));
             var font = (string)element.Element("FontFamily");
             if (ParagraphStyles.Fonts.Contains(font)) value.FontFamily = font;
             return value;
         }
-        private static int Number(XElement e, string key, int fallback, int min, int max) =>
-            int.TryParse((string)e.Element(key), out var value) ? Math.Max(min, Math.Min(max, value)) : fallback;
+
+        /// <summary>按 <see cref="Numbers"/>、FontFamily、<see cref="Switches"/> 的顺序生成 Agent 节点的全部子节点。</summary>
+        internal IEnumerable<XElement> ToElements()
+        {
+            foreach (var option in Numbers) yield return new XElement(option.Key, option.Get(this));
+            yield return new XElement("FontFamily", FontFamily);
+            foreach (var option in Switches) yield return new XElement(option.Key, option.Get(this));
+        }
+
+        private static int Number(XElement e, AgentNumberOption option) =>
+            int.TryParse((string)e.Element(option.Key), out var value) ? Math.Max(option.Min, Math.Min(option.Max, value)) : option.Default;
         private static bool Boolean(XElement e, string key, bool fallback) =>
             bool.TryParse((string)e.Element(key), out var value) ? value : fallback;
     }

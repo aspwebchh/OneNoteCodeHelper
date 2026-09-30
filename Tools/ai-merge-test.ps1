@@ -5,8 +5,8 @@
 .DESCRIPTION
     不碰 OneNote，只通过反射调用构建出来的 DLL 里 RenderDiagnostics 的入口，普通权限即可运行。
     重点验证 RichParagraph：改动落在加粗、链接、多个 one:T 里时格式不丢，实体写法不变，
-    插入的空格不会跟进加粗，拼不回原样的段落会被认出来。另外覆盖思考强度参数、流式返回（SSE）的解析
-    和排版优化附带的删多余空行。
+    插入的空格不会跟进加粗，拼不回原样的段落会被认出来。另外覆盖思考强度参数、流式返回（SSE）的解析、
+    排版优化附带的删多余空行，以及「AI 配置」窗口保存配置文件（只写临时目录，不碰本机配置）。
 
     加 -Live 会用本机 %APPDATA%\OneNoteCodeHelper\ai-settings.xml 真调一次接口，打印模型的修改结果。
 
@@ -347,6 +347,62 @@ Assert-Equal '配置：排版优化删空行' `
     $defaultXml.SelectSingleNode('/AiConfig/Functions/Function[@name="排版优化"]').GetAttribute('removeExtraBlankLines') 'true'
 Assert-Equal '配置：错别字修复不删空行' `
     $defaultXml.SelectSingleNode('/AiConfig/Functions/Function[@name="错别字修复"]').GetAttribute('removeExtraBlankLines') ''
+
+# 「AI 配置」窗口保存：在原文件上就地改，注释和窗口里没有的节点留着
+function Get-ChildNames($node) { @($node.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object { $_.Name }) -join '|' }
+
+$handWritten = '<?xml version="1.0" encoding="utf-8"?><!-- 顶部注释 --><AiConfig>' +
+    '<!-- 地址注释 --><ApiUrl>https://old.example</ApiUrl><ApiKey>old</ApiKey>' +
+    '<Custom keep="1">手写的节点</Custom>' +
+    '<Models><Model id="a" /></Models>' +
+    '<Functions><Function name="错别字修复"><Prompt>p</Prompt></Function></Functions></AiConfig>'
+$edited = '<AiConfig><ApiUrl>https://new.example/v1</ApiUrl><ApiKey>sk-test</ApiKey><TimeoutSeconds>120</TimeoutSeconds>' +
+    '<Models><Model id="m1" /><Model id="m2" /></Models>' +
+    '<Functions><Function name="错别字修复"><Prompt>改错字</Prompt></Function>' +
+    '<Function name="排版优化" removeExtraBlankLines="false"><Prompt>排版</Prompt></Function></Functions></AiConfig>'
+$applied = Invoke-Diag 'ApplyAiConfig' @($handWritten, $edited)
+$appliedXml = [xml]$applied
+Assert-Equal '保存：根节点外和节点前的注释保留' ($applied.Contains('<!-- 顶部注释 -->') -and $applied.Contains('<!-- 地址注释 -->')) $true
+Assert-Equal '保存：窗口里没有的节点保留' $appliedXml.SelectSingleNode('/AiConfig/Custom[@keep="1"]').InnerText '手写的节点'
+Assert-Equal '保存：缺的节点按默认顺序补上' (Get-ChildNames $appliedXml.AiConfig) 'ApiUrl|ApiKey|TimeoutSeconds|MaxTokens|Custom|Models|Functions'
+Assert-Equal '保存：读回的值和窗口一致' (Invoke-Diag 'DescribeAiConfig' @($applied)) `
+    'https://new.example/v1|sk-test|120|16384|m1,m2|24|True|Microsoft YaHei'
+Assert-Equal '保存：删空行一律明写' `
+    (@($appliedXml.SelectNodes('/AiConfig/Functions/Function') | ForEach-Object { $_.GetAttribute('removeExtraBlankLines') }) -join '|') 'false|false'
+Assert-Equal '保存：删空行读回一致' (Invoke-Diag 'DescribeAiFunctions' @($applied)) '错别字修复=False|排版优化=False'
+Assert-Equal '保存：原来没有 Agent 节点、全是默认值时不加' ($null -eq $appliedXml.SelectSingleNode('/AiConfig/Agent')) $true
+
+$agentOff = $edited.Replace('</AiConfig>', '<Agent><EnableMoves>false</EnableMoves></Agent></AiConfig>')
+$appliedXml = [xml](Invoke-Diag 'ApplyAiConfig' @($handWritten, $agentOff))
+Assert-Equal '保存：Agent 有一项不是默认值时才加节点，写全部项' `
+    (Get-ChildNames $appliedXml.AiConfig.Agent) (Get-ChildNames $defaultXml.AiConfig.Agent)
+Assert-Equal '保存：Agent 节点放在默认位置' (Get-ChildNames $appliedXml.AiConfig) 'ApiUrl|ApiKey|TimeoutSeconds|MaxTokens|Agent|Custom|Models|Functions'
+Assert-Equal '保存：Agent 开关读回一致' (Invoke-Diag 'DescribeAiConfig' @($appliedXml.OuterXml)).Split('|')[6] 'False'
+
+$partialAgent = $handWritten.Replace('<Custom', '<Agent><MaxTurns>30</MaxTurns><Unknown>x</Unknown></Agent><Custom')
+$appliedXml = [xml](Invoke-Diag 'ApplyAiConfig' @($partialAgent, $edited))
+Assert-Equal '保存：已有的 Agent 节点改全部已知项，未知项保留' `
+    ('{0}|{1}|{2}' -f $appliedXml.AiConfig.Agent.MaxTurns, $appliedXml.AiConfig.Agent.Unknown, $appliedXml.AiConfig.Agent.EnableTextTables) '24|x|true'
+
+$saveDir = Join-Path ([System.IO.Path]::GetTempPath()) ('onc-ai-config-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $saveDir | Out-Null
+try {
+    # Join-Path 返回的是 PSObject 包着的字符串，反射调用时转不成 string
+    $savePath = [string](Join-Path $saveDir 'ai-settings.xml')
+    $saved = Invoke-Diag 'SaveAiConfigFile' @($savePath, $edited)
+    Assert-Equal '保存到新文件：带默认文件的注释' $saved.Contains('OneNote 代码高亮 · AI 助手配置') $true
+    Assert-Equal '保存到新文件：值和窗口一致' (Invoke-Diag 'DescribeAiConfig' @($saved)) `
+        'https://new.example/v1|sk-test|120|16384|m1,m2|24|True|Microsoft YaHei'
+
+    [System.IO.File]::WriteAllText($savePath, '<AiConfig><ApiUrl>写坏了')
+    $saved = Invoke-Diag 'SaveAiConfigFile' @($savePath, $edited)
+    Assert-Equal '保存写坏的文件：原文件备份成 .bak' ([System.IO.File]::ReadAllText("$savePath.bak")) '<AiConfig><ApiUrl>写坏了'
+    Assert-Equal '保存写坏的文件：重写后能读' (Invoke-Diag 'DescribeAiConfig' @($saved)).Split('|')[1] 'sk-test'
+    Assert-Equal '保存：不留临时文件' (Test-Path "$savePath.tmp") $false
+}
+finally {
+    Remove-Item -LiteralPath $saveDir -Recurse -Force
+}
 
 if ($Live) {
     Write-Host ''

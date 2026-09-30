@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Xml;
 using System.Xml.Linq;
 
 namespace OneNoteCodeHelper.Services
@@ -74,7 +75,7 @@ namespace OneNoteCodeHelper.Services
     }
 
     /// <summary>
-    /// AI 助手的配置：接口地址、Key、模型和各功能的提示词。对应 ai-settings.xml，由用户手改。
+    /// AI 助手的配置：接口地址、Key、模型和各功能的提示词。对应 ai-settings.xml，在「AI 配置」窗口里改，也可以手改。
     /// Models、Functions 保证非空，调用方不用再判空。
     /// </summary>
     internal sealed class AiConfig
@@ -138,7 +139,8 @@ namespace OneNoteCodeHelper.Services
     ///
     /// 和 settings.xml 分开放：settings.xml 在每次切换功能区选项时都会被内存里的设置整体重写，
     /// 用户手改的 Key、提示词要是放在那里，OneNote 开着的时候改了也会被覆盖回去。
-    /// 这份文件插件只在它不存在时写一次默认值，之后只读。
+    /// 这份文件只在两种时候写：不存在时写一次默认值，以及在「AI 配置」窗口里点保存。
+    /// 保存是在原文件上就地改（见 <see cref="Apply"/>），手写的注释和窗口里没有的节点都留着。
     ///
     /// 用 LINQ to XML 而不是 XmlSerializer，是为了能在默认文件里写注释，告诉用户每一项怎么填。
     /// </summary>
@@ -149,6 +151,18 @@ namespace OneNoteCodeHelper.Services
         private const int DefaultTimeoutSeconds = 300;
 
         private const int DefaultMaxTokens = 16384;
+
+        internal const int MinTimeoutSeconds = 10;
+
+        internal const int MaxTimeoutSeconds = 3600;
+
+        internal const int MinMaxTokens = 0;
+
+        internal const int MaxMaxTokens = 1024 * 1024;
+
+        /// <summary>根节点下各项在默认文件里的顺序。保存时缺的节点按这个顺序补在前一项后面。</summary>
+        private static readonly string[] RootOrder =
+            { "ApiUrl", "ApiKey", "TimeoutSeconds", "MaxTokens", "Agent", "Models", "Functions" };
 
         internal const string TypoFunctionName = "错别字修复";
 
@@ -273,8 +287,8 @@ namespace OneNoteCodeHelper.Services
             return new AiConfig(
                 url.Length > 0 ? url : DefaultApiUrl,
                 Trim((string)root.Element("ApiKey")),
-                ReadInt(root.Element("TimeoutSeconds"), DefaultTimeoutSeconds, 10, 3600),
-                ReadInt(root.Element("MaxTokens"), DefaultMaxTokens, 0, 1024 * 1024),
+                ReadInt(root.Element("TimeoutSeconds"), DefaultTimeoutSeconds, MinTimeoutSeconds, MaxTimeoutSeconds),
+                ReadInt(root.Element("MaxTokens"), DefaultMaxTokens, MinMaxTokens, MaxMaxTokens),
                 models?.Count > 0 ? models : Default.Models,
                 functions?.Count > 0 ? functions : Default.Functions)
             { Agent = Agent.AgentOptions.Parse(root.Element("Agent")) };
@@ -332,17 +346,7 @@ namespace OneNoteCodeHelper.Services
                     new XElement("MaxTokens", config.MaxTokens),
                     new XComment(" Agent 工具调用：默认启用标题、段间距、图文容器、代码框转换、列表、标记、表格样式，以及删空行、缩进、移动（含跨文本框移动和合并文本框）、插入段落和转表格等结构调整，哪项回存有问题或不想让 Agent 改结构，就把对应的 Enable 开关设为 false。" +
                         "若接口不接受思考参数，可把 SendThinking 设为 false。旧配置不写此节点也可使用默认值。 "),
-                    new XElement("Agent",
-                        new XElement("MaxTurns", 24), new XElement("MaxToolCalls", 96),
-                        new XElement("TimeoutSeconds", 600), new XElement("MaxPageChars", 200000),
-                        new XElement("MaxRequestChars", 1000000), new XElement("FontFamily", "Microsoft YaHei"),
-                        new XElement("SendThinking", true), new XElement("ReplayReasoning", true),
-                        new XElement("StreamUsage", true), new XElement("EnableNativeHeadings", true),
-                        new XElement("EnableParagraphSpacing", true), new XElement("EnableMixedOutlines", true),
-                        new XElement("EnableCodeHighlight", true), new XElement("EnableLists", true),
-                        new XElement("EnableTags", true), new XElement("EnableTableStyles", true),
-                        new XElement("EnableBlankLineRemoval", true), new XElement("EnableIndent", true),
-                        new XElement("EnableMoves", true), new XElement("EnableInsert", true), new XElement("EnableTextTables", true)),
+                    new XElement("Agent", new Agent.AgentOptions().ToElements()),
                     new XComment(" Agent 窗口「模型」下拉里的选项：id 是接口的模型名，下拉里直接显示它 "),
                     new XElement(
                         "Models",
@@ -359,6 +363,136 @@ namespace OneNoteCodeHelper.Services
                             new XAttribute("name", f.Name),
                             f.RemoveExtraBlankLines ? new XAttribute(RemoveBlankLinesAttribute, "true") : null,
                             new XElement("Prompt", f.Prompt))))));
+        }
+
+        /// <summary>配置文件的修改时间，用来判断文件是不是在别处被改过。文件不存在时是个固定的很早的时间。</summary>
+        internal static DateTime Stamp()
+        {
+            try { return File.GetLastWriteTimeUtc(ConfigPath); }
+            catch (Exception) { return DateTime.MinValue; }
+        }
+
+        /// <summary>
+        /// 把 config 写进 ai-settings.xml（path 为 null 时是 <see cref="ConfigPath"/>）。在原文件上就地改，见 <see cref="Apply"/>；
+        /// 文件不存在时从带注释的默认文件改起。原文件写坏了（XML 解析不了）先复制成 .bak 再整个重写。
+        /// 先写同目录的临时文件再替换，Agent 窗口这时去读也不会读到写了一半的文件。读写失败直接抛出，由窗口提示。
+        /// </summary>
+        internal static void Save(AiConfig config, string path = null)
+        {
+            path = path ?? ConfigPath;
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            XDocument document = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    document = XDocument.Load(path);
+                }
+                catch (XmlException ex)
+                {
+                    File.Copy(path, path + ".bak", true);
+                    AddInLog.Warn("AI 配置文件解析不了，已备份为 .bak 后重写：" + path, ex);
+                }
+            }
+
+            if (document?.Root == null)
+            {
+                document = BuildDefaultDocument();
+            }
+
+            Apply(document, config);
+
+            var temp = path + ".tmp";
+            document.Save(temp);
+            if (!File.Exists(path))
+            {
+                File.Move(temp, path);
+            }
+            else
+            {
+                try
+                {
+                    File.Replace(temp, path, null);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is PlatformNotSupportedException)
+                {
+                    // 重定向到网络位置的 AppData 之类不支持 ReplaceFile 的地方，退回直接覆盖。
+                    AddInLog.Warn("替换 AI 配置文件失败，改为直接覆盖。", ex);
+                    File.Copy(temp, path, true);
+                    File.Delete(temp);
+                }
+            }
+
+            AddInLog.Info("已保存 AI 配置：" + path);
+        }
+
+        /// <summary>
+        /// 把 config 写进已有的配置文档，只动窗口里能改的部分：
+        /// 根节点下的四个值原地改，缺的按默认文件的顺序补上；Models、Functions 保留节点本身，里面整个按 config 重建，
+        /// removeExtraBlankLines 一律明写，不靠「没写时跟同名内置功能走」；Agent 节点已有时改全部已知项，
+        /// 没有时只在有一项不是默认值时才加，保持旧文件不写这一节也能用的约定。其余节点和注释原样留着。
+        /// </summary>
+        internal static void Apply(XDocument document, AiConfig config)
+        {
+            var root = document.Root;
+            Child(root, "ApiUrl", RootOrder).Value = config.ApiUrl;
+            Child(root, "ApiKey", RootOrder).Value = config.ApiKey;
+            Child(root, "TimeoutSeconds", RootOrder).Value = config.TimeoutSeconds.ToString(CultureInfo.InvariantCulture);
+            Child(root, "MaxTokens", RootOrder).Value = config.MaxTokens.ToString(CultureInfo.InvariantCulture);
+
+            if (root.Element("Agent") != null || !config.Agent.IsDefault)
+            {
+                var agent = Child(root, "Agent", RootOrder);
+                var values = config.Agent.ToElements().ToList();
+                var order = values.Select(e => e.Name.LocalName).ToArray();
+                foreach (var value in values)
+                {
+                    Child(agent, value.Name.LocalName, order).Value = value.Value;
+                }
+            }
+
+            Child(root, "Models", RootOrder).ReplaceNodes(
+                config.Models.Select(m => new XElement("Model", new XAttribute("id", m.Id))));
+            Child(root, "Functions", RootOrder).ReplaceNodes(
+                config.Functions.Select(f => new XElement(
+                    "Function",
+                    new XAttribute("name", f.Name),
+                    new XAttribute(RemoveBlankLinesAttribute, f.RemoveExtraBlankLines ? "true" : "false"),
+                    new XElement("Prompt", f.Prompt))));
+        }
+
+        /// <summary>
+        /// parent 下名为 name 的子节点；没有就新建，放在 order 里排在它前面、已经存在的最后一项后面，
+        /// 前面一项都没有时放在最前。
+        /// </summary>
+        private static XElement Child(XElement parent, string name, IReadOnlyList<string> order)
+        {
+            var existing = parent.Element(name);
+            if (existing != null)
+            {
+                return existing;
+            }
+
+            var created = new XElement(name);
+            var index = order.ToList().IndexOf(name);
+            var previous = order.Take(Math.Max(0, index)).Reverse()
+                .Select(n => parent.Elements(n).LastOrDefault())
+                .FirstOrDefault(e => e != null);
+            if (previous != null)
+            {
+                previous.AddAfterSelf(created);
+            }
+            else
+            {
+                parent.AddFirst(created);
+            }
+
+            return created;
         }
 
         private static string Trim(string value) => value?.Trim() ?? string.Empty;
