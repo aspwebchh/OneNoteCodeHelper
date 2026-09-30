@@ -148,7 +148,8 @@ namespace OneNoteCodeHelper.Services.Agent
             return a.Count == b.Count && a.Zip(b, (x, y) => XNode.DeepEquals(x, y)).All(x => x);
         }
 
-        private static string Signature(XElement definition)
+        /// <summary>TagDef 的内容（不含 index），用于按内容对应标记定义。</summary>
+        internal static string Signature(XElement definition)
         {
             var values = definition.Attributes().Where(a => a.Name.LocalName != "index").ToDictionary(a => a.Name.LocalName, a => a.Value.Trim().ToLowerInvariant());
             if (!values.ContainsKey("fontColor")) values["fontColor"] = "automatic";

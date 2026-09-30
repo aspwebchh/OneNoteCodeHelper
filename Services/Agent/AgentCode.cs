@@ -113,6 +113,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// 转换结果的撤销指纹：完整内容、格式、对象、引用定义和继承上下文。基线取自回读，不能只比较纯文字，
         /// 否则撤销会删掉后来加的图片或链接。只忽略已知的瞬态字段、表格包装 ID 和未锁定列的自动宽度。
         /// 位置只看所在文本框、上级段落的身份和文本框坐标，不看同级序号：前后增删段落或别处的文本框时原地换回不会覆盖别人的内容。
+        /// 样式和标记按引用的定义内容比较，不看编号：OneNote 给定义重新编号、内容不变时不算改动。
         /// </summary>
         internal static string Fingerprint(XElement wrapper, XElement page)
         {
@@ -123,11 +124,17 @@ namespace OneNoteCodeHelper.Services.Agent
                         // 祖先若是表格包装，身份取内部表格，包装的 ID 会由 OneNote 重建。
                         IsTableWrapper(e) ? new XElement(One + "Table", e.Element(One + "Table").Attribute("objectID")) : null))).ToList();
             var root = new XElement("fingerprint", new XElement("context", context), new XElement("content", content));
-            var styles = root.Descendants().Attributes("quickStyleIndex").Select(a => a.Value).Distinct().ToList();
-            var tags = wrapper.Descendants(One + "Tag").Select(t => (string)t.Attribute("index")).Distinct().ToList();
-            root.Add(new XElement("definitions", page.Elements().Where(e =>
-                e.Name == One + "QuickStyleDef" && styles.Contains((string)e.Attribute("index")) ||
-                e.Name == One + "TagDef" && tags.Contains((string)e.Attribute("index"))).Select(e => new XElement(e))));
+            // 找不到定义时保留原编号，照旧严格比较。
+            foreach (var a in root.Descendants().Attributes("quickStyleIndex"))
+            {
+                var definition = page.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == a.Value);
+                a.Value = definition == null ? "missing:" + a.Value : ParagraphStyles.DefinitionSignature(definition);
+            }
+            foreach (var tag in root.Descendants(One + "Tag"))
+            {
+                var definition = AgentMarks.Definition(page, tag);
+                tag.SetAttributeValue("index", definition == null ? "missing:" + (string)tag.Attribute("index") : AgentMarks.Signature(definition));
+            }
             foreach (var a in root.DescendantsAndSelf().Attributes().Where(a => a.Name.LocalName == "selected" || a.Name.LocalName == "lastModifiedTime").ToList()) a.Remove();
             foreach (var oe in root.Descendants(One + "OE").Where(IsTableWrapper)) oe.Attribute("objectID")?.Remove();
             foreach (var column in root.Descendants(One + "Column"))

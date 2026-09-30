@@ -1639,6 +1639,62 @@ internal static class Program
             Equal("Verified", od.Status); Equal(1, od.Applied);
             Equal("Verified", oc.Undo(other.PageId, od, other.Options, CancellationToken.None).Status);
         });
+        Test("appearance-only fallback keeps emphasis set on the paragraph itself", () =>
+        {
+            // 父段 style 上的加粗、斜体、下划线在原生样式下覆盖定义，回退时不能被定义的默认值盖掉；先设父段、再设子段照常完成。
+            foreach (var (style, preset) in new[] { ("font-weight:bold", "body"), ("font-style:italic", "heading1"), ("text-decoration:underline", "heading2") })
+            {
+                XElement Build(bool child)
+                {
+                    var parent = Paragraph("a", "父段"); parent.SetAttributeValue("style", style);
+                    if (child) parent.Add(new XElement(One + "OEChildren", Paragraph("b", "子段")));
+                    return Page(parent);
+                }
+                string Look(AgentPageSnapshot snapshot) { var draft = snapshot.CreateDraftPage(); return new AgentRichText(AgentLayout.Find(draft, "p1")).Signature(draft, true); }
+                var control = Snapshot(Build(false)); var ct = Tools(control); Read(ct, control);
+                Invoke(ct, "set_paragraph_style", new { snapshot_id = control.SnapshotId, block_ids = new[] { "p1" }, preset_id = preset });
+                var s = Snapshot(Build(true)); var t = Tools(s); Read(t, s);
+                var result = Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = preset });
+                True(Json(result).Contains("\"appearance_only\":[\"p1\"]"));
+                Equal(Look(control), Look(s));
+                Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, preset_id = "body" });
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api);
+                var done = c.Commit(s, CancellationToken.None);
+                Equal("Verified", done.Status); Equal(2, done.Applied); Equal("p1", string.Join(",", done.AppearanceOnly));
+                Equal(Look(control), new AgentRichText(AgentCommitter.Find(api.Page, "a")).Signature(api.Page, true));
+                Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+            }
+        });
+        Test("conversion undo ignores quick style renumbering but not definition changes", () =>
+        {
+            // OneNote 可能给样式定义重新编号：内容不变时代码框和转换的表格照常换回，定义内容变了仍算冲突。
+            XElement Definition(string index, string name, string size) => new XElement(One + "QuickStyleDef", new XAttribute("index", index), new XAttribute("name", name),
+                new XAttribute("fontColor", "automatic"), new XAttribute("highlightColor", "automatic"), new XAttribute("font", "Calibri"), new XAttribute("fontSize", size),
+                new XAttribute("spaceBefore", "0.0"), new XAttribute("spaceAfter", "0.0"));
+            foreach (var code in new[] { true, false })
+            foreach (var redefine in new[] { false, true })
+            {
+                var parent = Paragraph("a", "上级段落"); parent.SetAttributeValue("quickStyleIndex", "1");
+                parent.Add(new XElement(One + "OEChildren", Paragraph("c1", code ? "def f(x):" : "甲|乙")));
+                var page = Page(parent); page.AddFirst(Definition("0", "h1", "16.0"), Definition("1", "p", "11.0"));
+                var s = Snapshot(page); var t = Tools(s); Read(t, s);
+                if (code) Code(t, s, "python", "p2"); else Table(t, s, "pipe", "p2");
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+                Equal("Verified", done.Status);
+                var swap = new Dictionary<string, string> { ["0"] = "1", ["1"] = "0" };
+                foreach (var d in api.Page.Elements(One + "QuickStyleDef")) d.SetAttributeValue("index", swap[(string)d.Attribute("index")]);
+                foreach (var a in api.Page.Descendants().Attributes("quickStyleIndex")) a.Value = swap[a.Value];
+                if (redefine) api.Page.Elements(One + "QuickStyleDef").Single(d => (string)d.Attribute("name") == "p").SetAttributeValue("fontSize", "12.0");
+                var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+                Equal(redefine ? 1 : 0, undo.Conflicts);
+                Equal(redefine, api.Page.Descendants(One + "Table").Any());
+                if (!redefine)
+                {
+                    Equal("Verified", undo.Status);
+                    True(api.Page.Descendants(One + "OE").Any(e => e.Elements(One + "T").Any() && AgentCode.PlainText(e) == (code ? "def f(x):" : "甲|乙")));
+                }
+            }
+        });
     }
 
     private static void ConversionUndoConflict(bool code, Action<XElement> edit)

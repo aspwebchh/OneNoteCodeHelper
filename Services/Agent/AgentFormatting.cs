@@ -443,7 +443,8 @@ namespace OneNoteCodeHelper.Services.Agent
             return index.ToString(CultureInfo.InvariantCulture);
         }
 
-        private static string DefinitionSignature(XElement e)
+        /// <summary>QuickStyleDef 的内容（不含 index），用于按内容对应样式定义。</summary>
+        internal static string DefinitionSignature(XElement e)
         {
             var values = e.Attributes().Where(a => a.Name.LocalName != "index").ToDictionary(a => a.Name.LocalName, a => Css.Normalize(a.Value));
             foreach (var flag in new[] { "bold", "italic", "underline", "strikethrough", "superscript", "subscript" })
@@ -508,14 +509,16 @@ namespace OneNoteCodeHelper.Services.Agent
 
         /// <summary>
         /// 仅设置外观时段落保留原有样式引用，它的加粗、斜体、下划线仍会生效。把目标定义的这三项写到文字上，
-        /// 文字上已有的显式值保留，与使用原生样式时的优先级一致。字体、字号、颜色已由 <see cref="Apply"/> 写在文字上。
+        /// 文字或段落 style 上已有的显式值保留：原生样式按「定义 → 段落 style → 文字 style」生效，这两处本来就覆盖定义。
+        /// 字体、字号、颜色已由 <see cref="Apply"/> 写在文字上。
         /// </summary>
         internal static void PinEmphasis(XElement oe, XElement definition)
         {
+            var paragraph = Css.Read((string)oe.Attribute("style"));
             foreach (var t in oe.Elements(OneNoteApi.One + "T"))
             {
                 var s = Css.Read((string)t.Attribute("style"));
-                foreach (var item in Css.Emphasis(definition)) if (!s.ContainsKey(item.Key)) s[item.Key] = item.Value;
+                foreach (var item in Css.Emphasis(definition)) if (!s.ContainsKey(item.Key) && !paragraph.ContainsKey(item.Key)) s[item.Key] = item.Value;
                 t.SetAttributeValue("style", Css.Write(s));
             }
         }
