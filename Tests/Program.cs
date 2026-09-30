@@ -1313,8 +1313,342 @@ internal static class Program
             True(!Json(off.Definitions).Contains("merge_outlines")); True(!Json(off.Definitions).Contains("move_blocks")); True(!AgentRunner.SystemPrompt(off).Contains("merge_outlines"));
             Equal(("合并文本框 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"]}"));
         });
+        ReviewRegressions();
         Console.WriteLine($"Agent: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
+    }
+
+    private static void ReviewRegressions()
+    {
+        Test("fix_text preserves untouched emoji and supplementary Han characters", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "😀按装说明𠮷"))); var t = Tools(s); Read(t, s);
+            Fix(t, s, "p1", "按装", "安装");
+            Equal("😀安装说明𠮷", s.Blocks[0].CurrentText);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api);
+            var done = c.Commit(s, CancellationToken.None); Equal("Verified", done.Status);
+            Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+            Equal("😀按装说明𠮷", Texts(api.Page));
+        });
+        Test("text_to_table preserves emoji in plain text, links and multiple runs", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "😀|", "<a href='https://example.com'><b>𠮷👍🏽</b></a>")));
+            var t = Tools(s); Read(t, s); Table(t, s, "pipe", "p1");
+            var api = new FakePage(s.Page); var done = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal("😀|𠮷👍🏽", Texts(api.Page));
+            True(api.Page.ToString().Contains("https://example.com")); True(api.Page.Descendants(One + "T").Any(x => x.Value.Contains("<b>")));
+        });
+        Test("table conversion undo skips a later link edit", () =>
+        {
+            ConversionUndoConflict(false, page =>
+            {
+                var text = page.Descendants(One + "T").Last();
+                text.Value = text.Value.Replace("/old", "/new");
+            });
+        });
+        Test("code conversion undo skips later formatting", () =>
+        {
+            ConversionUndoConflict(true, page => page.Descendants(One + "Cell").First().Descendants(One + "OE").First().SetAttributeValue("alignment", "right"));
+        });
+        Test("table conversion undo preserves an image added afterwards", () =>
+        {
+            ConversionUndoConflict(false, page => page.Descendants(One + "Cell").First().Element(One + "OEChildren").Add(Image("user-image", "cb-user")));
+        });
+        Test("selection outdent rejects reparenting an unselected sibling atomically", () =>
+        {
+            var parent = Paragraph("a", "父"); parent.Add(new XElement(One + "OEChildren", Paragraph("b", "乙"), Paragraph("c", "丙")));
+            var page = Page(parent);
+            var s = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "b" }, new AgentOptions());
+            var t = Tools(s); Read(t, s); var before = s.Layout.ToString();
+            Rejects("选区", () => Indent(t, s, "out", "p1"));
+            Equal(before, s.Layout.ToString()); Equal(0, s.Revision); Equal(0, s.LayoutChanges.Count);
+            // 把连带调整的后续兄弟段落也纳入选区后，原来的 out 语义仍然可用。
+            var all = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "b", "c" }, new AgentOptions());
+            var tools = Tools(all); Read(tools, all); Indent(tools, all, "out", "p1");
+            var api = new FakePage(all.Page); Equal("Verified", new AgentCommitter(api).Commit(all, CancellationToken.None).Status);
+            Equal("b", (string)AgentCommitter.Find(api.Page, "c").Ancestors(One + "OE").First().Attribute("objectID"));
+        });
+        Test("parent heading falls back to appearance, preserves child and can be undone", () =>
+        {
+            var parent = Paragraph("a", "父标题"); parent.Add(new XElement(One + "OEChildren", Paragraph("b", "子段正文")));
+            var s = Snapshot(Page(parent, Paragraph("c", "其他段"))); var t = Tools(s); Read(t, s);
+            var result = Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p3" }, preset_id = "heading1" });
+            True(Json(result).Contains("\"appearance_only\":[\"p1\"]"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var child = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page);
+            var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal(2, done.Applied); True(done.Message.Contains("仅设置外观"));
+            Equal(child, AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page));
+            Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+            Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "a"), s.Page), AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "a"), api.Page));
+        });
+        Test("native heading remains available when a child has its own style", () =>
+        {
+            foreach (var native in new[] { true, false })
+            {
+                var child = Paragraph("b", "子段"); child.SetAttributeValue("quickStyleIndex", "0");
+                var parent = Paragraph("a", "父标题"); parent.Add(new XElement(One + "OEChildren", child));
+                var page = Page(parent); var definition = ParagraphStyles.Definition("body", new AgentOptions()); definition.SetAttributeValue("index", "0"); page.AddFirst(definition);
+                var s = Snapshot(page); s.Options.EnableNativeHeadings = native; var t = Tools(s); Read(t, s); Style(t, s);
+                True(!s.Blocks[0].AppearanceOnly);
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+                Equal("Verified", done.Status); Equal(0, done.AppearanceOnly.Count);
+                Equal(native, AgentCommitter.Find(api.Page, "a").Attribute("quickStyleIndex") != null);
+                Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "b"), s.Page), AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page));
+                Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+            }
+        });
+        Test("nested heading batch isolates only the affected parent and preserves drafts on rejection", () =>
+        {
+            var inner = Paragraph("b", "内层标题"); inner.SetAttributeValue("quickStyleIndex", "0"); inner.Add(new XElement(One + "OEChildren", Paragraph("c", "保留的正文")));
+            var outer = Paragraph("a", "外层标题"); outer.Add(new XElement(One + "OEChildren", inner));
+            var page = Page(outer); var definition = ParagraphStyles.Definition("body", new AgentOptions()); definition.SetAttributeValue("index", "0"); page.AddFirst(definition);
+            var s = Snapshot(page); var t = Tools(s); Read(t, s);
+            var result = Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2" }, preset_id = "heading1" });
+            True(Json(result).Contains("\"appearance_only\":[\"p2\"]"));
+            var draft = s.CreateDraftPage().ToString(); var revision = s.Revision;
+            Rejects("页面标题", () => Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2" }, preset_id = "page_title" }));
+            Equal(revision, s.Revision); Equal(draft, s.CreateDraftPage().ToString()); True(s.Blocks[1].AppearanceOnly);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal("p2", string.Join(",", done.AppearanceOnly)); Equal(2, done.Applied);
+            Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "c"), s.Page), AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "c"), api.Page));
+            Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+        });
+        Test("removing inherited bold, italic and underline is effective and idempotent", () =>
+        {
+            var page = Page(Paragraph("a", "文字"));
+            page.Element(One + "Outline").SetAttributeValue("style", "font-family:Arial;font-size:11pt;color:#222222;font-weight:bold;font-style:italic;text-decoration:underline");
+            var s = Snapshot(page); var t = Tools(s); Read(t, s);
+            var args = new { snapshot_id = s.SnapshotId, targets = new[] { new { block_id = "p1", quote = "文字", occurrence = 1, style = new { bold = false, italic = false, underline = false } } } };
+            Invoke(t, "set_text_style", args); Equal(1, s.Revision);
+            Invoke(t, "set_text_style", args); Equal(1, s.Revision);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal(1, done.Applied);
+            var sig = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "a"), api.Page);
+            True(sig.Contains("font-weight:normal")); True(sig.Contains("font-style:normal")); True(sig.Contains("text-decoration:none"));
+            Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+        });
+        Test("conversion undo detects marks, locked widths, whitespace and relocation", () =>
+        {
+            ConversionUndoConflict(false, page => page.Descendants(One + "OE").First(e => e.Elements(One + "T").Any()).AddFirst(new XElement(One + "List", new XElement(One + "Bullet", new XAttribute("bullet", "2")))));
+            ConversionUndoConflict(false, page => page.Descendants(One + "Table").Single().SetAttributeValue("bordersVisible", "false"));
+            ConversionUndoConflict(false, page => page.Descendants(One + "Column").First().SetAttributeValue("isLocked", "true"));
+            ConversionUndoConflict(false, page => page.Descendants(One + "T").First().Value += "&nbsp;");
+            ConversionUndoConflict(false, page =>
+            {
+                var wrapper = page.Descendants(One + "Table").Single().Parent; wrapper.Remove();
+                page.Add(Box("elsewhere", 500, wrapper));
+            });
+        });
+        Test("conversion undo ignores transient selection, wrapper ID and automatic widths", () =>
+        {
+            var s = CodePrepared(); var api = new FakePage(s.Page); var c = new AgentCommitter(api);
+            var done = c.Commit(s, CancellationToken.None);
+            var table = api.Page.Descendants(One + "Table").Single();
+            table.Parent.SetAttributeValue("objectID", "regenerated-wrapper");
+            foreach (var e in table.DescendantsAndSelf()) { e.SetAttributeValue("selected", "all"); e.SetAttributeValue("lastModifiedTime", "2026-09-29T00:00:00Z"); }
+            foreach (var col in table.Descendants(One + "Column")) { col.SetAttributeValue("isLocked", "false"); col.SetAttributeValue("width", "888"); }
+            var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(1, undo.CodeBlocks); Equal(0, undo.Conflicts);
+        });
+        Test("conversion undo protects referenced definitions and ancestor styles", () =>
+        {
+            foreach (var definition in new[] { false, true })
+            {
+                var p = Page(Paragraph("a", "甲|乙"));
+                p.AddFirst(new XElement(One + "QuickStyleDef", new XAttribute("index", "0"), new XAttribute("name", "p"), new XAttribute("font", "Arial"), new XAttribute("fontSize", "11")));
+                p.Element(One + "Outline").SetAttributeValue("quickStyleIndex", "0");
+                var s = Snapshot(p); var t = Tools(s); Read(t, s); Table(t, s, "pipe", "p1");
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+                Equal("Verified", done.Status);
+                if (definition) api.Page.Element(One + "QuickStyleDef").SetAttributeValue("fontSize", "18");
+                else api.Page.Element(One + "Outline").SetAttributeValue("style", "font-style:italic");
+                var changed = api.Page.ToString(); var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+                Equal(1, undo.Conflicts); Equal(1, api.Writes); Equal(changed, api.Page.ToString());
+            }
+        });
+        Test("several conversions undo against the same pre-write positions", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "甲|乙"), Paragraph("b", "中间正文"), Paragraph("c", "丙|丁")));
+            var t = Tools(s); Read(t, s); Table(t, s, "pipe", "p1"); Table(t, s, "pipe", "p3");
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+            Equal(2, done.TextTables); var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(2, undo.TextTables); Equal("甲|乙|中间正文|丙|丁", Texts(api.Page));
+        });
+        Test("conversion undo ignores paragraphs and text boxes added around it", () =>
+        {
+            var edits = new (Action<XElement> Edit, string Text)[]
+            {
+                (page => page.Element(One + "Outline").AddBeforeSelf(Box("new-box", 20, Paragraph("n1", "别处新文本框"))), "别处新文本框"),
+                (page => page.Descendants(One + "Table").Single().Parent.AddBeforeSelf(Paragraph("n2", "紧挨着新打的一行")), "紧挨着新打的一行"),
+            };
+            foreach (var code in new[] { true, false })
+                foreach (var (edit, text) in edits)
+                {
+                    var s = code ? CodePrepared() : Snapshot(Page(Paragraph("a", "甲|乙"), Paragraph("b", "结尾")));
+                    if (!code) { var t = Tools(s); Read(t, s); Table(t, s, "pipe", "p1"); }
+                    var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+                    Equal("Verified", done.Status); edit(api.Page);
+                    var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+                    Equal("Verified", undo.Status); Equal(0, undo.Conflicts); Equal(code ? 1 : 0, undo.CodeBlocks); Equal(code ? 0 : 1, undo.TextTables);
+                    True(!api.Page.Descendants(One + "Table").Any()); True(Texts(api.Page).Contains(text));
+                }
+        });
+        Test("Unicode edits preserve runs, formatting, links, spaces and breaks", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "&nbsp;😀<b>按装</b>", "<a href='https://example.com'>𠮷</a><br>👍🏽尾")));
+            var t = Tools(s); Read(t, s); Fix(t, s, "p1", "按装", "安装");
+            Equal("\u00a0😀安装𠮷\n👍🏽尾", s.Blocks[0].CurrentText);
+            var draft = s.Blocks[0].Draft;
+            Equal(2, draft.Elements(One + "T").Count()); True(draft.Element(One + "T").Value.Contains("<b>安装</b>"));
+            True(draft.Elements(One + "T").Last().Value.Contains("href="));
+            var revision = s.Revision;
+            Throws(() => Fix(t, s, "p1", "👍", "好")); Equal(revision, s.Revision);
+        });
+        Test("selection structural tools protect unselected descendants and images", () =>
+        {
+            var parent = Paragraph("a", "父"); parent.Add(new XElement(One + "OEChildren", Paragraph("b", "没选中的子段")));
+            var s = new AgentPageSnapshot(Page(Paragraph("c", "目标"), parent).ToString(), new HashSet<string> { "a", "c" }, new AgentOptions());
+            var t = Tools(s); Read(t, s);
+            // 挂到另一段下会改变未选子段的祖先链。
+            Rejects("选区", () => Indent(t, s, "in", "p2")); Equal(0, s.Revision);
+            var imagePage = Boxes(Box("A", 100, Paragraph("a", "选中的目标")), Box("B", 300, Image("picture", "cb")));
+            var imageSelection = new AgentPageSnapshot(imagePage.ToString(), new HashSet<string> { "a" }, new AgentOptions());
+            var imageTools = Tools(imageSelection); Read(imageTools, imageSelection);
+            Rejects("选区", () => Merge(imageTools, imageSelection, "B", "p1", "after")); Equal(0, imageSelection.Revision);
+        });
+        Test("selection permits inserting or moving selected siblings around unselected text", () =>
+        {
+            var s = new AgentPageSnapshot(Page(Paragraph("a", "甲"), Paragraph("b", "未选"), Paragraph("c", "丙")).ToString(), new HashSet<string> { "a", "c" }, new AgentOptions());
+            var t = Tools(s); Read(t, s); Insert(t, s, "p1", "新增"); Move(t, s, new[] { "p2" }, "p1", "before");
+            var api = new FakePage(s.Page); Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+            Equal("丙|甲|新增|未选", Texts(api.Page));
+        });
+        Test("selection structural tools carry fully selected tables and images", () =>
+        {
+            XElement Grid() => GridPage().Element(One + "Outline").Element(One + "OEChildren").Element(One + "OE");
+            var cells = new[] { "h1", "h2", "d1", "d2" };
+            // 文字和图片都选中：图片跟着合并过去，带着数据写入。
+            var image = Image("img", "cb"); image.Element(One + "Image").SetAttributeValue("selected", "all");
+            var imageSelection = new AgentPageSnapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("b", "乙"), image)).ToString(),
+                new HashSet<string> { "a", "b" }, new AgentOptions());
+            var imageTools = Tools(imageSelection); Read(imageTools, imageSelection);
+            Merge(imageTools, imageSelection, "B", "p1", "after"); Equal(1, imageSelection.Revision);
+            var imageApi = new FakePage(imageSelection.Page); imageApi.Binary["cb"] = "IMAGEDATA";
+            Equal("Verified", new AgentCommitter(imageApi).Commit(imageSelection, CancellationToken.None).Status);
+            Equal(1, imageApi.Page.Elements(One + "Outline").Count()); Equal("IMAGEDATA", ImageData(imageApi, imageApi.Page));
+            // 文字和表格全部选中：整框合并，提交和撤销都通过。
+            var tableSelection = new AgentPageSnapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("b", "乙"), Grid())).ToString(),
+                new HashSet<string>(cells) { "a", "b" }, new AgentOptions());
+            var tableTools = Tools(tableSelection); Read(tableTools, tableSelection);
+            Merge(tableTools, tableSelection, "B", "p1", "after"); Equal(1, tableSelection.Revision);
+            var tableApi = new FakePage(tableSelection.Page); var committer = new AgentCommitter(tableApi);
+            var merged = committer.Commit(tableSelection, CancellationToken.None);
+            Equal("Verified", merged.Status); Equal("甲|乙|名称|说明|甲|乙", Texts(tableApi.Page)); Equal(1, tableApi.Page.Elements(One + "Outline").Count());
+            Equal("Verified", committer.Undo(tableSelection.PageId, merged, tableSelection.Options, CancellationToken.None).Status);
+            Equal(2, tableApi.Page.Elements(One + "Outline").Count());
+            // 下面挂着全选表格的段落可以缩进，表格跟着走。
+            var parent = Paragraph("p", "父段"); parent.Add(new XElement(One + "OEChildren", Grid()));
+            var indentPage = Page(Paragraph("q", "前一段"), parent);
+            var indentSelection = new AgentPageSnapshot(indentPage.ToString(), new HashSet<string>(cells) { "q", "p" }, new AgentOptions());
+            var indentTools = Tools(indentSelection); Read(indentTools, indentSelection);
+            Indent(indentTools, indentSelection, "in", "p2"); Equal(1, indentSelection.Revision);
+            var indentApi = new FakePage(indentSelection.Page);
+            Equal("Verified", new AgentCommitter(indentApi).Commit(indentSelection, CancellationToken.None).Status);
+            var moved = AgentCommitter.Find(indentApi.Page, "p");
+            Equal("q", (string)moved.Ancestors(One + "OE").First().Attribute("objectID")); True(moved.Descendants(One + "Table").Any());
+            // 表格有一格没选中就不在选区里，仍然整次拒绝。
+            var partial = new AgentPageSnapshot(indentPage.ToString(), new HashSet<string> { "q", "p", "h1", "h2", "d1" }, new AgentOptions());
+            var partialTools = Tools(partial); Read(partialTools, partial); var layout = partial.Layout.ToString();
+            Rejects("选区", () => Indent(partialTools, partial, "in", "p2")); Equal(0, partial.Revision); Equal(layout, partial.Layout.ToString());
+        });
+        Test("heading after indentation uses current children and reports verified appearance only", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "父"), Paragraph("b", "子"), Paragraph("c", "末尾"))); var t = Tools(s); Read(t, s);
+            Indent(t, s, "in", "p2");
+            var outcome = Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading2" });
+            True(Json(outcome).Contains("\"appearance_only\":[\"p1\"]"));
+            var revision = s.Revision; Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading2" }); Equal(revision, s.Revision);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal(1, done.AppearanceOnly.Count); Equal(1, done.OutlineUndo.Count);
+            Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "b"), s.Page), AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page));
+            Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+        });
+        Test("appearance fallback does not count conflicted or unverified paragraphs", () =>
+        {
+            foreach (var conflict in new[] { false, true })
+            {
+                var parent = Paragraph("a", "父"); parent.Add(new XElement(One + "OEChildren", Paragraph("b", "子")));
+                var s = Snapshot(Page(parent)); var t = Tools(s); Read(t, s); Style(t, s);
+                var api = new FakePage(s.Page);
+                if (conflict) AgentCommitter.Find(api.Page, "b").Element(One + "T").Value = "后来编辑";
+                else api.AfterSave = () => AgentCommitter.Find(api.Page, "a").SetAttributeValue("alignment", "right");
+                var report = new AgentCommitter(api).Commit(s, CancellationToken.None);
+                Equal(0, report.AppearanceOnly.Count); True(!report.Message.Contains("仅设置外观"));
+                True(conflict ? report.Conflicts > 0 : report.Unverified > 0);
+            }
+        });
+        Test("appearance-only fallback matches the native preset appearance", () =>
+        {
+            XElement Bold() { var d = ParagraphStyles.Definition("heading1", new AgentOptions()); d.SetAttributeValue("index", "0"); return d; }
+            XElement Italic() => new XElement(One + "QuickStyleDef", new XAttribute("index", "0"), new XAttribute("name", "quote"), new XAttribute("fontColor", "#595959"),
+                new XAttribute("highlightColor", "automatic"), new XAttribute("font", "Calibri"), new XAttribute("fontSize", "11.0"), new XAttribute("italic", "true"),
+                new XAttribute("spaceBefore", "0.0"), new XAttribute("spaceAfter", "0.0"));
+            // 原有定义带来的加粗、斜体不能留在父段上；文字上显式的样式和行内格式照旧保留。
+            var cases = new (Func<XElement> Definition, string Preset, string Style)[] { (Bold, "body", null), (Italic, "heading1", null), (Italic, "heading1", "font-style:italic") };
+            foreach (var (definition, preset, style) in cases)
+            {
+                XElement Build(bool child)
+                {
+                    var parent = Paragraph("a", "父<u>段</u>"); parent.SetAttributeValue("quickStyleIndex", "0");
+                    if (style != null) parent.Element(One + "T").SetAttributeValue("style", style);
+                    if (child) parent.Add(new XElement(One + "OEChildren", Paragraph("b", "子段")));
+                    var built = Page(parent); built.AddFirst(definition()); return built;
+                }
+                string Look(AgentPageSnapshot snapshot) { var draft = snapshot.CreateDraftPage(); return new AgentRichText(AgentLayout.Find(draft, "p1")).Signature(draft, true); }
+                var control = Snapshot(Build(false)); var ct = Tools(control); Read(ct, control);
+                Invoke(ct, "set_paragraph_style", new { snapshot_id = control.SnapshotId, block_ids = new[] { "p1" }, preset_id = preset });
+                var s = Snapshot(Build(true)); var t = Tools(s); Read(t, s);
+                var result = Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = preset });
+                True(Json(result).Contains("\"appearance_only\":[\"p1\"]"));
+                Equal(Look(control), Look(s));
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var child = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page);
+                var done = c.Commit(s, CancellationToken.None);
+                Equal("Verified", done.Status); Equal("p1", string.Join(",", done.AppearanceOnly));
+                Equal(Look(control), new AgentRichText(AgentCommitter.Find(api.Page, "a")).Signature(api.Page, true));
+                Equal(child, AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page));
+                Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+            }
+        });
+        Test("duplicate paragraph IDs neither abort styling nor commit", () =>
+        {
+            string Duplicates(XElement page) => string.Join("|", page.Descendants(One + "OE").Where(e => (string)e.Attribute("objectID") == "dup").Select(e => AgentPageSnapshot.SemanticFormat(e, page)));
+            // 目标父段下有重复 ID 的子段：按位置核对继承格式，提交和撤销照常。
+            var parent = Paragraph("a", "父段"); parent.Add(new XElement(One + "OEChildren", Paragraph("dup", "子一"), Paragraph("dup", "子二")));
+            var s = Snapshot(Page(parent, Paragraph("c", "其他段"))); var t = Tools(s); Read(t, s);
+            var result = Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p4" }, preset_id = "heading1" });
+            True(Json(result).Contains("\"appearance_only\":[\"p1\"]"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var children = Duplicates(api.Page);
+            var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal(2, done.Applied); Equal(children, Duplicates(api.Page));
+            Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+            // 重复 ID 的段落不在目标下，只改别的段落。
+            var other = Snapshot(Page(Paragraph("dup", "甲"), Paragraph("dup", "乙"), Paragraph("c", "丙")));
+            var ot = Tools(other); Read(ot, other);
+            Invoke(ot, "set_paragraph_style", new { snapshot_id = other.SnapshotId, block_ids = new[] { "p3" }, preset_id = "heading2" });
+            var otherApi = new FakePage(other.Page); var oc = new AgentCommitter(otherApi); var od = oc.Commit(other, CancellationToken.None);
+            Equal("Verified", od.Status); Equal(1, od.Applied);
+            Equal("Verified", oc.Undo(other.PageId, od, other.Options, CancellationToken.None).Status);
+        });
+    }
+
+    private static void ConversionUndoConflict(bool code, Action<XElement> edit)
+    {
+        var s = code ? CodePrepared() : Snapshot(Page(Paragraph("a", "甲|<a href='https://example.com/old'>乙</a>")));
+        if (!code) { var t = Tools(s); Read(t, s); Table(t, s, "pipe", "p1"); }
+        var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+        Equal("Verified", done.Status); edit(api.Page); var changed = api.Page.ToString();
+        var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+        Equal(1, undo.Conflicts); Equal(1, api.Writes); Equal(changed, api.Page.ToString());
     }
 
     internal static XElement Paragraph(string id, params string[] runs) => new XElement(One + "OE", new XAttribute("objectID", id), runs.Select(t => new XElement(One + "T", new XCData(t))));

@@ -109,14 +109,39 @@ namespace OneNoteCodeHelper.Services.Agent
                 a.Name.LocalName.StartsWith("author", StringComparison.Ordinal)).ToList()) a.Remove();
         }
 
-        /// <summary>代码框的指纹：Table ID、底色和各行文字。不含列宽和外层段落 ID，这两样 OneNote 会自己改。</summary>
-        internal static string Fingerprint(XElement wrapper)
+        /// <summary>
+        /// 转换结果的撤销指纹：完整内容、格式、对象、引用定义和继承上下文。基线取自回读，不能只比较纯文字，
+        /// 否则撤销会删掉后来加的图片或链接。只忽略已知的瞬态字段、表格包装 ID 和未锁定列的自动宽度。
+        /// 位置只看所在文本框、上级段落的身份和文本框坐标，不看同级序号：前后增删段落或别处的文本框时原地换回不会覆盖别人的内容。
+        /// </summary>
+        internal static string Fingerprint(XElement wrapper, XElement page)
         {
-            var data = new StringBuilder((string)wrapper.Element(One + "Table")?.Attribute("objectID") ?? "");
-            foreach (var cell in wrapper.Descendants(One + "Cell")) data.Append('|').Append(((string)cell.Attribute("shadingColor") ?? "").ToLowerInvariant());
-            foreach (var oe in wrapper.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any())) data.Append('\n').Append(PlainText(oe));
-            using (var sha = SHA256.Create()) return Convert.ToBase64String(sha.ComputeHash(Encoding.UTF8.GetBytes(data.ToString())));
+            var content = new XElement(wrapper);
+            var context = wrapper.Ancestors().Where(e => e != page).Reverse().Select(e =>
+                new XElement("ancestor", new XAttribute("name", e.Name.ToString()),
+                    new XElement(e.Name, e.Attributes(), e.Elements(One + "Position"),
+                        // 祖先若是表格包装，身份取内部表格，包装的 ID 会由 OneNote 重建。
+                        IsTableWrapper(e) ? new XElement(One + "Table", e.Element(One + "Table").Attribute("objectID")) : null))).ToList();
+            var root = new XElement("fingerprint", new XElement("context", context), new XElement("content", content));
+            var styles = root.Descendants().Attributes("quickStyleIndex").Select(a => a.Value).Distinct().ToList();
+            var tags = wrapper.Descendants(One + "Tag").Select(t => (string)t.Attribute("index")).Distinct().ToList();
+            root.Add(new XElement("definitions", page.Elements().Where(e =>
+                e.Name == One + "QuickStyleDef" && styles.Contains((string)e.Attribute("index")) ||
+                e.Name == One + "TagDef" && tags.Contains((string)e.Attribute("index"))).Select(e => new XElement(e))));
+            foreach (var a in root.DescendantsAndSelf().Attributes().Where(a => a.Name.LocalName == "selected" || a.Name.LocalName == "lastModifiedTime").ToList()) a.Remove();
+            foreach (var oe in root.Descendants(One + "OE").Where(IsTableWrapper)) oe.Attribute("objectID")?.Remove();
+            foreach (var column in root.Descendants(One + "Column"))
+            {
+                var locked = TableLook.Flag(column, "isLocked");
+                column.SetAttributeValue("isLocked", locked ? "true" : "false");
+                if (!locked) column.Attribute("width")?.Remove();
+            }
+            foreach (var text in root.DescendantNodes().OfType<XText>().Where(t => t.Parent.HasElements && string.IsNullOrWhiteSpace(t.Value)).ToList()) text.Remove();
+            foreach (var e in root.DescendantsAndSelf()) e.ReplaceAttributes(e.Attributes().OrderBy(a => a.Name.ToString(), StringComparer.Ordinal).ToArray());
+            using (var sha = SHA256.Create()) return Convert.ToBase64String(sha.ComputeHash(Encoding.UTF8.GetBytes(root.ToString(SaveOptions.DisableFormatting))));
         }
+
+        private static bool IsTableWrapper(XElement e) => e.Name == One + "OE" && e.Elements().Count() == 1 && e.Element(One + "Table") != null;
 
         /// <summary>新建段落的回读核验只比文字：OneNote 会改写代码行的 span 和硬空格。</summary>
         internal static string PlainText(XElement oe) => PageEditor.ExtractPlainText(oe).Replace(' ', ' ').TrimEnd();

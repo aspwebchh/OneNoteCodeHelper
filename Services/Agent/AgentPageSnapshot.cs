@@ -83,6 +83,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string Text;
         /// <summary>草稿里已排的文字修正，每项形如「原文」→「改后」。写回核验通过后进入结果，撤销时一起还原。</summary>
         internal readonly List<string> TextFixes = new List<string>();
+        /// <summary>为保留下级段落的格式，本段预设只设置外观，保留原有原生样式。</summary>
+        internal bool AppearanceOnly;
         internal string CurrentText => TextFixes.Count == 0 ? Text : new AgentRichText(Draft).Text;
         internal string ProtectedReason;
         internal string ContainerId;
@@ -120,6 +122,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<AgentCodeUndoItem> CodeRestores = new List<AgentCodeUndoItem>();
         internal readonly List<AgentTable> Tables = new List<AgentTable>();
         internal readonly List<AgentImage> Images = new List<AgentImage>();
+        /// <summary>选中范围时整体选中的表格、图片（objectID）。它们没有段落短 ID，但属于选区，结构调整可以带着走。</summary>
+        private readonly HashSet<string> SelectedObjects = new HashSet<string>();
         internal readonly AgentOptions Options;
         internal readonly XElement Page;
         internal readonly XElement DraftStyles;
@@ -240,6 +244,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 {
                     var lines = table.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any() && !string.IsNullOrWhiteSpace(PageEditor.ExtractPlainText(e))).ToList();
                     if (lines.Count == 0 || lines.Any(e => !selection.Contains((string)e.Attribute("objectID") ?? ""))) continue;
+                    SelectedObjects.Add(objectId);
                 }
                 var container = table.Ancestors().FirstOrDefault(e => e.Parent == Page);
                 var reason = IsCodeBox(table, Page) ? "highlighted_code" : ContainerReason(container);
@@ -260,20 +265,28 @@ namespace OneNoteCodeHelper.Services.Agent
             return ids;
         }
 
-        /// <summary>登记 OneNote 已识别出文字的图片。选中范围时只收图片本身或所在段落被整体选中的。</summary>
+        /// <summary>
+        /// 登记 OneNote 已识别出文字的图片。选中范围时只收图片本身或所在段落被整体选中的；
+        /// 这些选中的图片不论有没有识别文字，都记入 <see cref="SelectedObjects"/>。
+        /// </summary>
         private void CollectImages(ISet<string> selection)
         {
             foreach (var image in Page.Descendants(One + "Image"))
             {
+                var objectId = (string)image.Attribute("objectID") ?? (string)image.Parent?.Attribute("objectID");
+                if (selection != null)
+                {
+                    if ((string)image.Attribute("selected") != "all" && (string)image.Parent?.Attribute("selected") != "all") continue;
+                    if (!string.IsNullOrEmpty(objectId)) SelectedObjects.Add(objectId);
+                }
                 var text = image.Element(One + "OCRData")?.Element(One + "OCRText")?.Value?.Trim();
                 if (string.IsNullOrEmpty(text)) continue;
-                if (selection != null && (string)image.Attribute("selected") != "all" && (string)image.Parent?.Attribute("selected") != "all") continue;
                 var container = image.Parent == Page ? image : image.Ancestors().FirstOrDefault(e => e.Parent == Page);
                 var length = Math.Min(text.Length, AgentImage.MaxChars);
                 if (length < text.Length && char.IsHighSurrogate(text[length - 1])) length--;
                 Images.Add(new AgentImage
                 {
-                    Id = "i" + (Images.Count + 1), ObjectId = (string)image.Attribute("objectID") ?? (string)image.Parent?.Attribute("objectID"),
+                    Id = "i" + (Images.Count + 1), ObjectId = objectId,
                     ContainerId = container == null ? "" : (string)container.Attribute("objectID") ?? container.Name.LocalName,
                     Text = text.Substring(0, length), Truncated = length < text.Length
                 });
@@ -297,16 +310,18 @@ namespace OneNoteCodeHelper.Services.Agent
             .Select(e => (string)e.Attribute("objectID")).Where(id => !string.IsNullOrEmpty(id)));
 
         /// <summary>草稿页面：结构草稿（默认当前的 <see cref="Layout"/>）加上格式草稿和草稿里的样式、标记定义。段落仍带 <see cref="AgentLayout.Key"/>。</summary>
-        internal XElement CreateDraftPage(XElement layout = null)
+        internal XElement CreateDraftPage(XElement layout = null, IDictionary<AgentBlock, XElement> formats = null, XElement styles = null, XElement tags = null)
         {
             var page = new XElement(layout ?? Layout);
             page.Elements(One + "QuickStyleDef").Remove();
             page.Elements(One + "TagDef").Remove();
-            page.AddFirst(DraftTags.Elements().Concat(DraftStyles.Elements()).Select(e => new XElement(e)));
-            foreach (var b in Blocks.Where(b => b.Changed))
+            page.AddFirst((tags ?? DraftTags).Elements().Concat((styles ?? DraftStyles).Elements()).Select(e => new XElement(e)));
+            foreach (var b in Blocks)
             {
+                var format = formats != null && formats.TryGetValue(b, out var proposed) ? proposed : b.Changed ? b.Draft : null;
+                if (format == null) continue;
                 var target = AgentLayout.Find(page, b.Id);
-                if (target != null) CopyFormat(b.Draft, target);
+                if (target != null) CopyFormat(format, target);
             }
             return page;
         }
@@ -317,6 +332,10 @@ namespace OneNoteCodeHelper.Services.Agent
         /// </summary>
         internal void CheckLayout(XElement candidate)
         {
+            // 比较选区外对象的祖先链和相对顺序，而不是绝对序号：在它前面插入选中段落不算越界。
+            // 无文字的 OE（表格、图片包装）也参与，不能借合并文本框搬走未选中的对象；整体选中的表格、图片属于选区，可以带着走。
+            if (SelectionOnly && !SelectionBoundary(Layout).SequenceEqual(SelectionBoundary(candidate)))
+                throw new AiException("这样调整会改变选区外的段落或对象，请扩大选区后重试。");
             foreach (var conversion in CodeConversions)
             {
                 CodeSelection selection = null;
@@ -337,6 +356,16 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (expected != actual) throw new AiException($"这样调整会改变段落 {b.Id} 的格式（会继承上级段落或文本框的样式），没有应用。");
             }
         }
+
+        private IEnumerable<string> SelectionBoundary(XElement layout) => layout.Descendants(One + "OE")
+            .Where(e => AgentLayout.KeyOf(e) == null && !InSelectedObject(e)).Select(e => string.Join("/", e.AncestorsAndSelf().Where(p => p != layout && p.Name != One + "OEChildren")
+                .Reverse().Select(p => p.Name.LocalName + ":" + ((string)p.Attribute("objectID") ?? AgentLayout.KeyOf(p) ?? ""))));
+
+        /// <summary>整体选中的表格、图片的外层段落，以及这种表格里的段落（包括没选中的空行）：跟着选中段落移动不算越界。</summary>
+        private bool InSelectedObject(XElement oe) => oe.Elements(One + "Table").Concat(oe.Ancestors(One + "Table"))
+            .Select(t => (string)t.Attribute("objectID"))
+            .Concat(oe.Elements(One + "Image").Select(i => (string)i.Attribute("objectID") ?? (string)oe.Attribute("objectID")))
+            .Any(id => id != null && SelectedObjects.Contains(id));
 
         private static bool IsBinary(XElement e) => new[] { "Image", "InkDrawing", "InkWord", "InkParagraph", "InsertedFile", "MediaFile", "FutureObject", "HTMLBlock" }.Contains(e.Name.LocalName);
         /// <summary>

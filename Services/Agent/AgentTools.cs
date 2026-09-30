@@ -123,7 +123,8 @@ namespace OneNoteCodeHelper.Services.Agent
             paragraph.Properties["preset_id"] = AgentSchema.Str(ParagraphStyles.Ids);
             paragraph.Properties["overrides"] = AgentSchema.Obj(fields);
             paragraph.Required = new[] { "snapshot_id", "block_ids", "preset_id" };
-            Register("set_paragraph_style", "为完整读取的段落设置标题、正文或引用样式，可受限覆盖；只修改草稿，不改文字。原生标题由能力开关决定。", paragraph, Paragraph);
+            Register("set_paragraph_style", "为完整读取的段落设置标题、正文或引用样式，可受限覆盖；只修改草稿，不改文字。原生标题由能力开关决定。" +
+                "若原生样式会影响未指定的下级段落，则只设置本段外观并保留原有标题层级，结果 appearance_only 列出这些段落。", paragraph, Paragraph);
             var style = AgentSchema.Obj(new Dictionary<string, AgentSchema>
             {
                 ["bold"] = new AgentSchema { Type = "boolean" }, ["italic"] = new AgentSchema { Type = "boolean" },
@@ -372,6 +373,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     break;
                 case "set_paragraph_style":
                     detail = JoinDetail(PresetName(AiClient.Get(args, "preset_id") as string), CountOf(args, "block_ids"));
+                    if (AiClient.Get(outcome, "appearance_only") is IList appearance && appearance.Count > 0)
+                        detail = JoinDetail(detail, $"{appearance.Count} 段仅设置外观");
                     break;
                 case "set_text_style":
                     detail = AiClient.Get(args, "targets") is IList targets ? $"{targets.Count} 处" : null;
@@ -591,19 +594,52 @@ namespace OneNoteCodeHelper.Services.Agent
             if (overrides.TryGetValue("font_family", out var font) && !FontInstalled((string)font)) throw new AiException("指定字体未安装。");
             var drafts = new Dictionary<AgentBlock, XElement>();
             var styles = new XElement(_snapshot.DraftStyles);
+            var before = _snapshot.CreateDraftPage();
             foreach (var b in blocks)
             {
                 Block(b.Id, true);
                 if (preset == "page_title" && AgentCommitter.Find(_snapshot.Page, b.ObjectId).Parent?.Name != OneNoteApi.One + "Title") throw new AiException("页面标题样式只能用于原标题。");
                 var draft = new XElement(b.Draft);
-                ParagraphStyles.Apply(draft, preset, overrides, _snapshot.Options);
+                var current = AgentLayout.Find(before, b.Id) ?? throw new AiException("目标段落已删除。");
+                ParagraphStyles.Apply(draft, preset, overrides, _snapshot.Options, current.Elements(OneNoteApi.One + "OEChildren").Any());
                 if (_snapshot.Options.EnableNativeHeadings && preset != "page_title")
                     draft.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(styles, ParagraphStyles.Definition(preset, _snapshot.Options)));
                 drafts.Add(b, draft);
             }
-            var result = Publish(drafts);
-            _snapshot.DraftStyles.ReplaceNodes(styles.Elements().Select(e => new XElement(e)));
+            var after = _snapshot.CreateDraftPage(formats: drafts, styles: styles);
+            var targeted = new HashSet<string>(blocks.Select(b => b.Id));
+            var appearanceOnly = new HashSet<string>();
+            // 两份草稿页出自同一个结构草稿，只差格式，段落按位置一一对应。页面上可能有重复或缺失的 objectID，不按 ID 找。
+            var originals = after.Descendants(OneNoteApi.One + "OE").Zip(before.Descendants(OneNoteApi.One + "OE"), (a, o) => (a, o)).ToDictionary(p => p.a, p => p.o);
+            // 从内向外检查，先消除内层目标的影响，避免把无关的外层标题也降级。
+            foreach (var b in blocks.OrderByDescending(b => AgentLayout.Find(before, b.Id).Ancestors().Count()))
+            {
+                var target = AgentLayout.Find(after, b.Id);
+                var untouched = target.Descendants(OneNoteApi.One + "OE").Where(e => e.Elements(OneNoteApi.One + "T").Any() && !targeted.Contains(AgentLayout.KeyOf(e) ?? "")).ToList();
+                if (untouched.All(e => SameInheritedFormat(e, originals[e], after, before))) continue;
+                var native = new AgentRichText(target).Signature(after, true);
+                var draft = drafts[b];
+                foreach (var name in new[] { "style", "quickStyleIndex" }) draft.SetAttributeValue(name, (string)b.Draft.Attribute(name));
+                ParagraphStyles.PinEmphasis(draft, ParagraphStyles.Definition(preset, _snapshot.Options));
+                AgentPageSnapshot.CopyFormat(draft, target);
+                // 仅设置外观必须和原生样式看起来一样，做不到就不改，不把别的外观当成完成。
+                if (new AgentRichText(target).Signature(after, true) != native) throw new AiException($"段落 {b.Id} 无法在保留下级段落格式的同时设置这种外观，没有修改。");
+                appearanceOnly.Add(b.Id);
+            }
+            var result = Publish(drafts, styles: styles, appearanceOnly: appearanceOnly);
+            foreach (var b in blocks) b.AppearanceOnly = appearanceOnly.Contains(b.Id);
             return result;
+        }
+
+        /// <param name="original">node 在修改前草稿页 before 里对应的段落。</param>
+        private static bool SameInheritedFormat(XElement node, XElement original, XElement page, XElement before)
+        {
+            try { return AgentPageSnapshot.SemanticFormat(original, before) == AgentPageSnapshot.SemanticFormat(node, page); }
+            catch (Exception ex) when (ex is System.Xml.XmlException || ex is AiException || ex is ArgumentException)
+            {
+                // 未指定的未知 HTML 本身没动，仍须检查它继承的格式，不能因解析不了而放过原生样式的影响。
+                return Css.Write(Css.Effective(original, before)) == Css.Write(Css.Effective(node, page));
+            }
         }
         internal static bool FontInstalled(string name) => System.Windows.Media.Fonts.SystemFontFamilies.Any(f =>
             Css.Normalize(f.Source) == Css.Normalize(name) || f.FamilyNames.Values.Any(v => Css.Normalize(v) == Css.Normalize(name)));
@@ -668,9 +704,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 AgentMarks.SetTag(draft, kind, completed, definitions);
                 drafts.Add(b, draft);
             }
-            var result = Publish(drafts);
-            _snapshot.DraftTags.ReplaceNodes(definitions.Elements().Select(e => new XElement(e)));
-            return result;
+            return Publish(drafts, tags: definitions);
         }
 
         private object TableStyle(IDictionary<string, object> args)
@@ -765,7 +799,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var conversion = new AgentCodeConversion { Blocks = ordered, LanguageId = language.Id, Code = selection.Code, Table = table };
             // 转换后这些段落就不在了，之前给它们排的格式草稿作废。
             var discarded = ordered.Where(b => b.Changed).Select(b => b.Id).ToArray();
-            foreach (var b in ordered) { b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.Conversion = conversion; }
+            foreach (var b in ordered) { b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.AppearanceOnly = false; b.Conversion = conversion; }
             _snapshot.CodeConversions.Add(conversion);
             _snapshot.Revision++;
             return new { ok = true, draft_revision = _snapshot.Revision, changed = ordered.Select(b => b.Id).ToArray(), noop = new string[0],
@@ -804,7 +838,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var conversion = new AgentCodeConversion { Blocks = ordered, TextTable = true, Code = selection.Code, Table = table };
             // 转换后这些段落就不在了，之前给它们排的格式和文字修正作废。
             var discarded = ordered.Where(b => b.Changed).Select(b => b.Id).ToArray();
-            foreach (var b in ordered) { b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.Conversion = conversion; }
+            foreach (var b in ordered) { b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.AppearanceOnly = false; b.Conversion = conversion; }
             _snapshot.CodeConversions.Add(conversion);
             _snapshot.Revision++;
             return new { ok = true, draft_revision = _snapshot.Revision, changed = ordered.Select(b => b.Id).ToArray(), rows = table.Elements(OneNoteApi.One + "Row").Count(),
@@ -952,27 +986,39 @@ namespace OneNoteCodeHelper.Services.Agent
             return true;
         }
 
-        private object Publish(Dictionary<AgentBlock, XElement> drafts)
+        private object Publish(Dictionary<AgentBlock, XElement> drafts, XElement styles = null, XElement tags = null, ISet<string> appearanceOnly = null)
         {
             var changed = new List<string>();
             var noop = new List<string>();
+            var before = _snapshot.CreateDraftPage();
+            var after = _snapshot.CreateDraftPage(formats: drafts, styles: styles, tags: tags);
             // 先验证全部段落，再一次性发布草稿。失败时这个工具没有副作用。
             foreach (var pair in drafts)
-                if (new AgentRichText(pair.Key.Draft).Signature(_snapshot.Page, false) != new AgentRichText(pair.Value).Signature(_snapshot.Page, false))
-                    throw new AiException("格式工具不能改变正文或链接。");
-            foreach (var pair in drafts)
             {
+                var old = AgentLayout.Find(before, pair.Key.Id) ?? throw new AiException("目标段落已删除。");
+                var proposed = AgentLayout.Find(after, pair.Key.Id);
+                if (new AgentRichText(old).Signature(before, false) != new AgentRichText(proposed).Signature(after, false))
+                    throw new AiException("格式工具不能改变正文或链接。");
+                var expected = AgentPageSnapshot.SemanticFormat(proposed, after);
+                // 同批父段可能改变继承值。即使最终外观与原来相同，抵消继承变化的显式样式也必须发布。
+                AgentPageSnapshot.CopyFormat(old, proposed);
+                var without = AgentPageSnapshot.SemanticFormat(proposed, after);
+                AgentPageSnapshot.CopyFormat(pair.Value, proposed);
                 if ((string)pair.Key.Draft.Attribute("quickStyleIndex") == (string)pair.Value.Attribute("quickStyleIndex") &&
                     AgentMarks.DraftKey(pair.Key.Draft) == AgentMarks.DraftKey(pair.Value) &&
-                    AgentPageSnapshot.SemanticFormat(pair.Key.Draft, _snapshot.Page) == AgentPageSnapshot.SemanticFormat(pair.Value, _snapshot.Page)) noop.Add(pair.Key.Id);
-                else { pair.Key.Draft = pair.Value; changed.Add(pair.Key.Id); }
+                    AgentPageSnapshot.SemanticFormat(old, before) == expected && without == expected) noop.Add(pair.Key.Id);
+                else changed.Add(pair.Key.Id);
             }
+            foreach (var pair in drafts.Where(p => changed.Contains(p.Key.Id))) pair.Key.Draft = pair.Value;
+            if (styles != null) _snapshot.DraftStyles.ReplaceNodes(styles.Elements().Select(e => new XElement(e)));
+            if (tags != null) _snapshot.DraftTags.ReplaceNodes(tags.Elements().Select(e => new XElement(e)));
             if (changed.Count > 0) _snapshot.Revision++;
-            return new { ok = true, draft_revision = _snapshot.Revision, changed, noop };
+            return new { ok = true, draft_revision = _snapshot.Revision, changed, noop, appearance_only = appearanceOnly?.ToArray() };
         }
         private object Pending(IDictionary<string, object> args) => new { snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
             changed = _snapshot.Blocks.Where(b => b.Changed).Select(b => b.Id).ToArray(),
             text_fixes = _snapshot.Blocks.Where(b => b.TextFixes.Count > 0).Select(b => new { id = b.Id, fixes = b.TextFixes.ToArray() }).ToArray(),
+            appearance_only = _snapshot.Blocks.Where(b => b.Changed && b.AppearanceOnly).Select(b => b.Id).ToArray(),
             unread = _snapshot.Blocks.Where(b => b.Editable && !b.Read && b.Conversion == null).Select(b => b.Id).ToArray(),
             code_blocks = _snapshot.CodeConversions.Where(c => !c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
             text_tables = _snapshot.CodeConversions.Where(c => c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray() }).ToArray(),

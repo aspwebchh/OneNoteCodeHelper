@@ -274,10 +274,19 @@ namespace OneNoteCodeHelper.Services.Agent
                 var root = new XElement("root");
                 var open = new List<XElement>();
                 var templates = new List<XElement>();
+                var pending = new StringBuilder();
+                void FlushText()
+                {
+                    if (pending.Length == 0) return;
+                    (open.LastOrDefault() ?? root).Add(new XText(pending.ToString()));
+                    pending.Clear();
+                }
                 foreach (var p in _pieces.Where(p => p.Run == run))
                 {
                     var common = 0;
                     while (common < templates.Count && common < p.Path.Count && XNode.DeepEquals(templates[common], p.Path[common])) common++;
+                    // Replace/Keep 为保留格式按 UTF-16 char 拆片；同一路径的文字须先合并，不能单独序列化半个代理项。
+                    if (common != templates.Count || common != p.Path.Count) FlushText();
                     open.RemoveRange(common, open.Count - common);
                     templates.RemoveRange(common, templates.Count - common);
                     for (var i = common; i < p.Path.Count; i++)
@@ -287,8 +296,10 @@ namespace OneNoteCodeHelper.Services.Agent
                         open.Add(e);
                         templates.Add(p.Path[i]);
                     }
-                    (open.LastOrDefault() ?? root).Add(p.Break ? (XNode)new XElement("br") : new XText(p.Text));
+                    if (p.Break) { FlushText(); (open.LastOrDefault() ?? root).Add(new XElement("br")); }
+                    else pending.Append(p.Text);
                 }
+                FlushText();
                 var html = string.Concat(root.Nodes().Select(n => n.ToString(SaveOptions.DisableFormatting))).Replace("\u00a0", "&nbsp;");
                 runs[run].ReplaceNodes(new XCData(html));
             }
@@ -382,14 +393,19 @@ namespace OneNoteCodeHelper.Services.Agent
                     Set(result, "font-family", (string)definition.Attribute("font"));
                     Set(result, "font-size", (string)definition.Attribute("fontSize") + "pt");
                     Set(result, "color", (string)definition.Attribute("fontColor"));
-                    result["font-weight"] = (string)definition.Attribute("bold") == "true" ? "bold" : "normal";
-                    result["font-style"] = (string)definition.Attribute("italic") == "true" ? "italic" : "normal";
-                    result["text-decoration"] = (string)definition.Attribute("underline") == "true" ? "underline" : "none";
+                    Merge(result, Emphasis(definition));
                 }
                 Merge(result, Read((string)e.Attribute("style")));
             }
             return result;
         }
+        /// <summary>QuickStyleDef 决定的加粗、斜体、下划线；没写的按 false。</summary>
+        internal static Dictionary<string, string> Emphasis(XElement definition) => new Dictionary<string, string>
+        {
+            ["font-weight"] = (string)definition.Attribute("bold") == "true" ? "bold" : "normal",
+            ["font-style"] = (string)definition.Attribute("italic") == "true" ? "italic" : "normal",
+            ["text-decoration"] = (string)definition.Attribute("underline") == "true" ? "underline" : "none"
+        };
         private static void Set(IDictionary<string, string> css, string key, string value)
         { if (!string.IsNullOrEmpty(value)) css[key] = Normalize(value); }
     }
@@ -438,7 +454,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     ? n.ToString("0.###", CultureInfo.InvariantCulture) : "0";
             return string.Join(";", values.OrderBy(a => a.Key).Select(a => a.Key + "=" + a.Value));
         }
-        internal static void Apply(XElement oe, string preset, IDictionary<string, object> overrides, AgentOptions options)
+        internal static void Apply(XElement oe, string preset, IDictionary<string, object> overrides, AgentOptions options, bool? hasLayoutChildren = null)
         {
             var index = Array.IndexOf(Ids, preset);
             if (index < 0) throw new AiException("未知样式。");
@@ -466,7 +482,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     case "space_after_pt": oe.SetAttributeValue("spaceAfter", item.Value); break;
                 }
             }
-            var hasChildren = oe.Elements(OneNoteApi.One + "OEChildren").Any();
+            var hasChildren = hasLayoutChildren ?? oe.Elements(OneNoteApi.One + "OEChildren").Any();
             if (!hasChildren) oe.SetAttributeValue("style", Css.Write(css));
             var remove = new Dictionary<string, string> { ["font-family"] = "", ["font-size"] = "" };
             foreach (var t in oe.Elements(OneNoteApi.One + "T"))
@@ -487,6 +503,20 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 rich = new AgentRichText(oe);
                 rich.Format(0, rich.Text.Length, new Dictionary<string, string> { ["font-weight"] = "bold" });
+            }
+        }
+
+        /// <summary>
+        /// 仅设置外观时段落保留原有样式引用，它的加粗、斜体、下划线仍会生效。把目标定义的这三项写到文字上，
+        /// 文字上已有的显式值保留，与使用原生样式时的优先级一致。字体、字号、颜色已由 <see cref="Apply"/> 写在文字上。
+        /// </summary>
+        internal static void PinEmphasis(XElement oe, XElement definition)
+        {
+            foreach (var t in oe.Elements(OneNoteApi.One + "T"))
+            {
+                var s = Css.Read((string)t.Attribute("style"));
+                foreach (var item in Css.Emphasis(definition)) if (!s.ContainsKey(item.Key)) s[item.Key] = item.Value;
+                t.SetAttributeValue("style", Css.Write(s));
             }
         }
     }

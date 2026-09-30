@@ -56,12 +56,14 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<string> ConflictIds = new List<string>();
         /// <summary>已核验写入的文字修正，每项形如「原文」→「改后」。含笔记正文，只在窗口里显示，不写日志。</summary>
         internal readonly List<string> TextFixes = new List<string>();
+        /// <summary>已核验写入、为保留下级格式而只设置外观的段落。</summary>
+        internal readonly List<string> AppearanceOnly = new List<string>();
         internal bool CanUndo => Undo.Count + CodeUndo.Count + TableUndo.Count + OutlineUndo.Count > 0;
         /// <summary>撤销之后不再把撤销的逆操作当作可撤销。</summary>
         internal void ClearUndo() { Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
         internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
             removed = Removed, moved = Moved, indented = Indented, inserted = Inserted, merged = Merged,
-            skipped_conflict = ConflictIds, unverified = Unverified, protected_count = Protected, message = Message };
+            skipped_conflict = ConflictIds, unverified = Unverified, protected_count = Protected, appearance_only = AppearanceOnly, message = Message };
         /// <summary>结果消息里的结构改动部分。</summary>
         internal string LayoutSummary => (Removed > 0 ? $"删除空行 {Removed} 行；" : "") + (Moved > 0 ? $"移动 {Moved} 段；" : "") +
             (Indented > 0 ? $"调整缩进 {Indented} 段；" : "") + (Inserted > 0 ? $"插入 {Inserted} 段；" : "") + (Merged > 0 ? $"合并文本框 {Merged} 个；" : "") +
@@ -87,12 +89,12 @@ namespace OneNoteCodeHelper.Services.Agent
                     var known = new HashSet<string>(page.Descendants().Attributes("objectID").Select(a => a.Value));
                     var untouched = new Dictionary<string, string>();
                     var fingerprints = new Dictionary<string, string>();
-                    foreach (var oe in page.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()))
+                    foreach (var group in page.Descendants(One + "OE").Where(e => e.Attribute("objectID") != null).GroupBy(e => (string)e.Attribute("objectID")))
                     {
-                        var id = (string)oe.Attribute("objectID");
-                        if (id == null) continue;
-                        fingerprints[id] = AgentPageSnapshot.Fingerprint(oe, page);
-                        try { untouched[id] = AgentPageSnapshot.SemanticFormat(oe, page); }
+                        var lines = group.Where(e => e.Elements(One + "T").Any()).ToList();
+                        if (lines.Count == 0) continue;
+                        foreach (var oe in lines) fingerprints[group.Key] = AgentPageSnapshot.Fingerprint(oe, page);
+                        try { untouched[group.Key] = UntouchedFormat(group, page); }
                         catch (Exception) { /* 不支持的 HTML 由内容不变量检查保留。 */ }
                     }
                     var planned = new List<(AgentBlock Block, XElement Before, XElement Desired, XElement Target)>();
@@ -195,7 +197,9 @@ namespace OneNoteCodeHelper.Services.Agent
                     foreach (var item in snapshot.CodeRestores)
                     {
                         var box = AgentCode.FindCodeBox(page, item.TableId);
-                        if (box == null || AgentCode.Fingerprint(box) != item.Fingerprint) { report.ConflictIds.Add(item.TableId); continue; }
+                        // 同批逐段撤销可能先恢复祖先格式或改变前面的段落数，冲突必须对照本轮写入前的状态。
+                        var beforeBox = AgentCode.FindCodeBox(original, item.TableId);
+                        if (box == null || beforeBox == null || AgentCode.Fingerprint(beforeBox, original) != item.Fingerprint) { report.ConflictIds.Add(item.TableId); continue; }
                         foreach (var id in box.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(id => id != null).ToList()) untouched.Remove(id);
                         containers.Add(box.Ancestors().First(e => e.Parent == page));
                         restores.Add((AgentCode.Restore(box, item, page), item));
@@ -266,6 +270,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             { report.Unverified++; continue; }
                             report.Applied++;
                             report.TextFixes.AddRange(item.Block.TextFixes);
+                            if (item.Block.AppearanceOnly) report.AppearanceOnly.Add(item.Block.Id);
                             report.Undo.Add(new AgentUndoItem { ObjectId = (string)written.Attribute("objectID"), Before = item.Before,
                                 AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual), TextFixes = item.Block.TextFixes.ToList(),
                                 Styles = AgentLayout.Styles(item.Before, original), Tags = AgentLayout.Tags(item.Before, original) });
@@ -288,7 +293,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         var written = actualLines[expectedLines.IndexOf(code.Box)];
                         if (!ConversionWritten(code.Box, written, code.Conversion, page, actual)) { report.Unverified++; continue; }
                         code.Undo.TableId = (string)written.Element(One + "Table").Attribute("objectID");
-                        code.Undo.Fingerprint = AgentCode.Fingerprint(written);
+                        code.Undo.Fingerprint = AgentCode.Fingerprint(written, actual);
                         if (code.Conversion.TextTable) report.TextTables++; else report.CodeBlocks++;
                         report.CodeUndo.Add(code.Undo);
                     }
@@ -328,6 +333,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         (conversions.Any(c => !c.TextTable) ? $"高亮代码 {report.CodeBlocks} 处；" : "") + (conversions.Any(c => c.TextTable) ? $"转换表格 {report.TextTables} 个；" : "") +
                         (tables.Count + edits.Sum(e => e.Tables.Count) > 0 ? $"表格样式 {report.Tables} 个；" : "") +
                         $"冲突跳过 {report.Conflicts} 处；未验证 {report.Unverified} 处；保护 {report.Protected} 段。";
+                    if (report.AppearanceOnly.Count > 0) report.Message += $"\n为保留下级段落格式，有 {report.AppearanceOnly.Count} 段仅设置外观，保留原有标题层级。";
                     if (uncertain && report.Applied + report.CodeBlocks + report.Tables + report.TextTables + report.Outlines == 0) report.Message = "写回未得到确认，请检查页面。" + report.Message;
                     return report;
                 }
@@ -569,6 +575,7 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 report.Applied++;
                 report.TextFixes.AddRange(block.TextFixes);
+                if (block.AppearanceOnly) report.AppearanceOnly.Add(block.Id);
             }
             foreach (var (box, conversion) in edit.Boxes)
             {
@@ -645,12 +652,16 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             foreach (var item in expected)
             {
-                var oe = Find(page, item.Key);
-                try { if (oe == null || AgentPageSnapshot.SemanticFormat(oe, page) != item.Value) return false; }
+                var paragraphs = page.Descendants(One + "OE").Where(e => (string)e.Attribute("objectID") == item.Key).ToList();
+                try { if (paragraphs.Count == 0 || UntouchedFormat(paragraphs, page) != item.Value) return false; }
                 catch (Exception) { return false; }
             }
             return true;
         }
+
+        /// <summary>同一 objectID 的全部段落按页面顺序的语义格式。页面上可能有重复 ID，逐个核对，不能只取其中一个。</summary>
+        private static string UntouchedFormat(IEnumerable<XElement> paragraphs, XElement page) =>
+            string.Join("\n", paragraphs.Select(oe => AgentPageSnapshot.SemanticFormat(oe, page)));
 
         /// <param name="formatted">本次写入格式的段落。它们的列表和标记已按语义核验，这里不再逐字比 XML（OneNote 会补上字号、编号文字、时间）。</param>
         private static bool ContentPreserved(XElement expected, XElement actual, ISet<string> known, ISet<string> formatted)
