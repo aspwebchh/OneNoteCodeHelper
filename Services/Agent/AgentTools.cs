@@ -708,29 +708,38 @@ namespace OneNoteCodeHelper.Services.Agent
             var kind = (string)args["list"];
             var drafts = new Dictionary<AgentBlock, XElement>();
             foreach (var b in Targets(args).Select(MarkTarget)) drafts.Add(b, new XElement(b.Draft));
-            // 先建立整批目标集合，按页面顺序恢复编号，避免模型传参顺序或分批调用把独立列表接在一起。
-            foreach (var b in Ordered().Select(item => item.Block).Where(b => b != null && drafts.ContainsKey(b)))
-            {
-                int? start = null;
-                if (kind == "number" && b.MarkdownList?.Number != null && AgentMarks.ListKind(b.Draft) != "number")
-                {
-                    var node = AgentLayout.Find(_snapshot.Layout, b.Id);
-                    var previous = node.ElementsBeforeSelf(OneNoteApi.One + "OE").LastOrDefault();
-                    var key = previous == null ? null : AgentLayout.KeyOf(previous);
-                    var prior = _snapshot.Blocks.FirstOrDefault(p => p.Id == key);
-                    var priorDraft = prior == null ? null : drafts.TryGetValue(prior, out var d) ? d : prior.Draft;
-                    var priorNumber = priorDraft?.Element(OneNoteApi.One + "List")?.Element(OneNoteApi.One + "Number");
-                    var marker = prior?.MarkdownList;
-                    // 仅同一父节点、同层的连续 Markdown 列表继续编号；连续的 1. 写法也按 Markdown 惯例递增。
-                    var continues = marker?.Number != null && prior.Conversion == null &&
-                        (string)priorNumber?.Attribute("numberSequence") == "0" && (string)priorNumber.Attribute("numberFormat") == "##." &&
-                        marker.Indent == b.MarkdownList.Indent && marker.Quote == b.MarkdownList.Quote &&
-                        (b.MarkdownList.Number == marker.Number + 1 || b.MarkdownList.Number == 1 && marker.Number == 1);
-                    if (!continues) start = b.MarkdownList.Number;
-                }
-                AgentMarks.SetList(drafts[b], kind, start);
-            }
+            foreach (var draft in drafts.Values) AgentMarks.SetList(draft, kind);
+            NormalizeMarkdownNumbers(drafts);
             return Publish(drafts);
+        }
+
+        /// <summary>按这次调用后的列表状态重算 Markdown 起点，包括先前分批恢复的相邻项；原生编号不动。</summary>
+        private void NormalizeMarkdownNumbers(Dictionary<AgentBlock, XElement> drafts)
+        {
+            var blocks = _snapshot.Blocks.ToDictionary(b => b.Id);
+            XElement Draft(AgentBlock b) => drafts.TryGetValue(b, out var d) ? d : b.Draft;
+            foreach (var item in Ordered())
+            {
+                var b = item.Block;
+                if (b?.MarkdownList?.Number == null || !b.Editable || !b.Read || b.Conversion != null || AgentMarks.ListKind(b.Original) == "number") continue;
+                var number = Draft(b).Element(OneNoteApi.One + "List")?.Element(OneNoteApi.One + "Number");
+                if ((string)number?.Attribute("numberSequence") != "0" || (string)number.Attribute("numberFormat") != "##.") continue;
+                var previous = item.Node.ElementsBeforeSelf(OneNoteApi.One + "OE").LastOrDefault();
+                var key = previous == null ? null : AgentLayout.KeyOf(previous);
+                var prior = key != null && blocks.TryGetValue(key, out var p) ? p : null;
+                var priorNumber = prior == null ? null : Draft(prior).Element(OneNoteApi.One + "List")?.Element(OneNoteApi.One + "Number");
+                var marker = prior?.MarkdownList;
+                // 仅同一父节点、同层的连续 Markdown 列表继续编号；连续的 1. 写法也按 Markdown 惯例递增。
+                var continues = marker?.Number != null && prior.Conversion == null &&
+                    (string)priorNumber?.Attribute("numberSequence") == "0" && (string)priorNumber.Attribute("numberFormat") == "##." &&
+                    marker.Indent == b.MarkdownList.Indent && marker.Quote == b.MarkdownList.Quote &&
+                    (b.MarkdownList.Number == marker.Number + 1 || b.MarkdownList.Number == 1 && marker.Number == 1);
+                int? start = continues ? (int?)null : b.MarkdownList.Number;
+                if ((string)number.Attribute("restartNumberingAt") == start?.ToString(CultureInfo.InvariantCulture)) continue;
+                // 不在本批目标里的后项也可能要清掉临时起点；只改副本，一起经 Publish 核验、发布。
+                if (!drafts.TryGetValue(b, out var draft)) drafts.Add(b, draft = new XElement(b.Draft));
+                draft.Element(OneNoteApi.One + "List").Element(OneNoteApi.One + "Number").SetAttributeValue("restartNumberingAt", start);
+            }
         }
 
         private object SetTag(IDictionary<string, object> args)

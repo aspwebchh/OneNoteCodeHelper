@@ -170,7 +170,7 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             if (!kinds.Contains("emphasis")) return;
             // 用栈配对，连续的结尾符号可以同时关闭内外层（**粗体里有 *斜体***）。
-            var open = new List<(int Start, int Length, char Mark)>();
+            var open = "*_~".ToDictionary(c => c, c => new EmphasisOpenings());
             for (var i = p; i < masked.Length;)
             {
                 var mark = masked[i];
@@ -183,33 +183,70 @@ namespace OneNoteCodeHelper.Services.Agent
                     (mark == '~' || i == p || !AsciiWord(masked[i - 1]));
                 var canClose = i > p && !char.IsWhiteSpace(masked[i - 1]) &&
                     (mark == '~' || end == masked.Length || !AsciiWord(masked[end]));
-                var count = 0;
-                var remaining = length;
-                if (canClose)
-                {
-                    for (var j = open.Count - 1; j >= 0 && open[j].Mark == mark && open[j].Length <= remaining; j--)
-                    {
-                        remaining -= open[j].Length;
-                        count++;
-                        if (remaining == 0) break;
-                    }
-                }
-                if (count > 0 && remaining == 0)
+                var openings = open[mark];
+                var match = canClose ? openings.Match(length) : (First: -1, Last: -1);
+                if (match.First >= 0)
                 {
                     var close = i;
-                    for (var j = 0; j < count; j++)
+                    var start = openings.Items[match.First].Start;
+                    for (var j = match.Last; j >= match.First; j--)
                     {
-                        var opening = open[open.Count - 1];
-                        open.RemoveAt(open.Count - 1);
+                        var opening = openings.Items[j];
                         result.Marks.Add((offset + opening.Start, opening.Length));
                         result.Marks.Add((offset + close, opening.Length));
                         if (format) result.Formats.Add((offset + opening.Start + opening.Length,
                             close - opening.Start - opening.Length, Css(new string(mark, opening.Length))));
                         close += opening.Length;
                     }
+                    // 被跨过的未配对开启符号仍是正文，但不能再和这个外层之后的符号交叉配对。
+                    foreach (var stack in open.Values) stack.RemoveFrom(start);
                 }
-                else if (canOpen && length <= 3) open.Add((i, length, mark));
+                else if (canOpen && length <= 3) openings.Add(i, length);
                 i = end;
+            }
+        }
+
+        /// <summary>
+        /// 同类开启符号按顺序累积长度，找到恰好消耗闭合串的最近一组；不部分消耗，也不删除未配对符号。
+        /// 按闭合长度缓存配对区间，新增只检查新结尾，避免反复向前扫描大量未闭合符号。
+        /// </summary>
+        private sealed class EmphasisOpenings
+        {
+            internal readonly List<(int Start, int Length)> Items = new List<(int, int)>();
+            private readonly List<int> _sums = new List<int> { 0 };
+            private readonly Dictionary<int, int> _indices = new Dictionary<int, int> { [0] = 0 };
+            private readonly Dictionary<int, List<(int First, int Last)>> _matches = new Dictionary<int, List<(int, int)>>();
+
+            internal void Add(int start, int length)
+            {
+                Items.Add((start, length));
+                var sum = _sums[_sums.Count - 1] + length;
+                _sums.Add(sum); _indices.Add(sum, Items.Count);
+                foreach (var pair in _matches)
+                    if (_indices.TryGetValue(sum - pair.Key, out var first)) pair.Value.Add((first, Items.Count - 1));
+            }
+
+            internal (int First, int Last) Match(int length)
+            {
+                if (!_matches.TryGetValue(length, out var matches))
+                {
+                    matches = new List<(int, int)>();
+                    for (var last = 0; last < Items.Count; last++)
+                        if (_indices.TryGetValue(_sums[last + 1] - length, out var first)) matches.Add((first, last));
+                    _matches.Add(length, matches);
+                }
+                return matches.Count == 0 ? (-1, -1) : matches[matches.Count - 1];
+            }
+
+            internal void RemoveFrom(int start)
+            {
+                while (Items.Count > 0 && Items[Items.Count - 1].Start >= start)
+                {
+                    _indices.Remove(_sums[_sums.Count - 1]);
+                    _sums.RemoveAt(_sums.Count - 1); Items.RemoveAt(Items.Count - 1);
+                }
+                foreach (var matches in _matches.Values)
+                    while (matches.Count > 0 && matches[matches.Count - 1].Last >= Items.Count) matches.RemoveAt(matches.Count - 1);
             }
         }
 

@@ -516,6 +516,42 @@ internal static class Program
                 Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(pair.Item1, Texts(api.Page));
             }
         });
+        Test("markdown outer emphasis survives unmatched inner markers in removal and format modes", () =>
+        {
+            var cases = new[] {
+                ("**粗体中有 _未闭合下划线**", "粗体中有 _未闭合下划线", "<b>粗体中有 _未闭合下划线</b>"),
+                ("**粗体中有 *未闭合星号**", "粗体中有 *未闭合星号", "<b>粗体中有 *未闭合星号</b>"),
+                ("**正文 _悬空 *斜体***", "正文 _悬空 斜体", "<b>正文 _悬空 <i>斜体</i></b>"),
+                ("*斜体 **字面星号*", "斜体 **字面星号", "<i>斜体 **字面星号</i>"),
+                ("~~删除中有 _悬空~~", "删除中有 _悬空", "<s>删除中有 _悬空</s>"),
+                ("**甲 _悬空** __乙 *悬空__", "甲 _悬空 乙 *悬空", "<b>甲 _悬空</b> <b>乙 *悬空</b>"),
+                ("**😀&nbsp;<a href='https://example.com'>_𠮷字</a>**", "😀\u00a0_𠮷字", "<b>😀&nbsp;<a href='https://example.com'>_𠮷字</a></b>") };
+            foreach (var format in new[] { false, true }) foreach (var item in cases)
+            {
+                var s = Snapshot(Page(Paragraph("a", item.Item1))); var t = Tools(s); Read(t, s);
+                Invoke(t, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, emphasis = format ? "format" : "remove" });
+                Equal(item.Item2, s.Blocks[0].CurrentText);
+                var revision = s.Revision; Cleanup(t, s, "p1"); Equal(revision, s.Revision);
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(0, r.Unverified);
+                var html = format ? item.Item3 : item.Item3.Replace("<b>", "").Replace("</b>", "").Replace("<i>", "").Replace("</i>", "").Replace("<s>", "").Replace("</s>", "");
+                var expected = Paragraph("a", html);
+                Equal(new AgentRichText(expected).Signature(Page(expected), true), new AgentRichText(AgentCommitter.Find(api.Page, "a")).Signature(api.Page, true));
+                Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(s.Page), Texts(api.Page));
+            }
+        });
+        Test("markdown fallback keeps incomplete closers literal and does not pair across a closed outer span", () =>
+        {
+            Equal("*未闭合**|**未闭合*|__未闭合_|粗体 _悬空 后续_|粗体 ~~悬空 后续~~",
+                Strip("*未闭合**", "**未闭合*", "__未闭合_", "**粗体 _悬空** 后续_", "**粗体 ~~悬空** 后续~~"));
+        });
+        Test("markdown fallback handles many incomplete delimiters without repeated backward scans", () =>
+        {
+            var text = string.Concat(Enumerable.Repeat("***开 *开 内容** ", 20000));
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var result = AgentMarkdown.Analyze(text, new[] { AgentMarkdown.LineRole.Text }, new HashSet<string>(AgentMarkdown.Kinds), false);
+            watch.Stop(); Equal(0, result.Marks.Count); True(watch.Elapsed < TimeSpan.FromSeconds(2));
+        });
         Test("cleaned markdown tables preserve text edits, format, links, counts and undo in both commit paths", () =>
         {
             foreach (var structure in new[] { true, false }) foreach (var rows in new[] { true, false })
@@ -1065,11 +1101,65 @@ internal static class Program
                 Equal("bullet", AgentMarks.ListKind(AgentCommitter.Find(api.Page, "bullet")));
             }
         });
+        Test("markdown all-one numbering is independent of batch order and preserves rich text through undo", () =>
+        {
+            var orders = new[] { new[] { "p1", "p2", "p3" }, new[] { "p1", "p3", "p2" }, new[] { "p2", "p1", "p3" },
+                new[] { "p2", "p3", "p1" }, new[] { "p3", "p1", "p2" }, new[] { "p3", "p2", "p1" } };
+            var batches = orders.Select(order => order.Select(id => new[] { id }).ToArray()).Concat(new[] {
+                new[] { new[] { "p3" }, new[] { "p2", "p1" } }, new[] { new[] { "p3", "p2" }, new[] { "p1" } },
+                new[] { new[] { "p3", "p1", "p2" } } });
+            foreach (var batch in batches)
+            {
+                var s = Snapshot(Page(Paragraph("a", "1.&nbsp;<b>第一</b><a href='https://example.com'>项</a>"),
+                    Paragraph("b", "1. 第二项"), Paragraph("c", "1. 第三项"))); var t = Tools(s); Read(t, s); Cleanup(t, s, "p1", "p2", "p3");
+                foreach (var ids in batch) NumberList(t, s, ids);
+                var revision = s.Revision; NumberList(t, s, "p3", "p1", "p2"); Equal(revision, s.Revision);
+                var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page);
+                var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(3, r.Applied); Equal(3, r.MarkdownMarks);
+                Equal("1.,2.,3.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
+                Equal(1, api.Page.Descendants(One + "Number").Count(n => n.Attribute("restartNumberingAt") != null));
+                var expected = Paragraph("a", "<b>第一</b><a href='https://example.com'>项</a>");
+                Equal(new AgentRichText(expected).Signature(Page(expected), true), new AgentRichText(AgentCommitter.Find(api.Page, "a")).Signature(api.Page, true));
+                Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(s.Page), Texts(api.Page));
+            }
+        });
+        Test("markdown numbering recalculates after removing or switching an item without changing native lists", () =>
+        {
+            foreach (var kind in new[] { "none", "bullet" })
+            {
+                var native = Paragraph("native", "原生编号"); AgentMarks.SetList(native, "number", 7);
+                native.Descendants(One + "Number").Single().SetAttributeValue("fontSize", "11.0");
+                native.Descendants(One + "Number").Single().SetAttributeValue("text", "7.");
+                var s = Snapshot(Page(native, Paragraph("a", "1. 第一项"), Paragraph("b", "2. 第二项"), Paragraph("c", "3. 第三项")));
+                var t = Tools(s); Read(t, s); Cleanup(t, s, "p2", "p3", "p4"); NumberList(t, s, "p2", "p3", "p4");
+                var result = Json(Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, list = kind }));
+                Equal("p2,p3", string.Join(",", ((object[])((IDictionary<string, object>)AgentChatClient.Parse(result))["changed"]).Cast<string>()));
+                Equal(kind, AgentMarks.ListKind(s.Blocks[1].Draft));
+                Equal("2", (string)s.Blocks[2].Draft.Descendants(One + "Number").Single().Attribute("restartNumberingAt"));
+                True(XNode.DeepEquals(s.Blocks[0].Original.Element(One + "List"), s.Blocks[0].Draft.Element(One + "List")));
+                var revision = s.Revision; Invoke(t, "set_list", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, list = kind }); Equal(revision, s.Revision);
+                NumberList(t, s, "p2"); Equal(null, (string)s.Blocks[2].Draft.Descendants(One + "Number").Single().Attribute("restartNumberingAt"));
+                var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page);
+                var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None); Equal("Verified", r.Status);
+                Equal("7.,1.,2.,3.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
+                Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(s.Page), Texts(api.Page));
+            }
+        });
+        Test("markdown numbering rejects a bad batch before changing already restored neighbors", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "1. 第一项"), Paragraph("b", "1. 第二项"), Paragraph("c", "1. 第三项")));
+            var t = Tools(s); Read(t, s); Cleanup(t, s, "p1", "p2", "p3"); NumberList(t, s, "p3");
+            var draft = s.CreateDraftPage().ToString(); var revision = s.Revision;
+            Throws(() => NumberList(t, s, "p2", "missing")); Equal(draft, s.CreateDraftPage().ToString()); Equal(revision, s.Revision);
+            NumberList(t, s, "p2"); Equal(null, (string)s.Blocks[2].Draft.Descendants(One + "Number").Single().Attribute("restartNumberingAt"));
+        });
         Test("markdown preserves non-one starts and consecutive one markers across separate groups", () =>
         {
             var s = Snapshot(Page(Paragraph("a", "5)&nbsp;第五项"), Paragraph("b", "6. 第六项"), Paragraph("gap", "正文"),
                 Paragraph("c", "1. 第一项"), Paragraph("d", "1. 第二项"), Paragraph("gap2", "另一组"), Paragraph("e", "0. 第零项")));
-            var t = Tools(s); Read(t, s); var ids = new[] { "p1", "p2", "p4", "p5", "p7" }; Cleanup(t, s, ids); NumberList(t, s, ids);
+            var t = Tools(s); Read(t, s); var ids = new[] { "p1", "p2", "p4", "p5", "p7" }; Cleanup(t, s, ids);
+            foreach (var id in ids.Reverse()) NumberList(t, s, id);
             var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page);
             Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
             Equal("5.,6.,1.,2.,0.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
@@ -1083,7 +1173,8 @@ internal static class Program
             var parent = Paragraph("a1", "1. 父项"); parent.Add(new XElement(One + "OEChildren", Paragraph("child1", "1. 子项"), Paragraph("child2", "2. 子项二")));
             var page = Boxes(Box("A", 100, parent, Paragraph("a2", "2. 父项二")), Box("B", 300, Paragraph("b1", "1. 第二框"), Paragraph("b2", "2. 第二项"), grid.Descendants(One + "Table").Single().Parent));
             var s = Snapshot(page); var t = Tools(s); Read(t, s);
-            var ids = s.Blocks.Where(b => b.Editable && char.IsDigit(b.Text[0])).Select(b => b.Id).ToArray(); Cleanup(t, s, ids); NumberList(t, s, ids);
+            var ids = s.Blocks.Where(b => b.Editable && char.IsDigit(b.Text[0])).Select(b => b.Id).ToArray(); Cleanup(t, s, ids);
+            foreach (var id in ids.Reverse()) NumberList(t, s, id);
             var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page);
             Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
             Equal("1.,1.,2.,2.,1.,2.,1.,2.,1.,2.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
@@ -1093,10 +1184,11 @@ internal static class Program
         {
             var page = Page(Paragraph("a", "3. 未选中"), Paragraph("b", "4. 第四项"), Paragraph("c", "5. 第五项"), Paragraph("d", "6. 未选中"));
             var s = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "b", "c" }, new AgentOptions()); var t = Tools(s); Read(t, s);
-            Cleanup(t, s, "p1", "p2"); NumberList(t, s, "p1", "p2");
+            Cleanup(t, s, "p1", "p2"); NumberList(t, s, "p2"); NumberList(t, s, "p1");
             var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page); var c = new AgentCommitter(api);
             var r = c.Commit(s, CancellationToken.None); Equal("Verified", r.Status);
             Equal("4.,5.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
+            Equal(1, api.Page.Descendants(One + "Number").Count(n => n.Attribute("restartNumberingAt") != null));
             True(XNode.DeepEquals(AgentCommitter.Find(page, "a"), AgentCommitter.Find(api.Page, "a")));
             True(XNode.DeepEquals(AgentCommitter.Find(page, "d"), AgentCommitter.Find(api.Page, "d")));
             Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(page), Texts(api.Page));
@@ -1140,8 +1232,9 @@ internal static class Program
         Test("a conflicting markdown list start also skips dependent items but other lists still commit", () =>
         {
             var s = Snapshot(Page(Paragraph("a1", "1. 第一组"), Paragraph("a2", "2. 第二项"), Paragraph("gap", "正文"),
-                Paragraph("b1", "1. 第二组"), Paragraph("b2", "2. 后续项"), Paragraph("b3", "3. 第三项")));
-            var t = Tools(s); Read(t, s); var ids = new[] { "p1", "p2", "p4", "p5", "p6" }; Cleanup(t, s, ids); NumberList(t, s, ids);
+                Paragraph("b1", "1. 第二组"), Paragraph("b2", "1. 后续项"), Paragraph("b3", "1. 第三项")));
+            var t = Tools(s); Read(t, s); var ids = new[] { "p1", "p2", "p4", "p5", "p6" }; Cleanup(t, s, ids);
+            foreach (var id in ids.Reverse()) NumberList(t, s, id);
             var api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "b1").Element(One + "T").Value += "用户编辑";
             var protectedText = Texts(api.Page).Split('|').Skip(3).ToArray();
             api.AfterSave = () => RenderNumbering(api.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
