@@ -150,6 +150,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<string> TextFixes = new List<string>();
         /// <summary>草稿里 strip_markdown 去掉的标记处数。写回核验通过后计入结果，撤销时文字一起还原。</summary>
         internal int MarkdownMarks;
+        /// <summary>成功清理的原始列表标记；重复清理后仍用于恢复编号，丢弃草稿时清空。</summary>
+        internal AgentMarkdown.Result MarkdownList;
         /// <summary>草稿改了文字：只有这样的段落写回时允许正文变化，而且只能变成草稿里的样子。</summary>
         internal bool TextEdited => TextFixes.Count > 0 || MarkdownMarks > 0;
         /// <summary>为保留下级段落的格式，本段预设只设置外观，保留原有原生样式。</summary>

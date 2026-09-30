@@ -26,6 +26,8 @@ namespace OneNoteCodeHelper.Services.Agent
             /// <summary>第一行原来的标记：标题级别、列表种类、待办是否勾选、是否引用、列表前的缩进（空格数，Tab 算 4 个）。</summary>
             internal int? Heading;
             internal string List;
+            /// <summary>原始数字列表的编号，用于恢复独立列表的起点。</summary>
+            internal int? Number;
             internal bool? Todo;
             internal bool Quote;
             internal int Indent;
@@ -70,7 +72,7 @@ namespace OneNoteCodeHelper.Services.Agent
         private static readonly Regex QuotePrefix = new Regex(@"\G(?:[ \t]{0,3}>[ \t]?)+");
         private static readonly Regex HeadingPrefix = new Regex(@"\G[ \t]{0,3}(#{1,6})(?=[ \t]|$)[ \t]*");
         private static readonly Regex ClosingHashes = new Regex(@"[ \t]+#+[ \t]*$");
-        private static readonly Regex ListPrefix = new Regex(@"\G([ \t]*)(?:([-*+])|\d{1,9}[.)])[ \t]+(?:\[([ xX])\](?:[ \t]+|$))?");
+        private static readonly Regex ListPrefix = new Regex(@"\G([ \t]*)(?:([-*+])|(?<number>[0-9]{1,9})[.)])[ \t]+(?:\[([ xX])\](?:[ \t]+|$))?");
         private static readonly Regex InlineCode = new Regex(@"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)");
         /// <summary>仅匹配时把 OneNote 的硬空格当空格，长度和下标不变，写回仍用原文。</summary>
         private static string MatchingText(string text) => text.Replace('\u00a0', ' ');
@@ -150,6 +152,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     if (first && kinds.Contains("list"))
                     {
                         result.List = item.Groups[2].Success ? "bullet" : "number";
+                        if (item.Groups["number"].Success) result.Number = int.Parse(item.Groups["number"].Value, System.Globalization.CultureInfo.InvariantCulture);
                         if (item.Groups[3].Success) result.Todo = item.Groups[3].Value != " ";
                         result.Indent = item.Groups[1].Value.Sum(c => c == '\t' ? 4 : 1);
                     }

@@ -707,11 +707,28 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             var kind = (string)args["list"];
             var drafts = new Dictionary<AgentBlock, XElement>();
-            foreach (var b in Targets(args).Select(MarkTarget))
+            foreach (var b in Targets(args).Select(MarkTarget)) drafts.Add(b, new XElement(b.Draft));
+            // 先建立整批目标集合，按页面顺序恢复编号，避免模型传参顺序或分批调用把独立列表接在一起。
+            foreach (var b in Ordered().Select(item => item.Block).Where(b => b != null && drafts.ContainsKey(b)))
             {
-                var draft = new XElement(b.Draft);
-                AgentMarks.SetList(draft, kind);
-                drafts.Add(b, draft);
+                int? start = null;
+                if (kind == "number" && b.MarkdownList?.Number != null && AgentMarks.ListKind(b.Draft) != "number")
+                {
+                    var node = AgentLayout.Find(_snapshot.Layout, b.Id);
+                    var previous = node.ElementsBeforeSelf(OneNoteApi.One + "OE").LastOrDefault();
+                    var key = previous == null ? null : AgentLayout.KeyOf(previous);
+                    var prior = _snapshot.Blocks.FirstOrDefault(p => p.Id == key);
+                    var priorDraft = prior == null ? null : drafts.TryGetValue(prior, out var d) ? d : prior.Draft;
+                    var priorNumber = priorDraft?.Element(OneNoteApi.One + "List")?.Element(OneNoteApi.One + "Number");
+                    var marker = prior?.MarkdownList;
+                    // 仅同一父节点、同层的连续 Markdown 列表继续编号；连续的 1. 写法也按 Markdown 惯例递增。
+                    var continues = marker?.Number != null && prior.Conversion == null &&
+                        (string)priorNumber?.Attribute("numberSequence") == "0" && (string)priorNumber.Attribute("numberFormat") == "##." &&
+                        marker.Indent == b.MarkdownList.Indent && marker.Quote == b.MarkdownList.Quote &&
+                        (b.MarkdownList.Number == marker.Number + 1 || b.MarkdownList.Number == 1 && marker.Number == 1);
+                    if (!continues) start = b.MarkdownList.Number;
+                }
+                AgentMarks.SetList(drafts[b], kind, start);
             }
             return Publish(drafts);
         }
@@ -803,7 +820,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>转换或删掉的段落不再逐段写回；需要保留的草稿须先存入转换记录。</summary>
         private static void Discard(AgentBlock b)
         {
-            b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.MarkdownMarks = 0; b.AppearanceOnly = false;
+            b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.MarkdownMarks = 0; b.MarkdownList = null; b.AppearanceOnly = false;
         }
 
         /// <summary>
@@ -910,7 +927,12 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             // 全部算好才发布；整段删掉的段落不再有草稿。
             foreach (var b in removed) Discard(b);
-            foreach (var pair in drafts) { pair.Key.Draft = pair.Value; pair.Key.MarkdownMarks += results[pair.Key].Marks.Count; }
+            foreach (var pair in drafts)
+            {
+                pair.Key.Draft = pair.Value;
+                pair.Key.MarkdownMarks += results[pair.Key].Marks.Count;
+                if (results[pair.Key].List != null) pair.Key.MarkdownList = results[pair.Key];
+            }
             if (drafts.Count > 0) _snapshot.Revision++;
             return new
             {

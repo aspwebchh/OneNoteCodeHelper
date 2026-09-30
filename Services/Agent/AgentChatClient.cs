@@ -140,6 +140,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal const int MaxStreamWireChars = 8 * 1024 * 1024;
         internal const int MaxReplyChars = 500000;
         internal const int MaxToolArgumentsChars = 64000;
+        /// <summary>错误响应仅用于识别固定错误码，限制大小和等待时间，不回显或记录上游正文。</summary>
+        private const int MaxHttpErrorChars = 16384;
         /// <summary>序列化上限，须大于 MaxRequestChars 的上限（300 万字）再加一轮的增量；真正的预算由 MaxRequestChars 控制。</summary>
         internal const int MaxJsonChars = 16 * 1024 * 1024;
         /// <summary>流式进度最多每隔这么久（毫秒）报告一次，免得把界面线程的消息队列塞满。</summary>
@@ -180,7 +182,13 @@ namespace OneNoteCodeHelper.Services.Agent
                     using (var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false))
                     using (linked.Token.Register(response.Dispose))
                     {
-                        if (!response.IsSuccessStatusCode) throw new AiException($"Agent 接口返回 HTTP {(int)response.StatusCode}；请检查模型是否支持工具调用及 AI 配置。");
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            var status = (int)response.StatusCode;
+                            var code = await ReadHttpErrorCode(response, linked.Token).ConfigureAwait(false);
+                            AddInLog.Info($"Agent HTTP 失败：status={status} code={code ?? "unknown"}，耗时 {watch.Elapsed.TotalSeconds:0.0}s。");
+                            throw new AiException(DescribeHttpError(status, code));
+                        }
                         var reply = new AgentReply();
                         var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
                         using (var reader = new StreamReader(stream, Encoding.UTF8))
@@ -246,6 +254,61 @@ namespace OneNoteCodeHelper.Services.Agent
                 catch (HttpRequestException) { throw new AiException("无法连接 Agent 接口，未提交草稿。"); }
                 catch (IOException) { throw new AiException("Agent 连接中断，未提交草稿。"); }
             }
+        }
+
+        private static async Task<string> ReadHttpErrorCode(HttpResponseMessage response, CancellationToken cancellation)
+        {
+            if (response.Content == null) return null;
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
+            using (var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, timeout.Token))
+            using (linked.Token.Register(response.Dispose))
+            {
+                try
+                {
+                    using (var reader = new StreamReader(await response.Content.ReadAsStreamAsync().ConfigureAwait(false), Encoding.UTF8))
+                    {
+                        var text = new StringBuilder();
+                        var buffer = new char[2048];
+                        int count;
+                        while ((count = await reader.ReadAsync(buffer, 0, Math.Min(buffer.Length, MaxHttpErrorChars + 1 - text.Length)).ConfigureAwait(false)) > 0)
+                        {
+                            linked.Token.ThrowIfCancellationRequested();
+                            text.Append(buffer, 0, count);
+                            if (text.Length > MaxHttpErrorChars) return null;
+                        }
+                        var code = AiClient.Get(AiClient.Get(Parse(text.ToString()), "error"), "code") as string;
+                        return string.Equals(code, "model_not_found", StringComparison.OrdinalIgnoreCase) ? "model_not_found" : null;
+                    }
+                }
+                catch (Exception)
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    // 非 JSON、过大、读取失败或错误正文迟迟不结束，仍按已经收到的 HTTP 状态提示。
+                    return null;
+                }
+            }
+        }
+
+        private static string DescribeHttpError(int status, string code)
+        {
+            var prefix = $"Agent 接口返回 HTTP {status}；";
+            string reason;
+            if (code == "model_not_found") reason = "当前模型不存在或未开通，请检查「AI 配置」里的模型名及网关模型通道。";
+            else switch (status)
+            {
+                case 401:
+                case 403: reason = "接口拒绝访问，请检查「AI 配置」里的 ApiKey 和访问权限。"; break;
+                case 404: reason = "请求地址不存在，请检查「AI 配置」里的 ApiUrl。"; break;
+                case 429: reason = "接口限流或额度不足，请稍后再试，或检查接口额度。"; break;
+                case 500:
+                case 502:
+                case 503: reason = "网关或模型服务暂时不可用，请稍后再试；持续失败时请检查网关服务及模型通道。"; break;
+                case 504: reason = "网关等待上游服务超时，请稍后再试。"; break;
+                case 400:
+                case 422: reason = "接口拒绝请求参数，请检查模型的工具调用支持及 Agent 兼容选项。"; break;
+                default: reason = "请求失败，请检查接口服务和 AI 配置。"; break;
+            }
+            return prefix + reason + "未提交草稿。";
         }
 
         /// <summary>每轮请求一行日志：结束原因、用量和各部分字数，不含模型原文、工具参数或笔记内容。</summary>

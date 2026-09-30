@@ -25,7 +25,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>提供 strip_markdown 时追加；后面接着用的工具按实际提供的提，见 <see cref="SystemPrompt"/>。</summary>
         internal const string MarkdownPrompt = "用户要求去掉 Markdown 格式、把 Markdown 整理成普通笔记时，用 strip_markdown 一次处理完整读取的段落（可以整页一起传），" +
             "不要用 fix_text 逐处删符号；这是 fix_text 之外唯一可以改文字的情况，用户没有要求时不要去掉 Markdown 标记。" +
-            "结果 changed 里是原来的标记：heading 用 set_paragraph_style 设为标题，quote 设为引用。编号去掉后编号就没了，不能设为编号列表时 kinds 不要带 list。";
+            "结果 changed 里是原来的标记：heading 用 set_paragraph_style 设为标题，quote 设为引用。不能设为编号列表时 kinds 不要带 list。";
 
         internal const string ListPrompt = "用户明确要求时，用 set_list 把完整读取的段落设为项目符号或编号列表，或取消列表；不要为了排版美观自行把正文改成列表。";
         internal const string TagPrompt = "用户明确要求时，用 set_tag 加待办、重要、问题标记或勾选待办；不要自行添加标记，其他标记保持不变。";
@@ -63,7 +63,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (tools.Has("strip_markdown"))
             {
                 prompt.Append(MarkdownPrompt);
-                if (tools.Has("set_list")) prompt.Append("list 用 set_list 设为对应的列表。");
+                if (tools.Has("set_list")) prompt.Append("list 用 set_list 设为对应的列表，编号列表会自动保留各组起点。");
                 if (tools.Has("set_tag")) prompt.Append("todo 用 set_tag 设为待办，true 为已勾选。");
                 if (tools.Has("highlight_code")) prompt.Append("code_lines 里是围栏中的代码，用 highlight_code 转换。");
                 if (tools.Has("text_to_table")) prompt.Append("Markdown 表格用 text_to_table 转换。");

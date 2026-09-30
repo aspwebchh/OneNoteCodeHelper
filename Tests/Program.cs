@@ -813,6 +813,69 @@ internal static class Program
                 catch (AiException ex) { True(!ex.Message.Contains("PRIVATE_PAGE_CONTENT")); True(ex.Message.Contains("400")); }
             }
         });
+        Test("HTTP failures distinguish gateway, authentication, URL, limits and request parameters", () =>
+        {
+            var cases = new[] { (400, "请求参数"), (401, "ApiKey"), (403, "访问权限"), (404, "ApiUrl"), (422, "兼容选项"),
+                (429, "限流"), (500, "服务暂时不可用"), (502, "服务暂时不可用"), (503, "服务暂时不可用"), (504, "上游服务超时") };
+            foreach (var (status, hint) in cases)
+            {
+                var message = HttpFailure(status, "<html>PRIVATE_PAGE_CONTENT SECRET_API_KEY</html>", "text/html");
+                True(message.Contains("HTTP " + status) && message.Contains(hint) && message.Contains("未提交草稿"));
+                True(!message.Contains("PRIVATE_PAGE_CONTENT") && !message.Contains("SECRET_API_KEY"));
+                if (status >= 500) True(!message.Contains("工具调用"));
+            }
+        });
+        Test("HTTP 503 model_not_found is recognized without echoing the upstream message", () =>
+        {
+            foreach (var status in new[] { 404, 503 })
+            {
+                var message = HttpFailure(status, "{\"error\":{\"code\":\"MODEL_NOT_FOUND\",\"message\":\"PRIVATE_PAGE_CONTENT SECRET_API_KEY\"}}");
+                True(message.Contains("模型不存在或未开通") && message.Contains("HTTP " + status));
+                True(!message.Contains("PRIVATE_PAGE_CONTENT") && !message.Contains("SECRET_API_KEY"));
+                True(!message.Contains("工具调用") && !message.Contains("服务暂时不可用"));
+            }
+        });
+        Test("malformed, oversized and unrecognized HTTP error bodies use the status safely", () =>
+        {
+            foreach (var body in new[] { "", "{invalid PRIVATE_PAGE_CONTENT", new string('x', 20000),
+                "{\"error\":{\"code\":\"PRIVATE_PAGE_CONTENT\",\"message\":\"model_not_found\"}}", "{\"error\":{\"code\":{\"private\":\"data\"}}}" })
+            {
+                var message = HttpFailure(503, body);
+                True(message.Contains("服务暂时不可用") && !message.Contains("PRIVATE_PAGE_CONTENT") && !message.Contains("模型不存在"));
+            }
+        });
+        Test("HTTP 503 stops the agent without retrying or writing a prepared draft", () =>
+        {
+            var s = Prepared(); var api = new FakePage(s.Page); var before = api.Page.ToString();
+            var handler = new StubHttp("{\"error\":{\"code\":\"upstream_unavailable\"}}", "application/json") { Status = HttpStatusCode.ServiceUnavailable };
+            var config = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://test.invalid</ApiUrl><ApiKey>test</ApiKey></AiConfig>"));
+            using (var http = new HttpClient(handler))
+                Rejects("服务暂时不可用", () => new AgentRunner(new AgentChatClient(config, "test", "none", http), new AgentCommitter(api))
+                    .RunAsync(s, "排版", null, CancellationToken.None).GetAwaiter().GetResult());
+            Equal(1, handler.Requests); Equal(0, api.Writes); Equal(before, api.Page.ToString()); True(!s.Frozen);
+        });
+        Test("HTTP error diagnostics have a deadline and respect user cancellation", () =>
+        {
+            foreach (var cancel in new[] { false, true })
+            {
+                var content = new WaitingErrorContent();
+                var handler = new StubHttp("", "application/json") { Status = HttpStatusCode.ServiceUnavailable, ResponseContent = content };
+                var config = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://test.invalid</ApiUrl><ApiKey>test</ApiKey></AiConfig>"));
+                using (var cancellation = new CancellationTokenSource())
+                using (var http = new HttpClient(handler))
+                {
+                    if (cancel) cancellation.CancelAfter(100);
+                    try
+                    {
+                        new AgentChatClient(config, "test", "none", http).CompleteAsync(new List<object>(), new object[0], null, cancellation.Token).GetAwaiter().GetResult();
+                        throw new Exception("Expected HTTP failure");
+                    }
+                    catch (OperationCanceledException) { True(cancel && cancellation.IsCancellationRequested); }
+                    catch (AiException ex) { True(!cancel && ex.Message.Contains("HTTP 503") && ex.Message.Contains("服务暂时不可用")); }
+                    Equal(1, handler.Requests); True(content.Disposed);
+                }
+            }
+        });
         Test("configuration absent Agent node preserves defaults", () =>
         {
             var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><MaxTurns>999</MaxTurns><ReplayReasoning>false</ReplayReasoning></Agent></AiConfig>"));
@@ -973,6 +1036,118 @@ internal static class Program
             var s = Snapshot(CodePage()); var api = new FakePage(s.Page); var model = new CodeScriptClient(s);
             var r = new AgentRunner(model, new AgentCommitter(api), new AddInSettings()).RunAsync(s, "排版", null, CancellationToken.None).GetAwaiter().GetResult();
             Equal("Verified", r.Status); Equal(1, r.CodeBlocks); Equal(1, api.Writes); True(model.SawCodeTool);
+        });
+        Test("markdown restores separated numbered lists with their own starts, rich text and undo", () =>
+        {
+            foreach (var split in new[] { false, true })
+            {
+                var lines = new List<XElement> { Paragraph("h1", "核心改造") };
+                lines.AddRange(Enumerable.Range(1, 8).Select(i => Paragraph("a" + i, i + ". <b>改造</b><a href='https://example.com/" + i + "'>渠道</a>")));
+                lines.AddRange(new[] { Paragraph("h2", "YAML 字段建议"), Listed("bullet", "appId", "2"), Paragraph("body", "注意事项"), Paragraph("h3", "验证重点") });
+                lines.AddRange(Enumerable.Range(1, 5).Select(i => Paragraph("b" + i, i + ". 验证渠道")));
+                var s = Snapshot(Page(lines.ToArray())); var t = Tools(s); Read(t, s);
+                var ids = s.Blocks.Where(b => b.Text.Length > 1 && char.IsDigit(b.Text[0])).Select(b => b.Id).ToArray();
+                Cleanup(t, s, ids); Cleanup(t, s, ids); // 第二次清理没有标记，起点仍必须保留。
+                if (split) foreach (var id in ids) NumberList(t, s, id);
+                else NumberList(t, s, ids.Reverse().ToArray()); // 模型传参顺序不能改变分组。
+                var revision = s.Revision; NumberList(t, s, ids); Equal(revision, s.Revision);
+                var expected = "1.,2.,3.,4.,5.,6.,7.,8.,1.,2.,3.,4.,5.";
+                var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page);
+                var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(13, r.Applied); Equal(13, r.MarkdownMarks);
+                Equal(expected, string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
+                Equal(2, api.Page.Descendants(One + "Number").Count(n => n.Attribute("restartNumberingAt") != null));
+                Equal("1", (string)AgentCommitter.Find(api.Page, "b1").Descendants(One + "Number").Single().Attribute("restartNumberingAt"));
+                True(AgentCommitter.Find(api.Page, "a1").Element(One + "T").Value.Contains("<b>改造</b>"));
+                True(AgentCommitter.Find(api.Page, "a1").Element(One + "T").Value.Contains("https://example.com/1"));
+                Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+                Equal(Texts(s.Page), Texts(api.Page)); True(!api.Page.Descendants(One + "Number").Any());
+                Equal("bullet", AgentMarks.ListKind(AgentCommitter.Find(api.Page, "bullet")));
+            }
+        });
+        Test("markdown preserves non-one starts and consecutive one markers across separate groups", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "5)&nbsp;第五项"), Paragraph("b", "6. 第六项"), Paragraph("gap", "正文"),
+                Paragraph("c", "1. 第一项"), Paragraph("d", "1. 第二项"), Paragraph("gap2", "另一组"), Paragraph("e", "0. 第零项")));
+            var t = Tools(s); Read(t, s); var ids = new[] { "p1", "p2", "p4", "p5", "p7" }; Cleanup(t, s, ids); NumberList(t, s, ids);
+            var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page);
+            Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+            Equal("5.,6.,1.,2.,0.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
+        });
+        Test("markdown number groups do not cross outlines, cells or paragraph parents", () =>
+        {
+            var grid = GridPage();
+            var cells = grid.Descendants(One + "Cell").Take(2).ToArray();
+            cells[0].Element(One + "OEChildren").ReplaceNodes(Paragraph("c1", "1. 单元格一"), Paragraph("c2", "2. 单元格二"));
+            cells[1].Element(One + "OEChildren").ReplaceNodes(Paragraph("other1", "1. 另一单元格"), Paragraph("other2", "2. 第二项"));
+            var parent = Paragraph("a1", "1. 父项"); parent.Add(new XElement(One + "OEChildren", Paragraph("child1", "1. 子项"), Paragraph("child2", "2. 子项二")));
+            var page = Boxes(Box("A", 100, parent, Paragraph("a2", "2. 父项二")), Box("B", 300, Paragraph("b1", "1. 第二框"), Paragraph("b2", "2. 第二项"), grid.Descendants(One + "Table").Single().Parent));
+            var s = Snapshot(page); var t = Tools(s); Read(t, s);
+            var ids = s.Blocks.Where(b => b.Editable && char.IsDigit(b.Text[0])).Select(b => b.Id).ToArray(); Cleanup(t, s, ids); NumberList(t, s, ids);
+            var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page);
+            Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+            Equal("1.,1.,2.,2.,1.,2.,1.,2.,1.,2.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
+            Equal(5, api.Page.Descendants(One + "Number").Count(n => n.Attribute("restartNumberingAt") != null));
+        });
+        Test("selected markdown numbers retain their first value without changing unselected content", () =>
+        {
+            var page = Page(Paragraph("a", "3. 未选中"), Paragraph("b", "4. 第四项"), Paragraph("c", "5. 第五项"), Paragraph("d", "6. 未选中"));
+            var s = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "b", "c" }, new AgentOptions()); var t = Tools(s); Read(t, s);
+            Cleanup(t, s, "p1", "p2"); NumberList(t, s, "p1", "p2");
+            var api = new FakePage(s.Page); api.AfterSave = () => RenderNumbering(api.Page); var c = new AgentCommitter(api);
+            var r = c.Commit(s, CancellationToken.None); Equal("Verified", r.Status);
+            Equal("4.,5.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
+            True(XNode.DeepEquals(AgentCommitter.Find(page, "a"), AgentCommitter.Find(api.Page, "a")));
+            True(XNode.DeepEquals(AgentCommitter.Find(page, "d"), AgentCommitter.Find(api.Page, "d")));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(page), Texts(api.Page));
+        });
+        Test("markdown number restoration keeps existing native numbering and ordinary list behavior", () =>
+        {
+            var existing = Paragraph("a", "5. 保留原生样式");
+            existing.AddFirst(new XElement(One + "List", new XElement(One + "Number", new XAttribute("numberSequence", "1"), new XAttribute("numberFormat", "(##)"), new XAttribute("restartNumberingAt", "7"))));
+            var s = Snapshot(Page(existing, Paragraph("b", "普通正文"), Paragraph("c", "1. **只清强调**"))); var t = Tools(s); Read(t, s);
+            Cleanup(t, s, "p1");
+            Invoke(t, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p3" }, kinds = new[] { "emphasis" } });
+            NumberList(t, s, "p1", "p2", "p3");
+            True(XNode.DeepEquals(s.Blocks[0].Original.Element(One + "List"), s.Blocks[0].Draft.Element(One + "List")));
+            foreach (var b in s.Blocks.Skip(1)) Equal(null, (string)b.Draft.Descendants(One + "Number").Single().Attribute("restartNumberingAt"));
+        });
+        Test("numbering controls are verified, while generated text and fonts remain transient", () =>
+        {
+            foreach (var attribute in new[] { "restartNumberingAt", "numberSequence", "numberFormat" })
+            {
+                var s = Snapshot(Page(Paragraph("a", "5. 第五项"))); var t = Tools(s); Read(t, s); Cleanup(t, s, "p1"); NumberList(t, s, "p1");
+                var api = new FakePage(s.Page);
+                api.AfterSave = () => api.Page.Descendants(One + "Number").Single().SetAttributeValue(attribute, attribute == "numberFormat" ? "##)" : attribute == "numberSequence" ? "1" : null);
+                var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+                Equal(1, r.Unverified); Equal(0, r.Applied); Equal(0, r.MarkdownMarks); True(!r.CanUndo);
+            }
+            var normalized = Paragraph("n", "正文"); AgentMarks.SetList(normalized, "number"); normalized.Descendants(One + "Number").Single().SetAttributeValue("restartNumberingAt", "5");
+            var readback = new XElement(normalized); var number = readback.Descendants(One + "Number").Single();
+            number.SetAttributeValue("numberSequence", "00"); number.SetAttributeValue("restartNumberingAt", "05"); number.SetAttributeValue("fontSize", "11.0"); number.SetAttributeValue("text", "5.");
+            Equal(AgentMarks.Projection(normalized, Page(normalized)), AgentMarks.Projection(readback, Page(readback)));
+            number.SetAttributeValue("restartNumberingAt", "6"); True(AgentMarks.DraftKey(normalized) != AgentMarks.DraftKey(readback));
+        });
+        Test("markdown number restoration skips concurrent edits and undo protects later numbering changes", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "5. 第五项"))); var t = Tools(s); Read(t, s); Cleanup(t, s, "p1"); NumberList(t, s, "p1");
+            var api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "a").Element(One + "T").Value += "用户补充";
+            var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None); Equal(1, r.Conflicts); Equal(0, api.Writes);
+            api = new FakePage(s.Page); c = new AgentCommitter(api); r = c.Commit(s, CancellationToken.None); Equal("Verified", r.Status);
+            api.Page.Descendants(One + "Number").Single().SetAttributeValue("restartNumberingAt", "8");
+            var writes = api.Writes; var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None); Equal(1, undo.Conflicts); Equal(writes, api.Writes);
+        });
+        Test("a conflicting markdown list start also skips dependent items but other lists still commit", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a1", "1. 第一组"), Paragraph("a2", "2. 第二项"), Paragraph("gap", "正文"),
+                Paragraph("b1", "1. 第二组"), Paragraph("b2", "2. 后续项"), Paragraph("b3", "3. 第三项")));
+            var t = Tools(s); Read(t, s); var ids = new[] { "p1", "p2", "p4", "p5", "p6" }; Cleanup(t, s, ids); NumberList(t, s, ids);
+            var api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "b1").Element(One + "T").Value += "用户编辑";
+            var protectedText = Texts(api.Page).Split('|').Skip(3).ToArray();
+            api.AfterSave = () => RenderNumbering(api.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("PartiallyApplied", r.Status); Equal(2, r.Applied); Equal(3, r.Conflicts); Equal(2, r.MarkdownMarks);
+            Equal("1.,2.", string.Join(",", api.Page.Descendants(One + "Number").Select(n => (string)n.Attribute("text"))));
+            Equal(string.Join("|", protectedText), string.Join("|", Texts(api.Page).Split('|').Skip(3)));
         });
         Test("set_list numbers paragraphs with a style, verifies despite OneNote attributes and undo removes it", () =>
         {
@@ -2076,6 +2251,38 @@ internal static class Program
         Invoke(tools, "fix_text", new { snapshot_id = s.SnapshotId, fixes = new[] { new { block_id = id, quote, occurrence = 1, replacement } } });
     private static object Cleanup(AgentTools tools, AgentPageSnapshot s, params string[] ids) =>
         Invoke(tools, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = ids });
+
+    private static object NumberList(AgentTools tools, AgentPageSnapshot s, params string[] ids) =>
+        Invoke(tools, "set_list", new { snapshot_id = s.SnapshotId, block_ids = ids, list = "number" });
+
+    private static string HttpFailure(int status, string body, string media = "application/json")
+    {
+        var handler = new StubHttp(body, media) { Status = (HttpStatusCode)status };
+        var config = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://test.invalid</ApiUrl><ApiKey>test</ApiKey></AiConfig>"));
+        using (var http = new HttpClient(handler))
+        {
+            try { new AgentChatClient(config, "test", "none", http).CompleteAsync(new List<object>(), new object[0], null, CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (AiException ex) { return ex.Message; }
+        }
+        throw new Exception("Expected HTTP failure");
+    }
+
+    /// <summary>模拟 OneNote 跨普通正文继续编号的已复现行为；只有显式起点重启，同一父节点内递增。</summary>
+    private static void RenderNumbering(XElement page)
+    {
+        foreach (var children in page.Descendants(One + "OEChildren"))
+        {
+            var counter = 0;
+            foreach (var oe in children.Elements(One + "OE"))
+            {
+                var number = oe.Element(One + "List")?.Element(One + "Number");
+                if (number == null) continue;
+                counter = (int?)number.Attribute("restartNumberingAt") ?? counter + 1;
+                number.SetAttributeValue("text", ((string)number.Attribute("numberFormat")).Replace("##", counter.ToString(CultureInfo.InvariantCulture)));
+                number.SetAttributeValue("fontSize", "11.0");
+            }
+        }
+    }
     /// <summary>正文、三行代码（中间一个空行）、正文。代码段落 p2–p4。</summary>
     private static XElement CodePage()
     {
@@ -2200,12 +2407,30 @@ internal static class Program
     {
         private readonly string _response, _media;
         internal string Body;
+        internal int Requests;
+        internal HttpContent ResponseContent;
         internal HttpStatusCode Status = HttpStatusCode.OK;
         internal StubHttp(string response, string media) { _response = response; _media = media; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
         {
+            Requests++;
             Body = await request.Content.ReadAsStringAsync();
-            return new HttpResponseMessage(Status) { Content = new StringContent(_response, System.Text.Encoding.UTF8, _media) };
+            return new HttpResponseMessage(Status) { Content = ResponseContent ?? new StringContent(_response, System.Text.Encoding.UTF8, _media) };
+        }
+    }
+    /// <summary>已返回错误状态，但响应正文一直未就绪；释放响应时中断读取。</summary>
+    private sealed class WaitingErrorContent : HttpContent
+    {
+        private readonly TaskCompletionSource<System.IO.Stream> _stream = new TaskCompletionSource<System.IO.Stream>();
+        internal bool Disposed;
+        protected override Task<System.IO.Stream> CreateContentReadStreamAsync() => _stream.Task;
+        protected override Task SerializeToStreamAsync(System.IO.Stream stream, TransportContext context) => throw new NotSupportedException();
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            _stream.TrySetException(new ObjectDisposedException(nameof(WaitingErrorContent)));
+            base.Dispose(disposing);
         }
     }
     /// <summary>同步记下每条进度；Progress&lt;T&gt; 会投递到同步上下文，测试里看不到顺序。</summary>

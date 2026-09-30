@@ -154,6 +154,17 @@ namespace OneNoteCodeHelper.Services.Agent
                         var target = Find(page, block.ObjectId);
                         if (target == null || !fingerprints.TryGetValue(block.ObjectId, out var fingerprint) || fingerprint != block.Fingerprint)
                         { report.ConflictIds.Add(block.Id); continue; }
+                        // 新恢复的连续编号依赖前一项；前项冲突时后续项也跳过，避免少了起点却接到上一组编号。
+                        var number = block.Draft.Element(One + "List")?.Element(One + "Number");
+                        if (block.MarkdownList?.Number != null && AgentMarks.ListKind(block.Original) != "number" &&
+                            number != null && number.Attribute("restartNumberingAt") == null)
+                        {
+                            var priorNode = AgentLayout.Find(snapshot.Layout, block.Id)?.ElementsBeforeSelf(One + "OE").LastOrDefault();
+                            var prior = snapshot.Blocks.FirstOrDefault(b => b.Id == (priorNode == null ? null : AgentLayout.KeyOf(priorNode)));
+                            if (prior != null && (report.ConflictIds.Contains(prior.Id) ||
+                                !fingerprints.TryGetValue(prior.ObjectId, out var priorFingerprint) || priorFingerprint != prior.Fingerprint))
+                            { report.ConflictIds.Add(block.Id); continue; }
+                        }
                         var before = new XElement(target);
                         // 只有 fix_text、strip_markdown 改过文字的段落可以改文字，而且只能改成草稿里的样子。
                         var expectedContent = new AgentRichText(block.Draft).Signature(page, false);

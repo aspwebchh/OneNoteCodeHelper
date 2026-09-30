@@ -59,6 +59,8 @@
 `strip_markdown` 走同一套机制：段落记下去掉的标记处数（`AgentBlock.MarkdownMarks`，与 `TextFixes` 一起构成 `TextEdited`，写回时允许正文变化），先按原文下标加格式（不改文字），再从后往前删标记，最后按纯文字核对。
 结果、撤销消息只报处数（整段删掉的围栏、分隔线各算一处），不列清单。已删的段落 `read_blocks` 跳过（reason=removed），格式和文字工具拒绝。
 围栏角色在工具初始化时按完整页面的文本框、单元格分别缓存，包含选区外上下文，删除围栏、移动段落和重复清理不重新分类；某个文本流的 HTML 无法解析时，清理跳过该流并返回 `markdown_context_unavailable`。硬空格仅在匹配副本中按普通空格处理，原文下标不变；强调用分隔符栈配对，支持内外层共享结尾符号。
+成功清理的列表标记保存在 `AgentBlock.MarkdownList`，包括原始数字、缩进和引用信息，重复清理不丢失。`set_list(number)` 按页面顺序恢复，同一父节点、同层的连续数字列表延续编号，独立列表用 `restartNumberingAt` 保留起点（连续的 `1.` 写法仍递增）；选区中途开始时以选中首项的数字为起点。不新增工具参数，原有原生编号样式和起点不改，丢弃草稿时一并清空缓存。
+逐段提交时，若编号的前项发生用户编辑冲突，依赖它递增的后续项一起跳过；其他独立列表仍可提交，避免只跳过起点导致后续项串号。
 待转表格的段落有 `MarkdownMarks` 时，按当前草稿生成表格，原始 `Code` 仍用于结构与冲突核验；文字编辑计数转存到转换记录，仅在回读核验正文、链接及格式后计入结果。转换撤销及整框撤销保留对应计数；没有 Markdown 清理记录的转换沿用丢弃文字、格式草稿的行为。
 
 ## 代码框转换
@@ -86,7 +88,7 @@
 - **标记**：预设按 OneNote 默认标记库，todo = symbol 3、important = 13、question = 15，本机回存与预期一致。
   草稿里按图标复用页面已有的 TagDef（包括用户的中文「待办事项」），没有才新增；提交时按完整定义对应到重新读取的页面，只有新增了 TagDef 才把 TagDef 一起提交。
   省略 `one:Tag` 可以删掉标记，OneNote 会一并清掉不再引用的 TagDef。
-- **核验**：`SemanticFormat` 追加列表种类和「标记图标:完成状态」（`AgentMarks.Projection`），不看 OneNote 补上的字号、编号文字、时间。
+- **核验**：`SemanticFormat` 追加列表种类、编号的 `numberSequence`、`numberFormat`、`restartNumberingAt` 和「标记图标:完成状态」（`AgentMarks.Projection`），编号整数按数值比较，不看 OneNote 补上的字号、编号文字、时间。编号控制属性丢失或变化不能算核验成功。
   本次写入的段落和重建的段落不逐字比较 List/Tag 的 XML；其余段落仍严格比较，标记按引用的 TagDef 内容比较，不受 TagDef 重新编号影响。
 - **表格**：外观为 `bordersVisible`、`hasHeaderRow` 和首行各单元格的 `shadingColor`，逐格记录，撤销能还原各格不同的底色。
   指纹只含表格 ID、外观、行列数和首行单元格 ID，处理期间改单元格文字不算冲突。外观比较把缺省的开关当 false、把缺省/none/automatic 底色当无底色。

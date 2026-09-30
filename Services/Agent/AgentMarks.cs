@@ -31,14 +31,15 @@ namespace OneNoteCodeHelper.Services.Agent
             return list.Element(One + "Number") != null ? "number" : list.Element(One + "Bullet") != null ? "bullet" : "other";
         }
 
-        /// <summary>同一种列表不动，保留用户原来的符号样式；新建时不写字体属性，由 OneNote 按段落计算。</summary>
-        internal static void SetList(XElement oe, string kind)
+        /// <summary>同一种列表不动，保留原有样式和起点；恢复 Markdown 的新编号列表可指定起点，不写字体属性。</summary>
+        internal static void SetList(XElement oe, string kind, int? start = null)
         {
             if (ListKind(oe) == kind) return;
             if (kind == "none") { oe.Elements(One + "List").Remove(); return; }
             var list = new XElement(One + "List", kind == "bullet"
                 ? new XElement(One + "Bullet", new XAttribute("bullet", 2))
                 : new XElement(One + "Number", new XAttribute("numberSequence", 0), new XAttribute("numberFormat", "##.")));
+            if (kind == "number" && start != null) list.Element(One + "Number").SetAttributeValue("restartNumberingAt", start.Value);
             Replace(oe, "List", new[] { list });
         }
 
@@ -101,15 +102,28 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         /// <summary>
-        /// 核验用的语义投影：列表只看种类，标记只看图标和完成状态。
+        /// 核验用的语义投影：列表看种类及编号样式、起点，标记看图标和完成状态。
         /// OneNote 回存时补上的 fontSize、编号文字、创建时间等不参与比较，TagDef 重新编号也不影响。
         /// </summary>
-        internal static string Projection(XElement oe, XElement page) => "list=" + ListKind(oe) + "|tags=" +
+        internal static string Projection(XElement oe, XElement page) => "list=" + ListKey(oe) + "|tags=" +
             string.Join(",", oe.Elements(One + "Tag").Select(t => ((string)Definition(page, t)?.Attribute("symbol") ?? "?") + ":" + (IsCompleted(t) ? "1" : "0")));
 
         /// <summary>发布草稿时判断有没有改动：新 TagDef 还不在快照页面里，所以直接比编号。</summary>
-        internal static string DraftKey(XElement oe) => ListKind(oe) + "|" +
+        internal static string DraftKey(XElement oe) => ListKey(oe) + "|" +
             string.Join(",", oe.Elements(One + "Tag").Select(t => (string)t.Attribute("index") + ":" + (IsCompleted(t) ? "1" : "0")));
+
+        private static string ListKey(XElement oe)
+        {
+            var number = oe.Element(One + "List")?.Element(One + "Number");
+            return number == null ? ListKind(oe) : "number:" + NumberAttribute(number, "numberSequence") + ":" +
+                (string)number.Attribute("numberFormat") + ":" + NumberAttribute(number, "restartNumberingAt");
+        }
+
+        private static string NumberAttribute(XElement number, string name)
+        {
+            var value = (string)number.Attribute(name);
+            return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? Invariant(n) : value ?? "";
+        }
 
         /// <summary>给模型看的标记：todo、todo:done、important、question，其他标记记为 other。</summary>
         internal static string[] Describe(XElement oe, XElement defs) => oe.Elements(One + "Tag")
