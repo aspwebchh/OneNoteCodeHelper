@@ -38,6 +38,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int Applied;
         internal int Conflicts;
         internal int Unverified;
+        /// <summary>执行结束时尚未读取的段落数；撤销不沿用此计数。</summary>
+        internal int UnreadCount;
         internal int Protected;
         /// <summary>已核验的代码框：执行时是新建的代码框数，撤销时是换回原段落的代码框数。</summary>
         internal int CodeBlocks;
@@ -67,7 +69,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal void ClearUndo() { Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
         internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, markdown_marks = MarkdownMarks, code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
             removed = Removed, moved = Moved, indented = Indented, inserted = Inserted, merged = Merged,
-            skipped_conflict = ConflictIds, unverified = Unverified, protected_count = Protected, appearance_only = AppearanceOnly, message = Message };
+            skipped_conflict = ConflictIds, unverified = Unverified, unread_count = UnreadCount, protected_count = Protected, appearance_only = AppearanceOnly, message = Message };
         /// <summary>结果消息里的结构改动部分。</summary>
         internal string LayoutSummary => (Removed > 0 ? $"删除空行 {Removed} 行；" : "") + (Moved > 0 ? $"移动 {Moved} 段；" : "") +
             (Indented > 0 ? $"调整缩进 {Indented} 段；" : "") + (Inserted > 0 ? $"插入 {Inserted} 段；" : "") + (Merged > 0 ? $"合并文本框 {Merged} 个；" : "") +
@@ -79,6 +81,20 @@ namespace OneNoteCodeHelper.Services.Agent
         private readonly IOneNotePageAccess _api;
         private static XNamespace One => OneNoteApi.One;
         internal AgentCommitter(IOneNotePageAccess api) { _api = api; }
+
+        // 只输出对象标识和固定原因。即使页面 XML 的标识异常，也不把任意字符串写进日志。
+        internal static string VerificationDiagnostic(string kind, string id, string reason)
+        {
+            string Identifier(string value) => !string.IsNullOrEmpty(value) && value.Length <= 128 &&
+                value.All(c => c < 128 && (char.IsLetterOrDigit(c) || "{}-_.".Contains(c))) ? value : "-";
+            return $"Agent 核验失败：kind={Identifier(kind)} id={Identifier(id)} reason={Identifier(reason)}。";
+        }
+
+        private static void NoteUnverified(AgentReport report, string kind, string id, string reason)
+        {
+            report.Unverified++;
+            AddInLog.Info(VerificationDiagnostic(kind, id, reason));
+        }
 
         internal AgentReport Commit(AgentPageSnapshot snapshot, CancellationToken cancellation)
         {
@@ -258,6 +274,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     {
                         report.Status = "CommitOutcomeUnknown";
                         report.Unverified = planned.Count + codes.Count + restores.Count + tables.Count + edits.Count;
+                        AddInLog.Info(VerificationDiagnostic("page", snapshot.PageId, "readback_failed"));
                         report.Message = "已尝试写入，但无法回读确认。请查看目标页面，不要立即重复执行。";
                         return report;
                     }
@@ -283,8 +300,10 @@ namespace OneNoteCodeHelper.Services.Agent
                         try
                         {
                             var desired = recreated ? AgentPageSnapshot.SemanticFormat(item.Target, page) : DesiredSignature(item.Desired, page, item.Block.ObjectId);
-                            if (written == null || string.IsNullOrEmpty((string)written.Attribute("objectID")) || AgentPageSnapshot.SemanticFormat(written, actual) != desired)
-                            { report.Unverified++; continue; }
+                            if (written == null || string.IsNullOrEmpty((string)written.Attribute("objectID")))
+                            { NoteUnverified(report, "paragraph", item.Block.ObjectId, "missing_object"); continue; }
+                            if (AgentPageSnapshot.SemanticFormat(written, actual) != desired)
+                            { NoteUnverified(report, "paragraph", item.Block.ObjectId, "semantic_format_mismatch"); continue; }
                             report.Applied++;
                             report.TextFixes.AddRange(item.Block.TextFixes);
                             report.MarkdownMarks += item.Block.MarkdownMarks;
@@ -293,13 +312,14 @@ namespace OneNoteCodeHelper.Services.Agent
                                 AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual), TextFixes = item.Block.TextFixes.ToList(), MarkdownMarks = item.Block.MarkdownMarks,
                                 Styles = AgentLayout.Styles(item.Before, original), Tags = AgentLayout.Tags(item.Before, original) });
                         }
-                        catch (Exception) { report.Unverified++; }
+                        catch (Exception) { NoteUnverified(report, "paragraph", item.Block.ObjectId, "format_unreadable"); }
                     }
                     // 原页面所有文字、链接、段落顺序必须保留，包括没有交给模型的对象。
                     formatted.UnionWith(planned.Select(p => p.Block.ObjectId));
                     if (!ContentPreserved(page, actual, known, formatted) || !UntouchedPreserved(untouched, actual))
                     {
                         report.Status = "CommitOutcomeUnknown";
+                        AddInLog.Info(VerificationDiagnostic("page", snapshot.PageId, "content_or_untouched_mismatch"));
                         report.Message = "写入后页面结构或内容与预期不一致，请检查目标页面。";
                         return report;
                     }
@@ -309,7 +329,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     foreach (var code in codes)
                     {
                         var written = actualLines[expectedLines.IndexOf(code.Box)];
-                        if (!ConversionWritten(code.Box, written, code.Conversion, page, actual)) { report.Unverified++; continue; }
+                        if (!ConversionWritten(code.Box, written, code.Conversion, page, actual))
+                        { NoteUnverified(report, code.Conversion.TextTable ? "table" : "code", code.Conversion.Blocks[0].ObjectId, "conversion_mismatch"); continue; }
                         code.Undo.TableId = (string)written.Element(One + "Table").Attribute("objectID");
                         code.Undo.Fingerprint = AgentCode.Fingerprint(written, actual);
                         if (code.Conversion.TextTable) report.TextTables++; else report.CodeBlocks++;
@@ -324,7 +345,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             try { return AgentPageSnapshot.SemanticFormat(e, page) == AgentPageSnapshot.SemanticFormat(actualLines[expectedLines.IndexOf(e)], actual); }
                             catch (Exception) { return false; }
                         });
-                        if (!same) report.Unverified++;
+                        if (!same) NoteUnverified(report, "restore", restored.Item.TableId, "semantic_format_mismatch");
                         else
                         {
                             if (restored.Item.TextTable) report.TextTables++; else report.CodeBlocks++;
@@ -335,7 +356,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     foreach (var edit in edits) VerifyOutline(edit, page, actual, expectedLines, actualLines, report);
                     // 重建的段落里的图片（跨框移动、撤销重建）只带着数据写入，piBasic 看不出坏图，按二进制数据核对。
                     var images = page.Descendants(One + "Image").Where(i => i.Parent?.Name == One + "OE" && !known.Contains((string)i.Parent.Attribute("objectID") ?? "")).ToList();
-                    if (images.Count > 0 && !ImagesWritten(snapshot.PageId, page, images, known)) report.Unverified += images.Count;
+                    if (images.Count > 0 && !ImagesWritten(snapshot.PageId, page, images, known))
+                        foreach (var image in images) NoteUnverified(report, "image", (string)image.Parent?.Attribute("objectID"), "image_data_mismatch");
                     // 还留着占位空白的文本框：写入核验通过后再删掉，占位的空白之后被人改过就留着。
                     foreach (var edit in edits.Where(e => e.Delete))
                     {
@@ -347,7 +369,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     foreach (var (table, before) in tables)
                     {
                         var written = AgentTable.Find(actual, table.ObjectId);
-                        if (written == null || !TableLook.Read(written).SameAs(table.Draft)) { report.Unverified++; continue; }
+                        if (written == null || !TableLook.Read(written).SameAs(table.Draft))
+                        { NoteUnverified(report, "table", table.ObjectId, written == null ? "missing_object" : "table_style_mismatch"); continue; }
                         report.Tables++;
                         report.TableUndo.Add(new AgentTableUndoItem { ObjectId = table.ObjectId, Before = before, AfterFingerprint = AgentTable.TakeFingerprint(written) });
                     }
@@ -602,8 +625,19 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 string expected;
                 try { expected = AgentPageSnapshot.SemanticFormat(line, page); } catch (Exception) { continue; }
-                try { if (AgentPageSnapshot.SemanticFormat(actualLines[expectedLines.IndexOf(line)], actual) != expected) failed.Add(line); }
-                catch (Exception) { failed.Add(line); }
+                try
+                {
+                    if (AgentPageSnapshot.SemanticFormat(actualLines[expectedLines.IndexOf(line)], actual) != expected)
+                    {
+                        failed.Add(line);
+                        AddInLog.Info(VerificationDiagnostic("outline_paragraph", (string)line.Attribute("objectID") ?? AgentLayout.KeyOf(line), "semantic_format_mismatch"));
+                    }
+                }
+                catch (Exception)
+                {
+                    failed.Add(line);
+                    AddInLog.Info(VerificationDiagnostic("outline_paragraph", (string)line.Attribute("objectID") ?? AgentLayout.KeyOf(line), "format_unreadable"));
+                }
             }
             report.Unverified += failed.Count;
             foreach (var (block, node) in edit.Changed.Where(c => !failed.Contains(c.Node)))
@@ -615,7 +649,8 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             foreach (var (box, conversion) in edit.Boxes)
             {
-                if (!ConversionWritten(box, actualLines[expectedLines.IndexOf(box)], conversion, page, actual)) { report.Unverified++; continue; }
+                if (!ConversionWritten(box, actualLines[expectedLines.IndexOf(box)], conversion, page, actual))
+                { NoteUnverified(report, conversion.TextTable ? "table" : "code", conversion.Blocks[0].ObjectId, "conversion_mismatch"); continue; }
                 if (conversion.TextTable) report.TextTables++; else report.CodeBlocks++;
                 report.MarkdownMarks += conversion.MarkdownMarks;
                 report.TextFixes.AddRange(conversion.TextFixes);
@@ -624,7 +659,8 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 var index = expectedLines.IndexOf(target.Parent);
                 var written = index < 0 ? null : actualLines[index].Element(One + "Table");
-                if (written == null || !TableLook.Read(written).SameAs(table.Draft)) { report.Unverified++; continue; }
+                if (written == null || !TableLook.Read(written).SameAs(table.Draft))
+                { NoteUnverified(report, "table", table.ObjectId, written == null ? "missing_object" : "table_style_mismatch"); continue; }
                 report.Tables++;
             }
             string[] Ids(string kind) => edit.Changes.Where(c => c.Kind == kind).SelectMany(c => c.Ids).Distinct().ToArray();

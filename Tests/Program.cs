@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -718,7 +719,7 @@ internal static class Program
             var finished = log.Items.Where(p => p.Step != null && p.Step.State != AgentStepState.Running).Select(p => p.Step).ToList();
             Equal(5, finished.Count); True(finished.All(step => step.State == AgentStepState.Done));
             Equal("读取页面概况 · 共 " + s.Blocks.Count + " 段", finished[0].Text);
-            Equal("读取段落 · 1 段", finished[1].Text);
+            Equal("读取段落 · 2 段", finished[1].Text);
             Equal("设置段落样式 · 一级标题 · 1 段", finished[2].Text);
             Equal("检查格式草稿", finished[3].Text);
             Equal("写回并验证", finished[4].Text);
@@ -743,6 +744,151 @@ internal static class Program
             var r = new AgentRunner(new TextOnlyClient(), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
             Equal("NoChange", r.Status); Equal(0, api.Writes);
         });
+        Test("849-paragraph page rejects incomplete finish and resumes the same draft", () =>
+        {
+            var s = Snapshot(LongCoveragePage()); var api = new FakePage(s.Page);
+            var t = new AgentTools(s, new AgentCommitter(api), CancellationToken.None);
+            Equal(849, s.Blocks.Count); Equal(456, s.Blocks.Count(b => b.Editable));
+            var overview = Invoke(t, "get_page_overview", new { });
+            Equal(849, (int)ToolField(overview, "total")); Equal(100, (int)ToolField(overview, "next_offset"));
+            Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = s.Blocks.Take(100).Where(b => b.Editable).Select(b => b.Id).ToArray() });
+            Style(t, s); var revision = s.Revision;
+            var refused = Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = revision });
+            Equal(false, (bool)ToolField(refused, "ok")); Equal(396, (int)ToolField(refused, "unread_count"));
+            Equal(100, ((string[])ToolField(refused, "next_read_block_ids")).Length);
+            Equal("p102", ((string[])ToolField(refused, "next_read_block_ids"))[0]);
+            Equal(0, api.Writes); True(!s.Frozen && t.Report == null); Equal(revision, s.Revision); True(s.Blocks[0].Changed);
+            while (t.UnreadCount > 0)
+            {
+                var batch = (string[])ToolField(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId }), "next_read_block_ids");
+                Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = batch });
+            }
+            Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal("Verified", t.Report.Status); Equal(1, api.Writes); Equal(1, t.Report.Applied); Equal(0, t.Report.UnreadCount);
+            Equal(0, (int)ToolField(t.Report.ToToolResult(), "unread_count"));
+        });
+        Test("coverage read batches respect 100-item pagination boundaries", () =>
+        {
+            foreach (var count in new[] { 100, 101, 200, 201 })
+            {
+                var s = Snapshot(Page(Enumerable.Range(1, count).Select(i => Paragraph("a" + i, "正文 " + i)).ToArray())); var t = Tools(s);
+                var seen = 0;
+                for (var offset = 0; offset < count; offset += 100)
+                {
+                    var overview = Invoke(t, "get_page_overview", new { offset });
+                    Equal(Math.Min(100, count - offset), ((object[])ToolField(overview, "blocks")).Length);
+                    Equal(offset + 100 < count ? (int?)(offset + 100) : null, (int?)ToolField(overview, "next_offset"));
+                }
+                while (t.UnreadCount > 0)
+                {
+                    var pending = Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId });
+                    var ids = (string[])ToolField(pending, "next_read_block_ids");
+                    Equal(Math.Min(100, count - seen), ids.Length);
+                    Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = ids }); seen += ids.Length;
+                }
+                Equal(count, seen);
+                Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+                Equal("NoChange", t.Report.Status); Equal(0, t.Report.UnreadCount);
+            }
+        });
+        Test("coverage includes candidate code but skips protected content and respects selection", () =>
+        {
+            var mono = Paragraph("m", "int value = 1;"); mono.SetAttributeValue("style", "font-family:Consolas");
+            var page = Page(Paragraph("a", "正文"), mono, Paragraph("blank", ""),
+                Paragraph("inline", "调用 <span style='font-family:Consolas'>Run()</span> 方法"), Paragraph("html", "<img src='x'>"));
+            var s = Snapshot(page); var t = Tools(s);
+            Equal(2, t.UnreadCount); Equal("unhighlighted_code", s.Blocks[1].ProtectedReason);
+            Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" } });
+            var refused = Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal("p2", ((string[])ToolField(refused, "next_read_block_ids")).Single());
+            Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" } }); Equal(0, t.UnreadCount);
+            foreach (var id in new[] { "a", "m" })
+            {
+                var selected = new AgentPageSnapshot(page.ToString(), new HashSet<string> { id }, new AgentOptions()); var selectedTools = Tools(selected);
+                Equal(1, selectedTools.UnreadCount);
+                Invoke(selectedTools, "read_blocks", new { snapshot_id = selected.SnapshotId, block_ids = new[] { "p1" } });
+                Invoke(selectedTools, "finish_edit", new { snapshot_id = selected.SnapshotId, draft_revision = selected.Revision });
+                Equal("NoChange", selectedTools.Report.Status); Equal(0, selectedTools.Report.UnreadCount);
+            }
+            var disabled = new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableCodeHighlight = false });
+            Equal(1, Tools(disabled).UnreadCount);
+        });
+        Test("coverage excludes generated and converted paragraphs and preserves layout undo", () =>
+        {
+            var s = Snapshot(Page(Paragraph("h", "标题"), Paragraph("r1", "名称|内容"), Paragraph("r2", "甲|乙"), Paragraph("tail", "结尾")));
+            var api = new FakePage(s.Page); var committer = new AgentCommitter(api); var t = new AgentTools(s, committer, CancellationToken.None);
+            Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2", "p3" } });
+            Table(t, s, "pipe", "p2", "p3"); Insert(t, s, "p1", "摘要");
+            var pending = Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId });
+            Equal("p4", ((string[])ToolField(pending, "unread")).Single()); Equal(1, (int)ToolField(pending, "unread_count"));
+            Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p4" } });
+            Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal("Verified", t.Report.Status); Equal(1, t.Report.Inserted); Equal(1, t.Report.TextTables); Equal(0, t.Report.UnreadCount);
+            var undo = committer.Undo(s.PageId, t.Report, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(Texts(s.Page), Texts(api.Page)); Equal(0, undo.UnreadCount);
+        });
+        Test("coverage survives markdown deletion and follows moved paragraph order", () =>
+        {
+            var s = Snapshot(Page(Paragraph("h", "# 标题"), Paragraph("f1", "```markdown"), Paragraph("a", "正文"), Paragraph("f2", "```"), Paragraph("tail", "结尾")));
+            var t = Tools(s);
+            Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2", "p3", "p4" } });
+            Cleanup(t, s, "p1", "p2", "p3", "p4");
+            Equal(1, t.UnreadCount); Equal("p5", ((string[])ToolField(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId }), "unread")).Single());
+            // 被整体移动的父段下有未读取子段；下一批按新的草稿顺序返回。
+            var parent = Paragraph("parent", "父段"); parent.Add(new XElement(One + "OEChildren", Paragraph("child", "子段")));
+            var moved = Snapshot(Page(parent, Paragraph("b", "后段"), Paragraph("c", "尾段"))); var mt = Tools(moved);
+            Invoke(mt, "read_blocks", new { snapshot_id = moved.SnapshotId, block_ids = new[] { "p1", "p4" } });
+            Move(mt, moved, new[] { "p1" }, "p4", "after");
+            Equal("p3,p2", string.Join(",", (string[])ToolField(Invoke(mt, "get_pending_changes", new { snapshot_id = moved.SnapshotId }), "next_read_block_ids")));
+        });
+        Test("coverage does not enlarge a local edit or repeat an unchanged style", () =>
+        {
+            var s = Snapshot(); var api = new FakePage(s.Page); var committer = new AgentCommitter(api); var t = new AgentTools(s, committer, CancellationToken.None);
+            var untouched = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page);
+            Read(t, s); Style(t, s); var revision = s.Revision; Style(t, s); Equal(revision, s.Revision);
+            Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal(1, t.Report.Applied); Equal(untouched, AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page));
+            Equal("Verified", committer.Undo(s.PageId, t.Report, s.Options, CancellationToken.None).Status);
+        });
+        Test("coverage cannot bypass revision checks or accept a model partial-commit flag", () =>
+        {
+            var s = Snapshot(); var t = Tools(s);
+            Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" } }); Style(t, s);
+            Rejects("修订号过期", () => Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = 0 }));
+            Throws(() => Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision, allow_partial = true }));
+            True(!s.Frozen && t.Report == null); Equal(1, t.UnreadCount);
+        });
+        Test("runner recovers from premature finish and completes remaining read batches", () =>
+        {
+            var s = Snapshot(LongCoveragePage()); var api = new FakePage(s.Page); var model = new CoverageClient(s);
+            var r = new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "只突出第一段", null, CancellationToken.None).GetAwaiter().GetResult();
+            True(model.SawRejection); Equal("Verified", r.Status); Equal(0, r.UnreadCount); Equal(1, api.Writes); Equal(1, r.Applied);
+            True(s.Blocks.Where(b => b.Editable).All(b => b.Read));
+        });
+        Test("cancelling after a refused finish never writes the retained draft", () =>
+        {
+            var s = Snapshot(LongCoveragePage()); var api = new FakePage(s.Page);
+            using (var cancel = new CancellationTokenSource())
+            {
+                var model = new CoverageClient(s, cancel.Cancel);
+                Throws<OperationCanceledException>(() => new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "美化", null, cancel.Token).GetAwaiter().GetResult());
+                True(model.SawRejection); Equal(0, api.Writes); True(!s.Frozen);
+            }
+        });
+        Test("readback format mismatch logs only object identity and a fixed reason", () =>
+        {
+            const string privateText = "NOTE_PRIVATE_do_not_log";
+            var objectId = "verify-" + Guid.NewGuid().ToString("N");
+            var s = Snapshot(Page(Paragraph(objectId, privateText))); var api = new FakePage(s.Page); var t = new AgentTools(s, new AgentCommitter(api), CancellationToken.None);
+            Read(t, s); Style(t, s);
+            api.AfterSave = () => AgentCommitter.Find(api.Page, objectId).SetAttributeValue("alignment", "right");
+            var oldLog = File.Exists(AddInLog.LogPath) ? File.ReadAllText(AddInLog.LogPath) : "";
+            Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal("PartiallyApplied", t.Report.Status); Equal(1, t.Report.Unverified); Equal(0, t.Report.Applied); True(!t.Report.CanUndo);
+            var log = File.ReadAllText(AddInLog.LogPath); var added = log.StartsWith(oldLog, StringComparison.Ordinal) ? log.Substring(oldLog.Length) : log;
+            True(added.Contains("id=" + objectId)); True(added.Contains("reason=semantic_format_mismatch")); True(!added.Contains(privateText));
+            Equal("Agent 核验失败：kind=paragraph id=- reason=missing_object。", AgentCommitter.VerificationDiagnostic("paragraph", "正文\nApiKey=private", "missing_object"));
+        });
         Test("runner turn budget discards uncommitted draft", () =>
         {
             var s = Snapshot(); s.Options.MaxTurns = 3; var api = new FakePage(s.Page);
@@ -754,16 +900,41 @@ internal static class Program
         {
             var s = Snapshot(); s.Options.MaxTurns = 4; var api = new FakePage(s.Page); var model = new WrapUpClient(s);
             var r = new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
-            Equal("Verified", r.Status); Equal(1, api.Writes);
+            Equal("PartiallyApplied", r.Status); Equal(1, r.UnreadCount); Equal(1, api.Writes);
             Equal(1, model.ToolCounts.Last()); True(model.ToolCounts.Take(3).All(n => n > 1));
             True(model.LastJson.Contains("只剩 2 轮")); True(model.LastJson.Contains("这是最后一轮"));
             True(r.Message.Contains("MaxTurns"));
+            True(r.Message.Contains("仍有 1 段未读取")); Equal(0, r.Conflicts); Equal(0, r.Unverified);
+            var undo = new AgentCommitter(api).Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(0, undo.UnreadCount); Equal(Texts(s.Page), Texts(api.Page));
+        });
+        Test("last-turn complete coverage remains Verified and an empty draft stays NoChange", () =>
+        {
+            foreach (var change in new[] { true, false })
+            {
+                var s = Snapshot(); s.Options.MaxTurns = 4; var api = new FakePage(s.Page);
+                var r = new AgentRunner(new WrapUpClient(s, change, change), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
+                Equal(change ? "Verified" : "NoChange", r.Status); Equal(change ? 0 : 1, r.UnreadCount); Equal(change ? 1 : 0, api.Writes);
+            }
+        });
+        Test("last-turn unread count preserves conflict and unknown-write outcomes", () =>
+        {
+            foreach (var conflict in new[] { true, false })
+            {
+                var s = Snapshot(); s.Options.MaxTurns = 4; var api = new FakePage(s.Page);
+                if (conflict) AgentCommitter.Find(api.Page, "a").Element(One + "T").Value = "用户后续编辑";
+                else api.FailReadAfterSave = true;
+                var r = new AgentRunner(new WrapUpClient(s), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
+                Equal(conflict ? "NoChange" : "CommitOutcomeUnknown", r.Status); Equal(1, r.UnreadCount);
+                Equal(conflict ? 1 : 0, r.Conflicts); Equal(conflict ? 0 : 1, api.Writes); True(!r.CanUndo);
+                if (conflict) Equal("用户后续编辑", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+            }
         });
         Test("last turn text-only reply is NoChange, not an error", () =>
         {
             var s = Snapshot(); s.Options.MaxTurns = 2; var api = new FakePage(s.Page);
             var r = new AgentRunner(new TextOnlyClient(), new AgentCommitter(api)).RunAsync(s, "美化", null, CancellationToken.None).GetAwaiter().GetResult();
-            Equal("NoChange", r.Status); Equal(0, api.Writes); True(r.Message.Contains("最大轮数"));
+            Equal("NoChange", r.Status); Equal(0, api.Writes); Equal(2, r.UnreadCount); True(r.Message.Contains("最大轮数"));
         });
         Test("real HTTP client parses SSE and omits old JSON output mode", () =>
         {
@@ -2281,6 +2452,10 @@ internal static class Program
     internal static XElement Page(params XElement[] paragraphs) => new XElement(One + "Page", new XAttribute("ID", "page"), new XAttribute("lastModifiedTime", "2026-09-26T00:00:00Z"),
         new XElement(One + "Outline", new XAttribute("objectID", "outline"), new XAttribute("style", "font-family:Arial;font-size:11pt;color:#222222"), new XElement(One + "OEChildren", paragraphs)));
     private static AgentPageSnapshot Snapshot(XElement page = null) => new AgentPageSnapshot((page ?? Page(Paragraph("a", "第一段"), Paragraph("b", "第二段"))).ToString(), null, new AgentOptions());
+    // 849 段，其中首 100 段有 60 段正文，后续有 396 段；不保存用户文档作为测试数据。
+    private static XElement LongCoveragePage() => Page(Enumerable.Range(0, 849).Select(i => Paragraph("long" + i,
+        (i < 100 ? i % 5 < 3 : (i - 99) * 396 / 749 != (i - 100) * 396 / 749) ? "测试正文 " + i : "")).ToArray());
+    private static object ToolField(object value, string name) => value.GetType().GetProperty(name)?.GetValue(value, null);
     private static XElement TablePage(bool locked) => Page(new XElement(One + "OE", new XAttribute("objectID", "wrapper"),
         new XElement(One + "Table", new XAttribute("objectID", "table"),
             new XElement(One + "Columns", new XElement(One + "Column", new XAttribute("index", "0"), new XAttribute("width", "200"), new XAttribute("isLocked", locked))),
@@ -2576,17 +2751,18 @@ internal static class Program
     private sealed class WrapUpClient : IAgentChatClient
     {
         private readonly AgentPageSnapshot _s; private int _turn;
+        private readonly bool _readAll, _change;
         internal readonly List<int> ToolCounts = new List<int>();
         internal string LastJson = "";
-        internal WrapUpClient(AgentPageSnapshot s) { _s = s; }
+        internal WrapUpClient(AgentPageSnapshot s, bool readAll = false, bool change = true) { _s = s; _readAll = readAll; _change = change; }
         public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
             ToolCounts.Add(tools.Length);
             LastJson = AgentJson.Serialize(messages);
             string name; object args;
             if (tools.Length == 1) { name = "finish_edit"; args = new { snapshot_id = _s.SnapshotId, draft_revision = _s.Revision }; }
-            else if (_turn == 0) { name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" } }; }
-            else if (_turn == 1) { name = "set_paragraph_style"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" }; }
+            else if (_turn == 0) { name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = _readAll ? _s.Blocks.Where(b => b.Editable).Select(b => b.Id).ToArray() : new[] { "p1" } }; }
+            else if (_turn == 1 && _change) { name = "set_paragraph_style"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" }; }
             else { name = "get_page_overview"; args = new { }; }
             _turn++;
             var reply = new AgentReply { FinishReason = "tool_calls" };
@@ -2609,13 +2785,47 @@ internal static class Program
             switch (_turn++)
             {
                 case 0: name = "get_page_overview"; args = new { }; break;
-                case 1: name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" } }; break;
+                case 1: name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = _s.Blocks.Where(b => b.Editable || b.CodeCandidate).Select(b => b.Id).ToArray() }; break;
                 case 2: name = "set_paragraph_style"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" }; break;
                 case 3: name = "get_pending_changes"; args = new { snapshot_id = _s.SnapshotId }; break;
                 default: name = "finish_edit"; args = new { snapshot_id = _s.SnapshotId, draft_revision = _s.Revision }; break;
             }
             var reply = new AgentReply { FinishReason = "tool_calls", Reasoning = "opaque provider history" };
             reply.Calls.Add(0, new AgentToolCall { Id = "c" + _turn, Name = name, Arguments = AgentChatClient.Serializer().Serialize(args) });
+            return Task.FromResult(reply);
+        }
+    }
+    /// <summary>先漏读并尝试提交，再按工具返回的下一批 ID 读完；所有写入仅发生在 FakePage。</summary>
+    private sealed class CoverageClient : IAgentChatClient
+    {
+        private readonly AgentPageSnapshot _s;
+        private readonly Action _onRejection;
+        private int _turn;
+        internal bool SawRejection;
+        internal CoverageClient(AgentPageSnapshot s, Action onRejection = null) { _s = s; _onRejection = onRejection; }
+        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
+        {
+            string name; object args;
+            if (_turn == 0) { name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" } }; }
+            else if (_turn == 1) { name = "set_paragraph_style"; args = new { snapshot_id = _s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" }; }
+            else if (_turn > 2 && _s.Blocks.Any(b => (b.Editable || b.CodeCandidate) && !b.Read))
+            {
+                var result = (string)ToolField(messages.Last(), "content");
+                var outcome = AgentChatClient.Parse(result);
+                if (!SawRejection)
+                {
+                    Equal(false, (bool)AiClient.Get(outcome, "ok")); SawRejection = true; _onRejection?.Invoke();
+                    cancellation.ThrowIfCancellationRequested();
+                }
+                // 读取结果不重复返回进度；之后用 get_pending_changes 获取下一批。
+                if (AiClient.Get(outcome, "next_read_block_ids") is object[] ids)
+                { name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = ids.Cast<string>().ToArray() }; }
+                else { name = "get_pending_changes"; args = new { snapshot_id = _s.SnapshotId }; }
+            }
+            else { name = "finish_edit"; args = new { snapshot_id = _s.SnapshotId, draft_revision = _s.Revision }; }
+            _turn++;
+            var reply = new AgentReply { FinishReason = "tool_calls" };
+            reply.Calls.Add(0, new AgentToolCall { Id = "coverage" + _turn, Name = name, Arguments = Json(args) });
             return Task.FromResult(reply);
         }
     }

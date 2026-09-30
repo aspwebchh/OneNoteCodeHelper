@@ -93,6 +93,10 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>执行开始时的围栏上下文；不随删围栏、改字或移动段落重新分类。</summary>
         private readonly Dictionary<string, List<AgentMarkdown.LineRole>> _markdownRoles = new Dictionary<string, List<AgentMarkdown.LineRole>>();
         internal AgentReport Report { get; private set; }
+        // 只由运行器在最后一轮开启；模型的工具参数不能绕过完整读取检查。
+        internal bool AllowIncompleteFinish { get; set; }
+        internal const int ReadBatchSize = 100;
+        internal int UnreadCount => UnreadBlockIds().Length;
         /// <summary>本次注册了这个工具；系统提示词按实际提供的工具追加说明。</summary>
         internal bool Has(string name) => _tools.ContainsKey(name);
         internal object[] Definitions => _tools.Select(Definition).ToArray();
@@ -280,11 +284,11 @@ namespace OneNoteCodeHelper.Services.Agent
                     "只有用户要求加表头或要把标签挪成列名时才用 header 在首行前新增一行列名，个数应等于列数，少了补空，多了按 header 加列。" +
                     $"最多 {AgentTextTable.MaxRows} 行、{AgentTextTable.MaxColumns} 列。", table, TextToTable);
             }
-            Register("get_pending_changes", "检查草稿修订号、改动和尚未读取的段落。", SnapshotOnly(), Pending);
+            Register("get_pending_changes", "检查草稿修订号、改动和尚未读取的段落；next_read_block_ids 是下一批可完整读取的段落（最多 100 段）。", SnapshotOnly(), Pending);
             var finish = SnapshotOnly();
             finish.Properties["draft_revision"] = AgentSchema.Num(0, 10000, true);
             finish.Required = new[] { "snapshot_id", "draft_revision" };
-            Register("finish_edit", "独立调用此工具提交草稿并验证结果；必须传入最新修订号。本任务之后不能继续编辑。", finish, Finish);
+            Register("finish_edit", "独立调用此工具提交草稿并验证结果；必须传入最新修订号，并先读完范围内所有可读取的段落。未读完时返回下一批 ID，继续 read_blocks 后重试；提交成功后不能继续编辑。", finish, Finish);
         }
 
         /// <summary>fix_text 每处原文和改后文字的字数上限：够放下错字和前后一两个字，放不下整句改写。</summary>
@@ -1204,27 +1208,46 @@ namespace OneNoteCodeHelper.Services.Agent
             if (changed.Count > 0) _snapshot.Revision++;
             return new { ok = true, draft_revision = _snapshot.Revision, changed, noop, appearance_only = appearanceOnly?.ToArray() };
         }
-        private object Pending(IDictionary<string, object> args) => new { snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
-            changed = _snapshot.Blocks.Where(b => b.Changed).Select(b => b.Id).ToArray(),
-            text_fixes = _snapshot.Blocks.Where(b => b.TextFixes.Count > 0).Select(b => new { id = b.Id, fixes = b.TextFixes.ToArray() }).ToArray(),
-            markdown_stripped = _snapshot.Blocks.Where(b => b.MarkdownMarks > 0).Select(b => b.Id).ToArray(),
-            appearance_only = _snapshot.Blocks.Where(b => b.Changed && b.AppearanceOnly).Select(b => b.Id).ToArray(),
-            unread = _snapshot.Blocks.Where(b => b.Editable && !b.Read && b.Conversion == null).Select(b => b.Id).ToArray(),
-            code_blocks = _snapshot.CodeConversions.Where(c => !c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
-            text_tables = _snapshot.CodeConversions.Where(c => c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray() }).ToArray(),
-            layout = new { removed = LayoutIds("removed"), markdown_removed = LayoutIds("markdown"), moved = LayoutIds("moved"), indented = LayoutIds("indented"),
+        /// <summary>按当前草稿顺序计算；删除、转换和新插入的段落不再需要读取。</summary>
+        private string[] UnreadBlockIds() => Ordered().Where(x => x.Block != null &&
+            (x.Block.Editable || x.Block.CodeCandidate) && !x.Block.Read && x.Block.Conversion == null).Select(x => x.Id).ToArray();
+
+        private object Pending(IDictionary<string, object> args)
+        {
+            var unread = UnreadBlockIds();
+            return new { snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
+                changed = _snapshot.Blocks.Where(b => b.Changed).Select(b => b.Id).ToArray(),
+                text_fixes = _snapshot.Blocks.Where(b => b.TextFixes.Count > 0).Select(b => new { id = b.Id, fixes = b.TextFixes.ToArray() }).ToArray(),
+                markdown_stripped = _snapshot.Blocks.Where(b => b.MarkdownMarks > 0).Select(b => b.Id).ToArray(),
+                appearance_only = _snapshot.Blocks.Where(b => b.Changed && b.AppearanceOnly).Select(b => b.Id).ToArray(),
+                unread, unread_count = unread.Length, next_read_block_ids = unread.Take(ReadBatchSize).ToArray(),
+                code_blocks = _snapshot.CodeConversions.Where(c => !c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
+                text_tables = _snapshot.CodeConversions.Where(c => c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray() }).ToArray(),
+                layout = new { removed = LayoutIds("removed"), markdown_removed = LayoutIds("markdown"), moved = LayoutIds("moved"), indented = LayoutIds("indented"),
                 inserted = _snapshot.Inserted.Select(i => new { id = i.Id, text = i.Text }).ToArray(),
                 merged = _snapshot.LayoutChanges.Where(c => c.Kind == "merged").Select(c => new { from = c.From, into = c.OutlineId }).ToArray() },
-            unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
-            tables_changed = _snapshot.Tables.Where(t => t.Changed).Select(t => t.Id).ToArray(),
-            protected_count = _snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null) };
+                unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
+                tables_changed = _snapshot.Tables.Where(t => t.Changed).Select(t => t.Id).ToArray(),
+                protected_count = _snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null) };
+        }
         private string[] LayoutIds(string kind) => _snapshot.LayoutChanges.Where(c => c.Kind == kind).SelectMany(c => c.Ids).Distinct().ToArray();
 
         private object Finish(IDictionary<string, object> args)
         {
             if (Convert.ToInt32(args["draft_revision"]) != _snapshot.Revision) throw new AiException("草稿修订号过期，请先检查待提交修改。");
+            var unread = UnreadBlockIds();
+            if (unread.Length > 0 && !AllowIncompleteFinish)
+                return new { ok = false, error = $"范围内还有 {unread.Length} 段未完整读取，未提交草稿。请分批 read_blocks 后重试。",
+                    snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
+                    unread_count = unread.Length, next_read_block_ids = unread.Take(ReadBatchSize).ToArray() };
             _snapshot.Frozen = true;
             Report = _committer.Commit(_snapshot, _cancellation);
+            Report.UnreadCount = unread.Length;
+            if (unread.Length > 0)
+            {
+                if (Report.Status == "Verified" && Report.CanUndo) Report.Status = "PartiallyApplied";
+                Report.Message += $"\n仍有 {unread.Length} 段未读取，本次只提交已完成的草稿。";
+            }
             return Report.ToToolResult();
         }
     }
