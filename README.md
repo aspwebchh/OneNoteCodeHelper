@@ -98,7 +98,13 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 - 移到另一个文本框的段落、表格和图片，OneNote 都按新对象建立：内容和格式不变，但会得到新的 objectID，指向它们的段落链接会失效。
 - 需求里提到修正错别字时，Agent 用专门的工具逐处修正错别字、同音字、形近字和明显的标点误用：每处只换出错的几个字（原文和改后各不超过 30 字，不能跨换行），
   没改的字保留原有格式和链接，代码段落不改。结果里列出每处修正，例如「按装」→「安装」；这些内容只在窗口里显示，不写日志。
-- 除上面的错别字修正和结构调整外，保留文字、段落数量、顺序、嵌套关系、链接和表格结构；列表、标记和表格外观只按上面的规则修改。不合并、拆分段落，不润色改写；图片不单独移动，只随所在的段落或文本框一起移动。
+- 需求里要求去掉 Markdown 格式（比如把 AI 回复粘进来后整理）时，Agent 用专门的工具一次处理整页或选中的段落，只删 Markdown 标记字符，其余文字的格式和链接不变：
+  行首的 `#` 标题、`>` 引用、`-` `*` `+` 和 `1.` 列表符号（含 `[ ]` 待办框），行内 `` `代码` ``、`**粗体**`、`*斜体*`、`~~删除线~~` 两边的符号。
+  整段只有 ```` ``` ```` 围栏或 `---` 分隔线的段落直接删掉（和删空行一样受 `EnableBlankLineRemoval` 控制，关掉时只清空文字，文本框里至少留一段）。
+  `markdown`/`md` 围栏里的内容照常处理；其他围栏（包括不写语言的）里是代码，不动，可以接着转成代码框。去掉的标记会告诉 Agent，
+  它可以据此把原来的 `#` 设为标题、`-` / `1.` 设为列表、`[ ]` 设为待办。`snake_case`、`2 * 3`、`a*b*c` 这类不当强调；链接、图片和表格不处理（表格可以转成表格）。
+  结果里只写「去除 Markdown 符号 N 处」，不逐条列出；撤销时一起还原。
+- 除上面的错别字修正、去除 Markdown 标记和结构调整外，保留文字、段落数量、顺序、嵌套关系、链接和表格结构；列表、标记和表格外观只按上面的规则修改。不合并、拆分段落，不润色改写；图片不单独移动，只随所在的段落或文本框一起移动。
 - 取消列表时（包括撤销新加的列表），OneNote 不接受在原段落上去掉列表，插件把这一段重建为新段落：文字、格式和下级段落都不变，
   但这一段会得到新的 objectID，指向这一段的段落链接会失效。
 - 排版时遇到还没高亮的代码，Agent 调用「高亮选中」同一套逻辑，把连续的代码段落（含中间空行）换成高亮代码框。
@@ -173,6 +179,7 @@ Agent 可在 `AiConfig` 根节点内增加下列配置，也就是「AI 配置�
   <EnableLists>true</EnableLists>
   <EnableTags>true</EnableTags>
   <EnableTableStyles>true</EnableTableStyles>
+  <EnableMarkdownCleanup>true</EnableMarkdownCleanup>
   <EnableBlankLineRemoval>true</EnableBlankLineRemoval>
   <EnableIndent>true</EnableIndent>
   <EnableMoves>true</EnableMoves>
@@ -183,6 +190,7 @@ Agent 可在 `AiConfig` 根节点内增加下列配置，也就是「AI 配置�
 
 `EnableCodeHighlight` 设为 `false` 时 Agent 不再把代码转换为代码框，整段等宽的代码只保护、不处理。
 `EnableLists`、`EnableTags`、`EnableTableStyles` 分别控制列表、标记和表格样式工具，设为 `false` 时这些只保护、不修改。
+`EnableMarkdownCleanup` 设为 `false` 时不提供去除 Markdown 标记的工具。
 `EnableBlankLineRemoval`、`EnableIndent`、`EnableMoves`、`EnableInsert`、`EnableTextTables` 分别控制删空行、调整缩进、移动段落（含跨文本框移动和合并文本框）、插入段落和转表格，
 设为 `false` 时不提供对应工具，不想让 Agent 改段落结构时全部关掉。
 读取图片文字没有开关：页面上有 OneNote 识别出文字的图片时才提供，每张最多 4000 字。

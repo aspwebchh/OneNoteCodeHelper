@@ -347,6 +347,82 @@ internal static class Program
             var api = new FakePage(s.Page);
             Rejects("改变了正文", () => new AgentCommitter(api).Commit(s, CancellationToken.None)); Equal(0, api.Writes);
         });
+        Test("markdown analysis removes only marker characters", () =>
+        {
+            Equal("标题|目标|code 项目|第一|已完成|引用 重点|粗斜与删除|C# 和 #标签|snake_case_name 和 2 * 3 * 4 和 a*b*c 和 *.md|**不是强调**|",
+                Strip("# 标题", "## 目标 ##", "- `code` 项目", "1. 第一", "  - [x] 已完成", "> 引用 **重点**", "***粗斜***与~~删除~~",
+                    "C# 和 #标签", "snake_case_name 和 2 * 3 * 4 和 a*b*c 和 *.md", "`**不是强调**`", "---"));
+            // markdown 围栏里照常处理，里面带语言的围栏是代码；不写语言的围栏也是代码。
+            Equal("|标题||// *x* # y||正文|||- 保留|", Strip("```markdown", "# 标题", "```java", "// *x* # y", "```", "**正文**", "```", "```", "- 保留", "```"));
+            var kinds = new HashSet<string>(AgentMarkdown.Kinds);
+            var todo = AgentMarkdown.Analyze("  - [ ] 待办", new[] { AgentMarkdown.LineRole.Text }, kinds, false);
+            Equal("bullet", todo.List); Equal(false, todo.Todo); Equal(2, todo.Indent); True(!todo.Separator);
+            Equal(3, AgentMarkdown.Analyze("### 三级", new[] { AgentMarkdown.LineRole.Text }, kinds, false).Heading);
+            Equal("number", AgentMarkdown.Analyze("12) 第十二", new[] { AgentMarkdown.LineRole.Text }, kinds, false).List);
+            True(AgentMarkdown.Analyze("> 引用", new[] { AgentMarkdown.LineRole.Text }, kinds, false).Quote);
+            True(AgentMarkdown.Analyze("* * *", new[] { AgentMarkdown.LineRole.Text }, kinds, false).Separator);
+            // 只处理部分种类：编号留着，行内代码照样不当强调。
+            var numbered = AgentMarkdown.Analyze("1. `a*b*` **粗**", new[] { AgentMarkdown.LineRole.Text }, new HashSet<string> { "emphasis" }, true);
+            Equal("1. `a*b*` 粗", AgentMarkdown.Remove("1. `a*b*` **粗**", numbered.Marks)); Equal(null, numbered.List);
+            Equal(12, numbered.Formats.Single().Start); Equal("bold", numbered.Formats.Single().Css["font-weight"]);
+        });
+        Test("strip_markdown removes markers and separator lines, commits verified text and undo restores it", () =>
+        {
+            var s = Snapshot(Page(Paragraph("f1", "```markdown"), Paragraph("h", "# 标题"), Paragraph("l", "- `code` 项目"), Paragraph("b", "<b>**重点**</b>文字"),
+                Paragraph("r", "---"), Paragraph("f2", "```"), Paragraph("x", "普通段落")));
+            var t = Tools(s);
+            Rejects("请先完整读取", () => Invoke(t, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" } }));
+            Read(t, s);
+            var result = Json(Invoke(t, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2", "p3", "p4", "p5", "p6", "p7" } }));
+            True(result.Contains("\"removed_lines\":[\"p1\",\"p5\",\"p6\"]")); True(result.Contains("\"noop\":[\"p7\"]"));
+            True(result.Contains("{\"id\":\"p2\",\"heading\":1")); True(result.Contains("{\"id\":\"p3\",\"heading\":null,\"list\":\"bullet\""));
+            Equal("标题", s.Blocks[1].CurrentText); Equal("重点文字", s.Blocks[3].CurrentText);
+            // 删掉的段落不再出现在概况里，读取时跳过，格式和文字工具都拒绝。
+            True(!Json(Invoke(t, "get_page_overview", new { })).Contains("\"id\":\"p1\""));
+            True(Json(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2" } })).Contains("{\"id\":\"p1\",\"reason\":\"removed\"}"));
+            Rejects("已删除", () => Fix(t, s, "p1", "`", "'"));
+            Rejects("已删除", () => Style(t, s));
+            Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, preset_id = "heading1" });
+            True(Json(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId })).Contains("\"markdown_removed\":[\"p1\",\"p5\",\"p6\"]"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(9, r.MarkdownMarks); True(r.Message.Contains("去除 Markdown 符号 9 处")); Equal(0, r.TextFixes.Count);
+            Equal("标题|code 项目|重点文字|普通段落", Texts(api.Page));
+            // 删符号不动其余文字的格式：「重点」仍是粗体。
+            True(AgentCommitter.Find(api.Page, "b").Element(One + "T").Value.Contains("<b>重点</b>"));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status);
+            Equal("```markdown|# 标题|- `code` 项目|**重点**文字|---|```|普通段落", Texts(api.Page));
+        });
+        Test("strip_markdown formats emphasis, keeps fenced code and empties separators it cannot remove", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "这是**重点**和*斜体*"))); var t = Tools(s); Read(t, s);
+            Invoke(t, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, emphasis = "format" });
+            var api = new FakePage(s.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(4, r.MarkdownMarks);
+            var html = AgentCommitter.Find(api.Page, "a").Element(One + "T").Value;
+            Equal("这是重点和斜体", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+            True(html.Contains("font-weight:bold") && html.Contains("font-style:italic"));
+
+            var page = Page(Paragraph("f1", "```"), Paragraph("c", "- item: *x*"), Paragraph("f2", "```"));
+            var off = new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = false }); var o = Tools(off); Read(o, off);
+            var result = Json(Invoke(o, "strip_markdown", new { snapshot_id = off.SnapshotId, block_ids = new[] { "p1", "p2", "p3" } }));
+            True(result.Contains("\"emptied\":[\"p1\",\"p3\"]")); True(result.Contains("\"code_lines\":[\"p2\"]")); True(result.Contains("\"removed_lines\":[]"));
+            var offApi = new FakePage(off.Page); Equal("Verified", new AgentCommitter(offApi).Commit(off, CancellationToken.None).Status);
+            Equal("|- item: *x*|", Texts(offApi.Page));
+            // 文本框里只剩分隔线时留一段，清空文字。
+            var alone = Snapshot(Page(Paragraph("r", "***"))); var a = Tools(alone); Read(a, alone);
+            True(Json(Invoke(a, "strip_markdown", new { snapshot_id = alone.SnapshotId, block_ids = new[] { "p1" } })).Contains("\"emptied\":[\"p1\"]"));
+            Equal("", alone.Blocks[0].CurrentText);
+        });
+        Test("strip_markdown is a switchable tool with prompt and step text", () =>
+        {
+            var page = Page(Paragraph("a", "# 标题")).ToString();
+            True(!Tools(new AgentPageSnapshot(page, null, new AgentOptions { EnableMarkdownCleanup = false })).Has("strip_markdown"));
+            var tools = Tools(new AgentPageSnapshot(page, null, new AgentOptions()));
+            True(tools.Has("strip_markdown")); True(AgentRunner.SystemPrompt(tools).Contains(AgentRunner.MarkdownPrompt)); True(AgentRunner.SystemPrompt(tools).Contains("highlight_code 转换"));
+            Equal(("去除 Markdown 符号 · 3 段 · 删除围栏和分隔线 2 行", AgentStepState.Done),
+                AgentTools.DescribeStep("strip_markdown", "{\"block_ids\":[\"a\"]}", "{\"ok\":true,\"changed\":[{},{},{}],\"removed_lines\":[\"x\",\"y\"]}"));
+        });
         Test("code conversion discards pending text fixes", () =>
         {
             var s = Snapshot(Page(Paragraph("a", "示例："), Paragraph("c", "x = 1 # 按装"))); var t = Tools(s); Read(t, s);
@@ -1840,6 +1916,12 @@ internal static class Program
     private static void Read(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = s.Blocks.Where(b => b.Editable).Select(b => b.Id).ToArray() });
     private static void Style(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "heading1" });
     private static AgentPageSnapshot Prepared(XElement page = null) { var s = Snapshot(page); var t = Tools(s); Read(t, s); Style(t, s); return s; }
+    /// <summary>把几段文字当作一个文本框里连续的段落去掉 Markdown 标记，结果用 | 连接。</summary>
+    private static string Strip(params string[] paragraphs)
+    {
+        var fences = new AgentMarkdown.Fences(); var kinds = new HashSet<string>(AgentMarkdown.Kinds);
+        return string.Join("|", paragraphs.Select(p => AgentMarkdown.Remove(p, AgentMarkdown.Analyze(p, p.Split('\n').Select(fences.Next).ToList(), kinds, false).Marks)));
+    }
     private static object Fix(AgentTools tools, AgentPageSnapshot s, string id, string quote, string replacement) =>
         Invoke(tools, "fix_text", new { snapshot_id = s.SnapshotId, fixes = new[] { new { block_id = id, quote, occurrence = 1, replacement } } });
     /// <summary>正文、三行代码（中间一个空行）、正文。代码段落 p2–p4。</summary>

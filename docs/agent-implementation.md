@@ -25,7 +25,8 @@
 | `read_blocks` | `snapshot_id`、`block_ids`；最多 100 段，返回完整文字、富文本 runs、当前草稿样式；读取受保护段落会拒绝 |
 | `set_paragraph_style` | `snapshot_id`、`block_ids`、`preset_id`、可选 `overrides`；预设为 page_title/heading1/heading2/body/quote，page_title 只用于原标题。原生样式影响未指定子段时保留原有继承属性和样式引用，仅设置父段自身文字外观，返回 `appearance_only` 段落 ID 列表 |
 | `set_text_style` | `snapshot_id`、`targets`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、`style`；支持 bold/italic/underline/color |
-| `fix_text` | `snapshot_id`、`fixes`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、改后文字 `replacement`，两者各 1–30 字、不含换行，同一段的多处按顺序应用；代码段落拒绝。唯一能改文字的工具，系统提示词要求只在用户要求时修正错别字 |
+| `fix_text` | `snapshot_id`、`fixes`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、改后文字 `replacement`，两者各 1–30 字、不含换行，同一段的多处按顺序应用；代码段落拒绝。除 `strip_markdown` 外唯一能改文字的工具，系统提示词要求只在用户要求时修正错别字 |
+| `strip_markdown` | `snapshot_id`、`block_ids`（≤1000，须完整读取），可选 `kinds`（heading/quote/list/emphasis/inline_code/fence/rule，默认全部）、`emphasis`（remove 默认，format 同时设粗体、斜体、删除线）。只删标记字符（`AgentMarkdown` 分析，逐处 `Replace` 为空），返回 `changed`（每段原来的 `heading` 级别、`list`、`todo`、`quote`、`indent`）、`removed_lines`、`emptied`、`code_lines`、`noop`、`skipped`（受保护、代码、已删的段落，或单段处理失败的原因）。整段只有围栏、分隔线的段落在结构草稿里删掉（变更种类 `markdown`），需要 `EnableBlankLineRemoval`、可调整结构的文本框、段落只有 T/Meta，且文本框（单元格）里至少留一段；做不到或结构校验不过时清空文字，标题里的不动。围栏按文本框逐行跟踪整页：`markdown`/`md` 围栏里照常处理，其里带语言的围栏算嵌套代码块，其他围栏里的行不动。`EnableMarkdownCleanup=false` 时不注册 |
 | `highlight_code` | `snapshot_id`、`block_ids`（最多 1000）、`language`（`auto` 或已支持的语言 id）；把连续的代码段落排入草稿，提交时换成高亮代码框。`Agent/EnableCodeHighlight=false` 时不注册 |
 | `set_list` | `snapshot_id`、`block_ids`、`list`（bullet/number/none）；已是同一种列表时不动，保留原符号样式。页面标题、未读和代码段落拒绝。`EnableLists=false` 时不注册 |
 | `set_tag` | `snapshot_id`、`block_ids`、`tag`（todo/important/question/none）、可选 `completed`（只用于 todo）；同类标记不重复添加，none 只去掉这三种。`EnableTags=false` 时不注册 |
@@ -55,6 +56,8 @@
 
 `fix_text` 在原文和改后文字之间逐字比对：没变的字连同格式、链接原样保留，新字沿用被替换的字（纯插入时沿用前一个字）的格式。修正后 `read_blocks`、概况摘要和局部格式定位都按草稿里的新文字。
 提交时只有排过文字修正的段落可以改正文，而且必须和草稿一致；其他段落仍要求正文和链接不变。冲突检测、回读核验照旧，撤销记录带上修正，撤销时文字一起还原。修正清单只进窗口里的结果，日志只记条数。
+`strip_markdown` 走同一套机制：段落记下去掉的标记处数（`AgentBlock.MarkdownMarks`，与 `TextFixes` 一起构成 `TextEdited`，写回时允许正文变化），先按原文下标加格式（不改文字），再从后往前删标记，最后按纯文字核对。
+结果、撤销消息只报处数（整段删掉的围栏、分隔线各算一处），不列清单。已删的段落 `read_blocks` 跳过（reason=removed），格式和文字工具拒绝。
 
 ## 代码框转换
 

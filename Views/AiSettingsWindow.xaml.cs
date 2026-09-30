@@ -48,6 +48,7 @@ namespace OneNoteCodeHelper.Views
             ["EnableLists"] = (0, "项目符号和编号列表"),
             ["EnableTags"] = (0, "待办、重要、问题标记"),
             ["EnableTableStyles"] = (0, "表格边框和底色"),
+            ["EnableMarkdownCleanup"] = (0, "去除 Markdown 符号"),
             ["EnableBlankLineRemoval"] = (1, "删除多余的空行"),
             ["EnableIndent"] = (1, "调整缩进层级"),
             ["EnableMoves"] = (1, "移动段落、合并文本框"),

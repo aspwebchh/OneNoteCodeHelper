@@ -244,7 +244,7 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         /// <summary>从原位置取下段落；缩进的下级段落取光了，空的 OEChildren 也去掉。</summary>
-        private static void Detach(XElement oe)
+        internal static void Detach(XElement oe)
         {
             var parent = oe.Parent;
             oe.Remove();

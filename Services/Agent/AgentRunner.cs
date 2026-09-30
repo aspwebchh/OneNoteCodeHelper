@@ -22,6 +22,11 @@ namespace OneNoteCodeHelper.Services.Agent
             "再用 highlight_code 整体转换，代码中间的空行一并传入，一段完整代码只调用一次；能确定语言时指定 language，否则用 auto。" +
             "代码段落不要设置段落或文字样式。普通文字、正文里的行内代码和已有代码框（highlighted_code）不要转换；用户明确要求不处理代码时不要转换。";
 
+        /// <summary>提供 strip_markdown 时追加；后面接着用的工具按实际提供的提，见 <see cref="SystemPrompt"/>。</summary>
+        internal const string MarkdownPrompt = "用户要求去掉 Markdown 格式、把 Markdown 整理成普通笔记时，用 strip_markdown 一次处理完整读取的段落（可以整页一起传），" +
+            "不要用 fix_text 逐处删符号；这是 fix_text 之外唯一可以改文字的情况，用户没有要求时不要去掉 Markdown 标记。" +
+            "结果 changed 里是原来的标记：heading 用 set_paragraph_style 设为标题，quote 设为引用。编号去掉后编号就没了，不能设为编号列表时 kinds 不要带 list。";
+
         internal const string ListPrompt = "用户明确要求时，用 set_list 把完整读取的段落设为项目符号或编号列表，或取消列表；不要为了排版美观自行把正文改成列表。";
         internal const string TagPrompt = "用户明确要求时，用 set_tag 加待办、重要、问题标记或勾选待办；不要自行添加标记，其他标记保持不变。";
         internal const string TablePrompt = "页面有表格时可以用 set_table_style 统一设置边框、标题行和首行底色，外观相同的表格一次调用；" +
@@ -55,6 +60,14 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             var prompt = new System.Text.StringBuilder(Prompt);
             if (tools.Has("highlight_code")) prompt.Append(CodePrompt);
+            if (tools.Has("strip_markdown"))
+            {
+                prompt.Append(MarkdownPrompt);
+                if (tools.Has("set_list")) prompt.Append("list 用 set_list 设为对应的列表。");
+                if (tools.Has("set_tag")) prompt.Append("todo 用 set_tag 设为待办，true 为已勾选。");
+                if (tools.Has("highlight_code")) prompt.Append("code_lines 里是围栏中的代码，用 highlight_code 转换。");
+                if (tools.Has("text_to_table")) prompt.Append("Markdown 表格用 text_to_table 转换。");
+            }
             if (tools.Has("set_list")) prompt.Append(ListPrompt);
             if (tools.Has("set_tag")) prompt.Append(TagPrompt);
             if (tools.Has("set_table_style")) prompt.Append(TablePrompt);
@@ -175,7 +188,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             {
                                 if (wrapUp)
                                     tools.Report.Message += "\n已用完 Agent 轮数，提交的是到此为止的草稿；还有没处理的需求时，可以缩小范围再执行，或在「AI 配置」的 Agent 页调大「最多轮数」（MaxTurns）。";
-                                AddInLog.Info($"Agent 完成：工具 {count} 次，修改 {tools.Report.Applied}，修正文字 {tools.Report.TextFixes.Count}，代码框 {tools.Report.CodeBlocks}，" +
+                                AddInLog.Info($"Agent 完成：工具 {count} 次，修改 {tools.Report.Applied}，修正文字 {tools.Report.TextFixes.Count}，Markdown {tools.Report.MarkdownMarks}，代码框 {tools.Report.CodeBlocks}，" +
                                     $"表格 {tools.Report.Tables}，转表格 {tools.Report.TextTables}，删空行 {tools.Report.Removed}，移动 {tools.Report.Moved}，缩进 {tools.Report.Indented}，" +
                                     $"插入 {tools.Report.Inserted}，合并文本框 {tools.Report.Merged}，冲突 {tools.Report.Conflicts}，未验证 {tools.Report.Unverified}。");
                                 return tools.Report;

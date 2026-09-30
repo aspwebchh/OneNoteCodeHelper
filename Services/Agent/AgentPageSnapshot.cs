@@ -69,6 +69,8 @@ namespace OneNoteCodeHelper.Services.Agent
             new AgentSwitchOption("EnableLists", o => o.EnableLists, (o, v) => o.EnableLists = v),
             new AgentSwitchOption("EnableTags", o => o.EnableTags, (o, v) => o.EnableTags = v),
             new AgentSwitchOption("EnableTableStyles", o => o.EnableTableStyles, (o, v) => o.EnableTableStyles = v),
+            // 去掉段落里的 Markdown 标记（# 标题、- 列表、**粗体**、`代码`、``` 围栏等），只删标记字符。
+            new AgentSwitchOption("EnableMarkdownCleanup", o => o.EnableMarkdownCleanup, (o, v) => o.EnableMarkdownCleanup = v),
             // 改变段落结构的工具：删空行、调整缩进、移动段落、插入段落、把分隔的文字转成表格。
             new AgentSwitchOption("EnableBlankLineRemoval", o => o.EnableBlankLineRemoval, (o, v) => o.EnableBlankLineRemoval = v),
             new AgentSwitchOption("EnableIndent", o => o.EnableIndent, (o, v) => o.EnableIndent = v),
@@ -98,6 +100,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool EnableLists { get; set; }
         internal bool EnableTags { get; set; }
         internal bool EnableTableStyles { get; set; }
+        internal bool EnableMarkdownCleanup { get; set; }
         internal bool EnableBlankLineRemoval { get; set; }
         internal bool EnableIndent { get; set; }
         internal bool EnableMoves { get; set; }
@@ -141,13 +144,17 @@ namespace OneNoteCodeHelper.Services.Agent
         internal XElement Original;
         internal XElement Draft;
         internal string Fingerprint;
-        /// <summary>快照时的文字。修正过错别字后，草稿里的文字见 <see cref="CurrentText"/>。</summary>
+        /// <summary>快照时的文字。修正过错别字、去掉过 Markdown 标记后，草稿里的文字见 <see cref="CurrentText"/>。</summary>
         internal string Text;
         /// <summary>草稿里已排的文字修正，每项形如「原文」→「改后」。写回核验通过后进入结果，撤销时一起还原。</summary>
         internal readonly List<string> TextFixes = new List<string>();
+        /// <summary>草稿里 strip_markdown 去掉的标记处数。写回核验通过后计入结果，撤销时文字一起还原。</summary>
+        internal int MarkdownMarks;
+        /// <summary>草稿改了文字：只有这样的段落写回时允许正文变化，而且只能变成草稿里的样子。</summary>
+        internal bool TextEdited => TextFixes.Count > 0 || MarkdownMarks > 0;
         /// <summary>为保留下级段落的格式，本段预设只设置外观，保留原有原生样式。</summary>
         internal bool AppearanceOnly;
-        internal string CurrentText => TextFixes.Count == 0 ? Text : new AgentRichText(Draft).Text;
+        internal string CurrentText => TextEdited ? new AgentRichText(Draft).Text : Text;
         internal string ProtectedReason;
         internal string ContainerId;
         internal string ParentId;

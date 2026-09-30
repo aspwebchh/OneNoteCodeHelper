@@ -24,6 +24,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string AfterFingerprint;
         /// <summary>这段写入时修正的文字；撤销时文字也一起还原。</summary>
         internal List<string> TextFixes = new List<string>();
+        /// <summary>这段写入时去掉的 Markdown 标记处数；撤销时文字也一起还原。</summary>
+        internal int MarkdownMarks;
         /// <summary>Before 引用的 QuickStyleDef、TagDef 副本。OneNote 回存后会重新编号，撤销时按内容对应。</summary>
         internal List<XElement> Styles = new List<XElement>();
         internal List<XElement> Tags = new List<XElement>();
@@ -56,12 +58,14 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<string> ConflictIds = new List<string>();
         /// <summary>已核验写入的文字修正，每项形如「原文」→「改后」。含笔记正文，只在窗口里显示，不写日志。</summary>
         internal readonly List<string> TextFixes = new List<string>();
+        /// <summary>已核验去掉的 Markdown 标记处数，含整段删掉的围栏、分隔线（撤销时是还原的处数）。</summary>
+        internal int MarkdownMarks;
         /// <summary>已核验写入、为保留下级格式而只设置外观的段落。</summary>
         internal readonly List<string> AppearanceOnly = new List<string>();
         internal bool CanUndo => Undo.Count + CodeUndo.Count + TableUndo.Count + OutlineUndo.Count > 0;
         /// <summary>撤销之后不再把撤销的逆操作当作可撤销。</summary>
         internal void ClearUndo() { Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
-        internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
+        internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, markdown_marks = MarkdownMarks, code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
             removed = Removed, moved = Moved, indented = Indented, inserted = Inserted, merged = Merged,
             skipped_conflict = ConflictIds, unverified = Unverified, protected_count = Protected, appearance_only = AppearanceOnly, message = Message };
         /// <summary>结果消息里的结构改动部分。</summary>
@@ -151,9 +155,9 @@ namespace OneNoteCodeHelper.Services.Agent
                         if (target == null || !fingerprints.TryGetValue(block.ObjectId, out var fingerprint) || fingerprint != block.Fingerprint)
                         { report.ConflictIds.Add(block.Id); continue; }
                         var before = new XElement(target);
-                        // 只有 fix_text 排过修正的段落可以改文字，而且只能改成草稿里的样子。
+                        // 只有 fix_text、strip_markdown 改过文字的段落可以改文字，而且只能改成草稿里的样子。
                         var expectedContent = new AgentRichText(block.Draft).Signature(page, false);
-                        if (block.TextFixes.Count == 0 && expectedContent != new AgentRichText(target).Signature(page, false))
+                        if (!block.TextEdited && expectedContent != new AgentRichText(target).Signature(page, false))
                             throw new AiException("格式修改改变了正文或链接，已阻止写入。");
                         var hadList = target.Element(One + "List") != null;
                         AgentPageSnapshot.CopyFormat(block.Draft, target);
@@ -270,9 +274,10 @@ namespace OneNoteCodeHelper.Services.Agent
                             { report.Unverified++; continue; }
                             report.Applied++;
                             report.TextFixes.AddRange(item.Block.TextFixes);
+                            report.MarkdownMarks += item.Block.MarkdownMarks;
                             if (item.Block.AppearanceOnly) report.AppearanceOnly.Add(item.Block.Id);
                             report.Undo.Add(new AgentUndoItem { ObjectId = (string)written.Attribute("objectID"), Before = item.Before,
-                                AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual), TextFixes = item.Block.TextFixes.ToList(),
+                                AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual), TextFixes = item.Block.TextFixes.ToList(), MarkdownMarks = item.Block.MarkdownMarks,
                                 Styles = AgentLayout.Styles(item.Before, original), Tags = AgentLayout.Tags(item.Before, original) });
                         }
                         catch (Exception) { report.Unverified++; }
@@ -329,7 +334,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     }
                     report.Status = report.Unverified > 0 || report.Conflicts > 0 || report.Leftover > 0 ? "PartiallyApplied" : "Verified";
                     var conversions = codes.Select(c => c.Conversion).Concat(edits.SelectMany(e => e.Boxes.Select(b => b.Conversion))).ToList();
-                    report.Message = $"已验证修改 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"修正文字 {report.TextFixes.Count} 处；" : "") + report.LayoutSummary +
+                    report.Message = $"已验证修改 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"修正文字 {report.TextFixes.Count} 处；" : "") +
+                        (report.MarkdownMarks > 0 ? $"去除 Markdown 符号 {report.MarkdownMarks} 处；" : "") + report.LayoutSummary +
                         (conversions.Any(c => !c.TextTable) ? $"高亮代码 {report.CodeBlocks} 处；" : "") + (conversions.Any(c => c.TextTable) ? $"转换表格 {report.TextTables} 个；" : "") +
                         (tables.Count + edits.Sum(e => e.Tables.Count) > 0 ? $"表格样式 {report.Tables} 个；" : "") +
                         $"冲突跳过 {report.Conflicts} 处；未验证 {report.Unverified} 处；保护 {report.Protected} 段。";
@@ -375,12 +381,14 @@ namespace OneNoteCodeHelper.Services.Agent
                     AgentPageSnapshot.CopyFormat(Renumbered(item, snapshot), block.Draft);
                     // 把修正过的文字改回去，提交时按改文字的段落核验。
                     block.TextFixes.AddRange(item.TextFixes);
+                    block.MarkdownMarks = item.MarkdownMarks;
                 }
                 var report = Commit(snapshot, cancellation);
                 report.Conflicts += skipped.Count;
                 report.ConflictIds.AddRange(skipped);
                 if (report.Status == "Verified" && report.Conflicts > 0) report.Status = "PartiallyApplied";
                 report.Message = $"撤销已验证恢复 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"还原文字 {report.TextFixes.Count} 处；" : "") +
+                    (report.MarkdownMarks > 0 ? $"还原 Markdown 符号 {report.MarkdownMarks} 处；" : "") +
                     (previous.OutlineUndo.Count > 0 ? $"恢复文本框结构 {report.Outlines} 个；" : "") +
                     (previous.CodeUndo.Any(u => !u.TextTable) ? $"恢复代码 {report.CodeBlocks} 处；" : "") +
                     (previous.CodeUndo.Any(u => u.TextTable) ? $"表格换回段落 {report.TextTables} 个；" : "") +
@@ -444,8 +452,8 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 var node = AgentLayout.Find(written, block.Id);
                 if (node == null) continue;
-                // 只有 fix_text 排过修正的段落可以改文字。
-                if (block.TextFixes.Count == 0 && new AgentRichText(node).Signature(draft, false) != new AgentRichText(block.Original).Signature(snapshot.Page, false))
+                // 只有 fix_text、strip_markdown 改过文字的段落可以改文字。
+                if (!block.TextEdited && new AgentRichText(node).Signature(draft, false) != new AgentRichText(block.Original).Signature(snapshot.Page, false))
                     throw new AiException("格式修改改变了正文或链接，已阻止写入。");
                 edit.Changed.Add((block, node));
                 formatted.Add(block.ObjectId);
@@ -575,6 +583,7 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 report.Applied++;
                 report.TextFixes.AddRange(block.TextFixes);
+                report.MarkdownMarks += block.MarkdownMarks;
                 if (block.AppearanceOnly) report.AppearanceOnly.Add(block.Id);
             }
             foreach (var (box, conversion) in edit.Boxes)
@@ -591,6 +600,7 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             string[] Ids(string kind) => edit.Changes.Where(c => c.Kind == kind).SelectMany(c => c.Ids).Distinct().ToArray();
             report.Removed += Ids("removed").Length;
+            report.MarkdownMarks += Ids("markdown").Length;
             report.Moved += Ids("moved").Length;
             report.Indented += Ids("indented").Length;
             report.Inserted += Ids("inserted").Length;
