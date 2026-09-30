@@ -45,7 +45,7 @@ namespace OneNoteCodeHelper.Services.Agent
 
             internal LineRole Next(string line)
             {
-                var m = FenceLine.Match(line);
+                var m = FenceLine.Match(MatchingText(line));
                 var inCode = _open.Count > 0 && !_open[_open.Count - 1].Markdown;
                 if (!m.Success || (m.Groups[1].Value[0] == '`' && m.Groups[2].Value.IndexOf('`') >= 0))
                     return inCode ? LineRole.Code : LineRole.Text;
@@ -72,13 +72,8 @@ namespace OneNoteCodeHelper.Services.Agent
         private static readonly Regex ClosingHashes = new Regex(@"[ \t]+#+[ \t]*$");
         private static readonly Regex ListPrefix = new Regex(@"\G([ \t]*)(?:([-*+])|\d{1,9}[.)])[ \t]+(?:\[([ xX])\](?:[ \t]+|$))?");
         private static readonly Regex InlineCode = new Regex(@"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)");
-        /// <summary>删除线、星号、下划线强调。标记外侧不能紧挨英文字母或数字，避免 a*b*c、snake_case 被当成强调。</summary>
-        private static readonly Regex[] Emphasis =
-        {
-            new Regex(@"(?<!~)(~~)(?=[^\s~])(.+?)(?<=[^\s~])~~(?!~)"),
-            new Regex(@"(?<![A-Za-z0-9*])(\*{1,3})(?=[^\s*])(.+?)(?<=[^\s*])\1(?![A-Za-z0-9*])"),
-            new Regex(@"(?<![A-Za-z0-9_])(_{1,3})(?=[^\s_])(.+?)(?<=[^\s_])\1(?![A-Za-z0-9_])")
-        };
+        /// <summary>仅匹配时把 OneNote 的硬空格当空格，长度和下标不变，写回仍用原文。</summary>
+        private static string MatchingText(string text) => text.Replace('\u00a0', ' ');
 
         /// <param name="roles">每一行的角色，行数与 text 按 '\n' 切开的相同。</param>
         internal static Result Analyze(string text, IList<LineRole> roles, ISet<string> kinds, bool format)
@@ -90,7 +85,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var separators = 0;
             for (var i = 0; i < lines.Length; i++)
             {
-                var line = lines[i];
+                var line = MatchingText(lines[i]);
                 switch (roles[i])
                 {
                     case LineRole.Fence:
@@ -171,25 +166,51 @@ namespace OneNoteCodeHelper.Services.Agent
                 for (var i = m.Index; i < m.Index + m.Length; i++) masked[i] = '\0';
             }
             if (!kinds.Contains("emphasis")) return;
-            // 嵌套的强调（**粗体里有 *斜体***）外层先配对，去掉外层标记后再找里层。
-            for (var pass = 0; pass < 3; pass++)
+            // 用栈配对，连续的结尾符号可以同时关闭内外层（**粗体里有 *斜体***）。
+            var open = new List<(int Start, int Length, char Mark)>();
+            for (var i = p; i < masked.Length;)
             {
-                var found = false;
-                foreach (var regex in Emphasis)
+                var mark = masked[i];
+                if (mark != '*' && mark != '_' && mark != '~') { i++; continue; }
+                var end = i + 1;
+                while (end < masked.Length && masked[end] == mark) end++;
+                var length = end - i;
+                if (mark == '~' && length != 2) { i = end; continue; }
+                var canOpen = end < masked.Length && !char.IsWhiteSpace(masked[end]) &&
+                    (mark == '~' || i == p || !AsciiWord(masked[i - 1]));
+                var canClose = i > p && !char.IsWhiteSpace(masked[i - 1]) &&
+                    (mark == '~' || end == masked.Length || !AsciiWord(masked[end]));
+                var count = 0;
+                var remaining = length;
+                if (canClose)
                 {
-                    foreach (Match m in regex.Matches(new string(masked), p))
+                    for (var j = open.Count - 1; j >= 0 && open[j].Mark == mark && open[j].Length <= remaining; j--)
                     {
-                        var marker = m.Groups[1].Length;
-                        var inner = m.Groups[2];
-                        Take(m.Index, marker, "emphasis");
-                        Take(m.Index + m.Length - marker, marker, "emphasis");
-                        if (format) result.Formats.Add((offset + inner.Index, inner.Length, Css(m.Groups[1].Value)));
-                        found = true;
+                        remaining -= open[j].Length;
+                        count++;
+                        if (remaining == 0) break;
                     }
                 }
-                if (!found) break;
+                if (count > 0 && remaining == 0)
+                {
+                    var close = i;
+                    for (var j = 0; j < count; j++)
+                    {
+                        var opening = open[open.Count - 1];
+                        open.RemoveAt(open.Count - 1);
+                        result.Marks.Add((offset + opening.Start, opening.Length));
+                        result.Marks.Add((offset + close, opening.Length));
+                        if (format) result.Formats.Add((offset + opening.Start + opening.Length,
+                            close - opening.Start - opening.Length, Css(new string(mark, opening.Length))));
+                        close += opening.Length;
+                    }
+                }
+                else if (canOpen && length <= 3) open.Add((i, length, mark));
+                i = end;
             }
         }
+
+        private static bool AsciiWord(char c) => c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9';
 
         private static Dictionary<string, string> Css(string marker)
         {

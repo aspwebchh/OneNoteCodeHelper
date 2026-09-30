@@ -423,6 +423,156 @@ internal static class Program
             Equal(("去除 Markdown 符号 · 3 段 · 删除围栏和分隔线 2 行", AgentStepState.Done),
                 AgentTools.DescribeStep("strip_markdown", "{\"block_ids\":[\"a\"]}", "{\"ok\":true,\"changed\":[{},{},{}],\"removed_lines\":[\"x\",\"y\"]}"));
         });
+        Test("markdown fenced code survives repeated and split cleanup with either removal setting", () =>
+        {
+            foreach (var remove in new[] { true, false }) foreach (var split in new[] { true, false })
+            {
+                var page = Page(Paragraph("f1", "```java"), Paragraph("c", "var s = \"**keep**\";"), Paragraph("f2", "```"), Paragraph("h", "# 正文"));
+                var original = Texts(page);
+                var s = new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = remove }); var t = Tools(s); Read(t, s);
+                if (split) Cleanup(t, s, "p1", "p3");
+                Cleanup(t, s, "p1", "p2", "p3", "p4");
+                var revision = s.Revision;
+                True(Json(Cleanup(t, s, "p1", "p2", "p3", "p4")).Contains("\"code_lines\":[\"p2\"]"));
+                Equal(revision, s.Revision); Equal("var s = \"**keep**\";", s.Blocks[1].CurrentText);
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(3, r.MarkdownMarks);
+                Equal("var s = \"**keep**\";", new AgentRichText(AgentCommitter.Find(api.Page, "c")).Text);
+                var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+                Equal("Verified", undo.Status); Equal(3, undo.MarkdownMarks); Equal(original, Texts(api.Page));
+            }
+        });
+        Test("markdown selection reads fence context locally and preserves unselected paragraphs", () =>
+        {
+            var page = Page(Paragraph("f1", "```java"), Paragraph("c", "var s = \"**keep**\";"), Paragraph("f2", "```"),
+                Paragraph("h", "# 标题"), Paragraph("secret", "**选区外**"));
+            var s = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "c", "h" }, new AgentOptions()); var t = Tools(s); Read(t, s);
+            var overview = Json(Invoke(t, "get_page_overview", new { })); True(!overview.Contains("选区外") && !overview.Contains("```java"));
+            True(Json(Cleanup(t, s, "p1", "p2")).Contains("\"code_lines\":[\"p1\"]"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.MarkdownMarks);
+            Equal("```java|var s = \"**keep**\";|```|标题|**选区外**", Texts(api.Page));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(page), Texts(api.Page));
+        });
+        Test("markdown code protection follows a paragraph moved to another text box", () =>
+        {
+            var page = Boxes(Box("A", 100, Paragraph("f1", "```java"), Paragraph("c", "var s = \"**keep**\";"), Paragraph("f2", "```")),
+                Box("B", 300, Paragraph("b", "正文")));
+            var s = Snapshot(page); var t = Tools(s); Read(t, s); Move(t, s, new[] { "p2" }, "p4", "after");
+            True(Json(Cleanup(t, s, "p2")).Contains("\"code_lines\":[\"p2\"]")); Equal(0, s.Blocks[1].MarkdownMarks);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal("正文|var s = \"**keep**\";", BoxTexts(api.Page, "B"));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(page), Texts(api.Page));
+        });
+        Test("markdown fence contexts stay separate across table cells and surrounding text", () =>
+        {
+            var page = GridPage(); var children = page.Element(One + "Outline").Element(One + "OEChildren");
+            children.AddFirst(Paragraph("f1", "```java")); children.Add(Paragraph("c", "var s = \"**keep**\";"), Paragraph("f2", "```"));
+            var cell = page.Descendants(One + "Cell").First().Element(One + "OEChildren");
+            cell.ReplaceNodes(Paragraph("cf1", "```java"), Paragraph("cc", "var s = \"**cell**\";"), Paragraph("cf2", "```"));
+            AgentCommitter.Find(page, "h2").Element(One + "T").Value = "**说明**";
+            var s = Snapshot(page); var t = Tools(s); Read(t, s); Cleanup(t, s, s.Blocks.Select(b => b.Id).ToArray());
+            Equal("var s = \"**keep**\";", s.Blocks.Single(b => b.ObjectId == "c").CurrentText);
+            Equal("var s = \"**cell**\";", s.Blocks.Single(b => b.ObjectId == "cc").CurrentText);
+            Equal("说明", s.Blocks.Single(b => b.ObjectId == "h2").CurrentText);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(6, r.MarkdownMarks);
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(page), Texts(api.Page));
+        });
+        Test("markdown skips only the text flow with unreadable fence context", () =>
+        {
+            var page = Boxes(Box("A", 100, Paragraph("bad", "<img src='x'>"), Paragraph("a", "**保留**")), Box("B", 300, Paragraph("b", "# 标题")));
+            var s = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "a", "b" }, new AgentOptions()); var t = Tools(s); Read(t, s);
+            True(Json(Cleanup(t, s, "p1", "p2")).Contains("markdown_context_unavailable"));
+            Equal("**保留**", s.Blocks[0].CurrentText); Equal("标题", s.Blocks[1].CurrentText);
+            var api = new FakePage(s.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.MarkdownMarks); Equal("<img src='x'>", AgentCommitter.Find(api.Page, "bad").Element(One + "T").Value);
+        });
+        Test("markdown recognizes OneNote hard spaces without changing content whitespace", () =>
+        {
+            var s = Snapshot(Page(Paragraph("h", "&nbsp;##&nbsp;标题&nbsp;正文&nbsp;##"), Paragraph("l", "&nbsp;&nbsp;-&nbsp;[&nbsp;]&nbsp;待办"),
+                Paragraph("q", "&nbsp;&gt;&nbsp;引用"), Paragraph("r", "&nbsp;*&nbsp;*&nbsp;*"), Paragraph("f1", "&nbsp;```java"),
+                Paragraph("c", "var s = \"**keep**\";"), Paragraph("f2", "&nbsp;```")));
+            var t = Tools(s); Read(t, s); var result = Json(Cleanup(t, s, s.Blocks.Select(b => b.Id).ToArray()));
+            Equal("标题\u00a0正文", s.Blocks[0].CurrentText); Equal("待办", s.Blocks[1].CurrentText); Equal("引用", s.Blocks[2].CurrentText);
+            True(result.Contains("\"todo\":false") && result.Contains("\"indent\":2") && result.Contains("\"heading\":2"));
+            Equal("var s = \"**keep**\";", s.Blocks[5].CurrentText);
+            var api = new FakePage(s.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None); Equal("Verified", r.Status);
+            Equal("标题\u00a0正文", new AgentRichText(AgentCommitter.Find(api.Page, "h")).Text);
+        });
+        Test("markdown pairs nested emphasis and preserves unmatched markers and inline code", () =>
+        {
+            Equal("粗体里有 斜体|斜体里有 粗体|粗斜|删除里有 粗体|粗体 删除|粗体 斜体|粗体 斜体 正文|**未闭合|*未闭合**|snake_case 和 a*b*c 和 2 * 3|粗体 *保留*|😀 𠮷字",
+                Strip("**粗体里有 *斜体***", "*斜体里有 **粗体***", "***粗斜***", "~~删除里有 **粗体**~~", "**粗体 ~~删除~~**", "__粗体 _斜体___",
+                    "**粗体 *斜体* 正文**", "**未闭合", "*未闭合**", "snake_case 和 a*b*c 和 2 * 3", "**粗体 `*保留*`**", "**😀 *𠮷字***"));
+            foreach (var pair in new[] { ("**粗体里有 *斜体***", "<b>粗体里有 <i>斜体</i></b>"), ("*斜体里有 **粗体***", "<i>斜体里有 <b>粗体</b></i>"),
+                ("~~删除里有 **粗体**~~", "<s>删除里有 <b>粗体</b></s>"), ("***粗斜***", "<b><i>粗斜</i></b>") })
+            {
+                var s = Snapshot(Page(Paragraph("a", pair.Item1))); var t = Tools(s); Read(t, s);
+                Invoke(t, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, emphasis = "format" });
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None); Equal("Verified", r.Status);
+                var expected = Paragraph("a", pair.Item2); var expectedPage = Page(expected);
+                Equal(new AgentRichText(expected).Signature(expectedPage, true), new AgentRichText(AgentCommitter.Find(api.Page, "a")).Signature(api.Page, true));
+                Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(pair.Item1, Texts(api.Page));
+            }
+        });
+        Test("cleaned markdown tables preserve text edits, format, links, counts and undo in both commit paths", () =>
+        {
+            foreach (var structure in new[] { true, false }) foreach (var rows in new[] { true, false })
+            {
+                var paragraphs = new List<XElement> { Paragraph("h", "| **名称** | 内容 |") };
+                if (!rows) paragraphs.Add(Paragraph("sep", "| --- | --- |"));
+                paragraphs.Add(Paragraph("d", "| <a href='https://example.com'>按装</a> | **重点** |"));
+                if (structure) { paragraphs.Insert(0, Paragraph("f1", "```markdown")); paragraphs.Add(Paragraph("f2", "```")); }
+                var page = Page(paragraphs.ToArray()); var original = Texts(page); var s = Snapshot(page); var t = Tools(s); Read(t, s);
+                Fix(t, s, s.Blocks.Single(b => b.ObjectId == "d").Id, "按装", "安装");
+                Invoke(t, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = s.Blocks.Select(b => b.Id).ToArray(), emphasis = "format" });
+                var ids = s.Blocks.Where(b => b.ObjectId == "h" || b.ObjectId == "d" || b.ObjectId == "sep").Select(b => b.Id).ToArray();
+                var result = rows
+                    ? Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, rows = new[] { new[] { "名称", "内容" }, new[] { "安装", "重点" } }, header_row = false })
+                    : Invoke(t, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, delimiter = "pipe", header_row = false });
+                True(Json(result).Contains("\"discarded_format\":[]")); Equal("名称|内容|安装|重点", Texts(s.CodeConversions.Single().Table));
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(1, r.TextTables); Equal(structure ? 6 : 4, r.MarkdownMarks); Equal(1, r.TextFixes.Count);
+                Equal("名称|内容|安装|重点", Texts(api.Page));
+                var html = api.Page.ToString(); True(html.Contains("font-weight:bold") && html.Contains("https://example.com"));
+                var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+                Equal("Verified", undo.Status); Equal(r.MarkdownMarks, undo.MarkdownMarks); Equal(1, undo.TextFixes.Count); Equal(original, Texts(api.Page));
+            }
+        });
+        Test("cleaned markdown table conflicts never overwrite user text or count skipped edits", () =>
+        {
+            foreach (var structure in new[] { true, false })
+            {
+                var paragraphs = new List<XElement> { Paragraph("h", "| **名称** | 内容 |"), Paragraph("d", "| 甲 | **重点** |") };
+                if (structure) { paragraphs.Insert(0, Paragraph("f1", "```markdown")); paragraphs.Add(Paragraph("f2", "```")); }
+                var s = Snapshot(Page(paragraphs.ToArray())); var t = Tools(s); Read(t, s); Cleanup(t, s, s.Blocks.Select(b => b.Id).ToArray());
+                Table(t, s, "pipe", s.Blocks.Where(b => b.ObjectId == "h" || b.ObjectId == "d").Select(b => b.Id).ToArray());
+                var api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "d").Element(One + "T").Value = "用户改动"; var before = api.Page.ToString();
+                var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+                Equal("NoChange", r.Status); Equal(0, api.Writes); Equal(0, r.MarkdownMarks); Equal(0, r.TextFixes.Count); Equal(before, api.Page.ToString());
+            }
+        });
+        Test("cleaned markdown table rejects lost emphasis on readback and protects later edits on undo", () =>
+        {
+            var s = Snapshot(Page(Paragraph("h", "| **名称** | 内容 |"), Paragraph("d", "| 甲 | **重点** |"))); var t = Tools(s); Read(t, s);
+            Invoke(t, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", "p2" }, emphasis = "format" });
+            Table(t, s, "pipe", "p1", "p2");
+            var broken = new FakePage(s.Page);
+            broken.AfterSave = () => broken.Page.Descendants(One + "OE").Last(oe => oe.Elements(One + "T").Any()).Element(One + "T").Value = "重点";
+            var failed = new AgentCommitter(broken).Commit(s, CancellationToken.None);
+            Equal("PartiallyApplied", failed.Status); Equal(1, failed.Unverified); Equal(0, failed.MarkdownMarks); True(!failed.CanUndo);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None); Equal("Verified", r.Status);
+            api.Page.Descendants(One + "OE").Last(oe => oe.Elements(One + "T").Any()).Element(One + "T").Value = "后来编辑"; var before = api.Page.ToString();
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal(1, undo.Conflicts); Equal(0, undo.MarkdownMarks); Equal(before, api.Page.ToString());
+        });
+        Test("table conversion without markdown retains its previous draft discard behavior", () =>
+        {
+            var s = Snapshot(Page(Paragraph("h", "名称 | 内容"), Paragraph("d", "按装 | 重点"))); var t = Tools(s); Read(t, s); Fix(t, s, "p2", "按装", "安装");
+            Table(t, s, "pipe", "p1", "p2"); Equal("名称|内容|按装|重点", Texts(s.CodeConversions.Single().Table));
+            Equal(0, s.CodeConversions[0].TextFixes.Count); Equal(0, s.Blocks[1].TextFixes.Count);
+        });
         Test("code conversion discards pending text fixes", () =>
         {
             var s = Snapshot(Page(Paragraph("a", "示例："), Paragraph("c", "x = 1 # 按装"))); var t = Tools(s); Read(t, s);
@@ -1924,6 +2074,8 @@ internal static class Program
     }
     private static object Fix(AgentTools tools, AgentPageSnapshot s, string id, string quote, string replacement) =>
         Invoke(tools, "fix_text", new { snapshot_id = s.SnapshotId, fixes = new[] { new { block_id = id, quote, occurrence = 1, replacement } } });
+    private static object Cleanup(AgentTools tools, AgentPageSnapshot s, params string[] ids) =>
+        Invoke(tools, "strip_markdown", new { snapshot_id = s.SnapshotId, block_ids = ids });
     /// <summary>正文、三行代码（中间一个空行）、正文。代码段落 p2–p4。</summary>
     private static XElement CodePage()
     {

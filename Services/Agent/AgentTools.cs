@@ -90,6 +90,8 @@ namespace OneNoteCodeHelper.Services.Agent
         private readonly CancellationToken _cancellation;
         /// <summary>代码框的主题、字体、字号等，取自功能区当前设置，和「高亮选中」一致。</summary>
         private readonly AddInSettings _code;
+        /// <summary>执行开始时的围栏上下文；不随删围栏、改字或移动段落重新分类。</summary>
+        private readonly Dictionary<string, List<AgentMarkdown.LineRole>> _markdownRoles = new Dictionary<string, List<AgentMarkdown.LineRole>>();
         internal AgentReport Report { get; private set; }
         /// <summary>本次注册了这个工具；系统提示词按实际提供的工具追加说明。</summary>
         internal bool Has(string name) => _tools.ContainsKey(name);
@@ -102,6 +104,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal AgentTools(AgentPageSnapshot snapshot, AgentCommitter committer, CancellationToken cancellation, AddInSettings codeSettings = null)
         {
             _snapshot = snapshot; _committer = committer; _cancellation = cancellation; _code = codeSettings ?? new AddInSettings();
+            if (snapshot.Options.EnableMarkdownCleanup) CacheFenceRoles();
             Register("get_page_overview", "获取当前固定页面的段落摘要、保护范围及样式。每页 100 项；通过 offset 翻页。", AgentSchema.Obj(new Dictionary<string, AgentSchema>
             { ["offset"] = AgentSchema.Num(0, 1000, true) }), Overview);
             Register("read_blocks", "完整读取段落正文及样式。修改前必须调用，不能修改受保护段落；传入的受保护段落会跳过，列在 skipped 里并附原因。", WithIds(), Read);
@@ -797,29 +800,35 @@ namespace OneNoteCodeHelper.Services.Agent
                 blocks = drafts.Keys.Select(b => new { id = b.Id, text = b.CurrentText }).ToArray() };
         }
 
-        /// <summary>转换或删掉的段落，之前排的格式和文字草稿作废。</summary>
+        /// <summary>转换或删掉的段落不再逐段写回；需要保留的草稿须先存入转换记录。</summary>
         private static void Discard(AgentBlock b)
         {
             b.Draft = new XElement(b.Original); b.TextFixes.Clear(); b.MarkdownMarks = 0; b.AppearanceOnly = false;
         }
 
         /// <summary>
-        /// 按页面顺序逐个文本框（单元格）跟踪 ``` 围栏，给每个有文字的段落的每一行定角色。
-        /// 整页一起算，模型只传一部分段落时也能认出哪些行在代码块里。
+        /// 在初始完整页面上按文本框（单元格）跟踪围栏，包括未选中的上下文；只缓存目标段落的角色，不向模型返回选区外文字。
+        /// 任一段 HTML 无法解析时，该文本流不参与 Markdown 清理，避免漏掉围栏而误改代码。
         /// </summary>
-        private Dictionary<AgentBlock, List<AgentMarkdown.LineRole>> FenceRoles()
+        private void CacheFenceRoles()
         {
-            var roles = new Dictionary<AgentBlock, List<AgentMarkdown.LineRole>>();
-            XElement flow = null;
-            AgentMarkdown.Fences fences = null;
-            foreach (var item in Ordered())
+            foreach (var flow in _snapshot.Layout.Descendants(OneNoteApi.One + "OE").Where(oe => oe.Elements(OneNoteApi.One + "T").Any())
+                .GroupBy(PageEditor.TextBlockOf))
             {
-                var current = PageEditor.TextBlockOf(item.Node);
-                if (current != flow || fences == null) { flow = current; fences = new AgentMarkdown.Fences(); }
-                if (item.Block == null || !(item.Block.Editable || item.Block.CodeCandidate)) continue;
-                roles[item.Block] = item.Block.CurrentText.Split('\n').Select(fences.Next).ToList();
+                var fences = new AgentMarkdown.Fences();
+                var roles = new Dictionary<string, List<AgentMarkdown.LineRole>>();
+                try
+                {
+                    foreach (var oe in flow)
+                    {
+                        var lines = new AgentRichText(oe).Text.Split('\n').Select(fences.Next).ToList();
+                        var key = AgentLayout.KeyOf(oe);
+                        if (key != null) roles.Add(key, lines);
+                    }
+                }
+                catch (Exception ex) when (ex is System.Xml.XmlException || ex is AiException || ex is ArgumentException) { continue; }
+                foreach (var pair in roles) _markdownRoles.Add(pair.Key, pair.Value);
             }
-            return roles;
         }
 
         /// <summary>
@@ -840,10 +849,10 @@ namespace OneNoteCodeHelper.Services.Agent
                     : AgentLayout.Find(_snapshot.Layout, b.Id) == null ? "removed" : null;
                 if (reason != null) { skipped.Add(new { id, reason }); continue; }
                 if (!b.Read) throw new AiException("请先完整读取目标段落。");
+                if (!_markdownRoles.ContainsKey(b.Id)) { skipped.Add(new { id, reason = "markdown_context_unavailable" }); continue; }
                 targets.Add(b);
             }
-            var roles = FenceRoles();
-            var results = targets.ToDictionary(b => b, b => AgentMarkdown.Analyze(b.CurrentText, roles[b], kinds, format));
+            var results = targets.ToDictionary(b => b, b => AgentMarkdown.Analyze(b.CurrentText, _markdownRoles[b.Id], kinds, format));
             var noop = targets.Where(b => results[b].Marks.Count == 0 && results[b].CodeLines == 0).Select(b => b.Id).ToList();
             var codeLines = targets.Where(b => results[b].CodeLines > 0).Select(b => b.Id).ToList();
 
@@ -968,20 +977,25 @@ namespace OneNoteCodeHelper.Services.Agent
             // 先全部校验、生成表格，再发布草稿；失败时这个工具没有副作用。
             var selection = AgentCode.Select(_snapshot.Layout, blocks.Select(b => b.ObjectId).ToList(), "表格");
             if (selection.Block.Name == OneNoteApi.One + "Cell") throw new AiException("表格单元格里的段落不能再转换为表格。");
+            // Markdown 清理后的转换使用当前草稿；原始 selection 仍用于冲突、结构核验及撤销。
+            var preserve = blocks.Any(b => b.MarkdownMarks > 0);
+            var source = preserve ? AgentCode.Select(_snapshot.CreateDraftPage(), blocks.Select(b => b.ObjectId).ToList(), "表格") : selection;
             var shading = args.TryGetValue("header_shading", out var shade) && (string)shade != "none" ? TableLook.Shade((string)shade) : null;
             var names = args.TryGetValue("header", out var header) ? ((IList)header).Cast<string>().ToList() : null;
             var headerRow = !args.TryGetValue("header_row", out var hasHeader) || (bool)hasHeader;
             var borders = !args.TryGetValue("borders", out var bordered) || (bool)bordered;
             int padded;
             var table = byRows
-                ? AgentTextTable.BuildFromRows(selection.Paragraphs, ((IList)given).Cast<IList>().Select(r => (IList<string>)r.Cast<string>().ToList()).ToList(),
+                ? AgentTextTable.BuildFromRows(source.Paragraphs, ((IList)given).Cast<IList>().Select(r => (IList<string>)r.Cast<string>().ToList()).ToList(),
                     headerRow, borders, shading, names, out padded)
-                : AgentTextTable.Build(selection.Paragraphs, (string)args["delimiter"], args.TryGetValue("lines_per_row", out var group) ? Convert.ToInt32(group) : 1,
+                : AgentTextTable.Build(source.Paragraphs, (string)args["delimiter"], args.TryGetValue("lines_per_row", out var group) ? Convert.ToInt32(group) : 1,
                     headerRow, borders, shading, names, out padded);
             var ordered = selection.Paragraphs.Select(oe => blocks.First(b => b.Id == AgentLayout.KeyOf(oe))).ToList();
-            var conversion = new AgentCodeConversion { Blocks = ordered, TextTable = true, Code = selection.Code, Table = table };
-            // 转换后这些段落就不在了，之前给它们排的格式和文字修正作废。
-            var discarded = ordered.Where(b => b.Changed).Select(b => b.Id).ToArray();
+            var conversion = new AgentCodeConversion { Blocks = ordered, TextTable = true, Code = selection.Code, Table = table,
+                MarkdownMarks = preserve ? ordered.Sum(b => b.MarkdownMarks) : 0,
+                TextFixes = preserve ? ordered.SelectMany(b => b.TextFixes).ToList() : new List<string>() };
+            // 清理后的草稿已经进入表格，不再逐段写回；其他转换仍丢弃文字和格式草稿。
+            var discarded = preserve ? new string[0] : ordered.Where(b => b.Changed).Select(b => b.Id).ToArray();
             foreach (var b in ordered) { Discard(b); b.Conversion = conversion; }
             _snapshot.CodeConversions.Add(conversion);
             _snapshot.Revision++;

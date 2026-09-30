@@ -193,6 +193,8 @@ namespace OneNoteCodeHelper.Services.Agent
                         { report.ConflictIds.AddRange(conversion.Blocks.Select(b => b.Id)); continue; }
                         var undo = AgentCode.CaptureOriginals(selection, page);
                         undo.TextTable = conversion.TextTable;
+                        undo.MarkdownMarks = conversion.MarkdownMarks;
+                        undo.TextFixes = conversion.TextFixes.ToList();
                         containers.Add(selection.Outline);
                         codes.Add((selection.ReplaceWith(new XElement(conversion.Table)), undo, conversion));
                         foreach (var id in ids) untouched.Remove(id);
@@ -300,6 +302,8 @@ namespace OneNoteCodeHelper.Services.Agent
                         code.Undo.TableId = (string)written.Element(One + "Table").Attribute("objectID");
                         code.Undo.Fingerprint = AgentCode.Fingerprint(written, actual);
                         if (code.Conversion.TextTable) report.TextTables++; else report.CodeBlocks++;
+                        report.MarkdownMarks += code.Conversion.MarkdownMarks;
+                        report.TextFixes.AddRange(code.Conversion.TextFixes);
                         report.CodeUndo.Add(code.Undo);
                     }
                     foreach (var restored in restores)
@@ -310,8 +314,12 @@ namespace OneNoteCodeHelper.Services.Agent
                             catch (Exception) { return false; }
                         });
                         if (!same) report.Unverified++;
-                        else if (restored.Item.TextTable) report.TextTables++;
-                        else report.CodeBlocks++;
+                        else
+                        {
+                            if (restored.Item.TextTable) report.TextTables++; else report.CodeBlocks++;
+                            report.MarkdownMarks += restored.Item.MarkdownMarks;
+                            report.TextFixes.AddRange(restored.Item.TextFixes);
+                        }
                     }
                     foreach (var edit in edits) VerifyOutline(edit, page, actual, expectedLines, actualLines, report);
                     // 重建的段落里的图片（跨框移动、撤销重建）只带着数据写入，piBasic 看不出坏图，按二进制数据核对。
@@ -376,8 +384,11 @@ namespace OneNoteCodeHelper.Services.Agent
                 foreach (var item in previous.Undo)
                 {
                     var block = snapshot.Blocks.FirstOrDefault(b => b.ObjectId == item.ObjectId);
-                    if (block == null || !block.Editable || block.Fingerprint != item.AfterFingerprint)
+                    // strip_markdown 清空的围栏、分隔线现在是受保护空段，只允许凭已核验的撤销记录恢复。
+                    var emptiedMarkdown = block?.ProtectedReason == "empty" && item.MarkdownMarks > 0;
+                    if (block == null || !(block.Editable || emptiedMarkdown) || block.Fingerprint != item.AfterFingerprint)
                     { skipped.Add(item.ObjectId); continue; }
+                    if (emptiedMarkdown) block.ProtectedReason = null;
                     AgentPageSnapshot.CopyFormat(Renumbered(item, snapshot), block.Draft);
                     // 把修正过的文字改回去，提交时按改文字的段落核验。
                     block.TextFixes.AddRange(item.TextFixes);
@@ -436,6 +447,8 @@ namespace OneNoteCodeHelper.Services.Agent
             /// <summary>改了外观的表格和它在写入内容里的元素；跨框移过来的表格没有原 ID，按位置核对。</summary>
             internal readonly List<(AgentTable Table, XElement Target)> Tables = new List<(AgentTable, XElement)>();
             internal readonly List<AgentLayoutChange> Changes = new List<AgentLayoutChange>();
+            internal int RestoredMarkdownMarks;
+            internal List<string> RestoredTextFixes = new List<string>();
         }
 
         /// <summary>
@@ -539,7 +552,8 @@ namespace OneNoteCodeHelper.Services.Agent
             Dictionary<string, string> untouched, ISet<string> formatted)
         {
             var current = item.Deleted ? null : Outline(page, item.OutlineId);
-            var edit = new OutlineEdit { Id = item.OutlineId, Restore = true, Before = current == null ? null : new XElement(current) };
+            var edit = new OutlineEdit { Id = item.OutlineId, Restore = true, Before = current == null ? null : new XElement(current),
+                RestoredMarkdownMarks = item.MarkdownMarks, RestoredTextFixes = item.TextFixes };
             var written = new XElement(item.Before);
             if (current == null) AgentCode.StripIdentity(written);
             AgentLayout.StripForeign(written, item.OutlineId, homes);
@@ -568,6 +582,8 @@ namespace OneNoteCodeHelper.Services.Agent
         /// </summary>
         private static void VerifyOutline(OutlineEdit edit, XElement page, XElement actual, List<XElement> expectedLines, List<XElement> actualLines, AgentReport report)
         {
+            var marksBefore = report.MarkdownMarks;
+            var fixesBefore = report.TextFixes.Count;
             var boxLines = new HashSet<XElement>(edit.Boxes.SelectMany(b => b.Box.Descendants(One + "OE")));
             var failed = new HashSet<XElement>();
             // 合并删掉的文本框不在期望页面里，没有要按位置核对的段落。
@@ -590,6 +606,8 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 if (!ConversionWritten(box, actualLines[expectedLines.IndexOf(box)], conversion, page, actual)) { report.Unverified++; continue; }
                 if (conversion.TextTable) report.TextTables++; else report.CodeBlocks++;
+                report.MarkdownMarks += conversion.MarkdownMarks;
+                report.TextFixes.AddRange(conversion.TextFixes);
             }
             foreach (var (table, target) in edit.Tables)
             {
@@ -605,12 +623,18 @@ namespace OneNoteCodeHelper.Services.Agent
             report.Indented += Ids("indented").Length;
             report.Inserted += Ids("inserted").Length;
             report.Merged += edit.Changes.Count(c => c.Kind == "merged");
+            if (edit.Restore && failed.Count == 0)
+            {
+                report.MarkdownMarks += edit.RestoredMarkdownMarks;
+                report.TextFixes.AddRange(edit.RestoredTextFixes);
+            }
             report.Outlines++;
             // 合并删掉的文本框在删除之后才记撤销。
             var after = edit.Restore || edit.Delete ? null : Outline(actual, edit.Id);
             if (after != null)
                 report.OutlineUndo.Add(new AgentOutlineUndoItem { OutlineId = edit.Id, Before = edit.Before, Styles = edit.Styles, Tags = edit.Tags, Group = edit.Group,
-                    AfterFingerprint = AgentLayout.OutlineFingerprint(after, actual) });
+                    AfterFingerprint = AgentLayout.OutlineFingerprint(after, actual), MarkdownMarks = report.MarkdownMarks - marksBefore,
+                    TextFixes = report.TextFixes.Skip(fixesBefore).ToList() });
         }
 
         /// <summary>
@@ -654,7 +678,9 @@ namespace OneNoteCodeHelper.Services.Agent
             if (!conversion.TextTable) return true;
             var left = box.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).ToList();
             var right = written.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).ToList();
-            try { return left.Count == right.Count && left.Zip(right, (a, b) => new AgentRichText(a).Signature(page, false) == new AgentRichText(b).Signature(actual, false)).All(x => x); }
+            // 清理草稿转来的表格还要验证保留的行内格式；其他转换沿用原来的正文、链接核验。
+            var styles = conversion.MarkdownMarks > 0;
+            try { return left.Count == right.Count && left.Zip(right, (a, b) => new AgentRichText(a).Signature(page, styles) == new AgentRichText(b).Signature(actual, styles)).All(x => x); }
             catch (Exception) { return false; }
         }
 

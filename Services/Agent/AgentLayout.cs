@@ -40,6 +40,9 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string Group;
         /// <summary>文本框已被合并删掉，撤销时按 Before 重新建立（得到新的 ID）。</summary>
         internal bool Deleted;
+        /// <summary>已核验的文字编辑计数，整框撤销成功后恢复到结果。</summary>
+        internal int MarkdownMarks;
+        internal List<string> TextFixes = new List<string>();
     }
 
     /// <summary>

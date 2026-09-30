@@ -14,8 +14,12 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>text_to_table 转成的普通表格；否则是代码框。</summary>
         internal bool TextTable;
         internal string LanguageId;
+        /// <summary>原始结构草稿的文字，用于冲突和结构核验；Table 可由清理后的文字草稿生成。</summary>
         internal string Code;
         internal XElement Table;
+        /// <summary>清理 Markdown 后转表格所保留的文字编辑，核验成功后才计入结果。</summary>
+        internal int MarkdownMarks;
+        internal List<string> TextFixes = new List<string>();
     }
 
     /// <summary>代码框的撤销记录：代码框没被改过时换回原来的段落（段落会得到新的 objectID）。</summary>
@@ -27,6 +31,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string Fingerprint;
         internal List<XElement> Originals;
         internal List<XElement> Styles;
+        internal int MarkdownMarks;
+        internal List<string> TextFixes = new List<string>();
     }
 
     /// <summary>
