@@ -569,9 +569,7 @@
                              AcceptsReturn="True"
                              TextWrapping="Wrap"
                              VerticalScrollBarVisibility="Auto"
-                             MaxLength="8000"
-                             PreviewKeyDown="OnRequestKeyDown"
-                             Text="将该页面上的内容排版下，要美观。统一正文格式，突出标题，修正错别字。" />
+                             PreviewKeyDown="OnRequestKeyDown" />
                     <TextBox x:Name="PromptText"
                              Style="{StaticResource InputBox}"
                              IsReadOnly="True"

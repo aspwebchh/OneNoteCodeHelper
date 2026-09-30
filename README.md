@@ -34,6 +34,10 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 | 模型 | 直接显示发给接口的模型名，默认 `deepseek-v4-flash` / `deepseek-v4-pro`，来自配置文件 |
 | 思考 | 思考强度 `none` / `low` / `medium` / `high` / `max`，参数和 opencode 配置里 deepseek 的 variants 一致：`none` 传 `"thinking":{"type":"disabled"}`；其余传 `"thinking":{"type":"enabled"}` 加 `"reasoning_effort":"<变体名>"` |
 
+「自定义排版（Agent）」的默认需求在「AI 配置 → Agent」页顶部修改，支持 1–8000 字。打开窗口时自动填入需求框，执行前可以修改或替换；临时修改只在当前窗口保留，不会保存为默认需求。切换文字功能再切回 Agent，输入仍保留。
+关闭并重新打开 Agent 窗口，需求框会填入最新保存的默认需求。配置页的「恢复内置默认」只恢复模板编辑框，点击「保存」后才生效。
+保存配置后，需求框仍是旧模板时自动更新；已经修改或清空时保留本次输入。执行只使用需求框中的文字，模板不会重复追加。
+
 窗口配色和 OneNote 一致（浅灰底、白卡片，OneNote 紫用在主按钮和选中状态上）。窗口大小不随内容变：处理中的状态、思考摘录、执行步骤和结果都在下方卡片里显示，内容多了在卡片里滚动，窗口不会随内容忽高忽低；可以拖动窗口边缘调整大小，拉高后下方卡片跟着变大。
 处理 Agent 时思考框和执行步骤各占下方卡片的一块（约 3:2），文字功能没有步骤，思考框占满。
 
@@ -145,6 +149,7 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 | `Models/Model` | Agent 窗口「模型」下拉的选项，`id` 是接口的模型名，下拉里直接显示它 |
 | `Functions/Function` | Agent 窗口「功能」下拉里的文字功能，`name` 显示名（不要和「自定义排版（Agent）」重名，重名的会被跳过）、`Prompt` 提示词。`removeExtraBlankLines="true"` 表示顺带删多余的空行；不写时和同名的内置功能一致（「智能校正」「排版优化」默认开，旧配置里的「错别字 + 排版」也继续默认开），写 `false` 关掉 |
 | `Agent` | 可选的 Agent 配置；旧文件没有此节点也能使用默认值 |
+| `Agent/DefaultRequest` | Agent 打开时预填的默认需求，1–8000 字；缺失、空白或超长时使用内置默认。工具协议、提交核验规则仍由插件提供 |
 
 提示词只需写清楚要做什么。输入输出的 JSON 格式、只返回改动的段落、每段附一份改动说明、不许合并拆分段落、
 代码网址保持原样这些约定由插件自动接在后面（见 `AiOptimizer.Protocol`），改提示词不会把格式弄坏。
@@ -168,6 +173,7 @@ Agent 可在 `AiConfig` 根节点内增加下列配置，也就是「AI 配置�
 
 ```xml
 <Agent>
+  <DefaultRequest>将该页面上的内容排版下，要美观。统一正文格式，突出标题，修正错别字。</DefaultRequest>
   <MaxTurns>24</MaxTurns>
   <MaxToolCalls>96</MaxToolCalls>
   <TimeoutSeconds>600</TimeoutSeconds>

@@ -42,6 +42,10 @@ namespace OneNoteCodeHelper.Services.Agent
     {
         internal const string DefaultFontFamily = "Microsoft YaHei";
 
+        internal const int MaxRequestLength = 8000;
+
+        internal const string DefaultRequestText = "将该页面上的内容排版下，要美观。统一正文格式，突出标题，修正错别字。";
+
         /// <summary>数值项，顺序就是默认配置文件里的顺序。读配置、写默认文件、保存和 AI 配置窗口都按这张表。</summary>
         internal static readonly AgentNumberOption[] Numbers =
         {
@@ -108,9 +112,13 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool EnableTextTables { get; set; }
         internal string FontFamily { get; set; } = DefaultFontFamily;
 
+        /// <summary>打开 Agent 时预填的需求；本次执行仍以需求框中的文字为准。</summary>
+        internal string DefaultRequest { get; set; } = DefaultRequestText;
+
         /// <summary>每一项都是默认值。</summary>
         internal bool IsDefault =>
-            Numbers.All(o => o.Get(this) == o.Default) && Switches.All(o => o.Get(this)) && FontFamily == DefaultFontFamily;
+            Numbers.All(o => o.Get(this) == o.Default) && Switches.All(o => o.Get(this)) && FontFamily == DefaultFontFamily
+            && NormalizeRequest(DefaultRequest) == DefaultRequestText;
 
         internal static AgentOptions Parse(XElement element)
         {
@@ -120,16 +128,22 @@ namespace OneNoteCodeHelper.Services.Agent
             foreach (var option in Switches) option.Set(value, Boolean(element, option.Key, true));
             var font = (string)element.Element("FontFamily");
             if (ParagraphStyles.Fonts.Contains(font)) value.FontFamily = font;
+            var request = NormalizeRequest((string)element.Element("DefaultRequest"));
+            if (request.Length > 0 && request.Length <= MaxRequestLength) value.DefaultRequest = request;
             return value;
         }
 
-        /// <summary>按 <see cref="Numbers"/>、FontFamily、<see cref="Switches"/> 的顺序生成 Agent 节点的全部子节点。</summary>
+        /// <summary>按 DefaultRequest、<see cref="Numbers"/>、FontFamily、<see cref="Switches"/> 的顺序生成 Agent 节点的全部子节点。</summary>
         internal IEnumerable<XElement> ToElements()
         {
+            yield return new XElement("DefaultRequest", NormalizeRequest(DefaultRequest));
             foreach (var option in Numbers) yield return new XElement(option.Key, option.Get(this));
             yield return new XElement("FontFamily", FontFamily);
             foreach (var option in Switches) yield return new XElement(option.Key, option.Get(this));
         }
+
+        internal static string NormalizeRequest(string request) =>
+            (request ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n').Trim();
 
         private static int Number(XElement e, AgentNumberOption option) =>
             int.TryParse((string)e.Element(option.Key), out var value) ? Math.Max(option.Min, Math.Min(option.Max, value)) : option.Default;

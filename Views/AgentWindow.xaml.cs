@@ -77,6 +77,8 @@ namespace OneNoteCodeHelper.Views
             InitializeComponent();
             _api = api; _pageId = pageId; _config = config; _settings = settings;
             _configStamp = ConfigStamp();
+            RequestText.MaxLength = AgentOptions.MaxRequestLength;
+            RequestText.Text = config.Agent.DefaultRequest;
             var page = AgentPageSnapshot.ParsePage(selectionXml);
             _selection = AgentPageSnapshot.SelectedIds(page);
             _selectedBlankLines = PageEditor.FindSelectedBlankLines(page);
@@ -227,11 +229,19 @@ namespace OneNoteCodeHelper.Views
             var stamp = ConfigStamp();
             if (stamp == _configStamp || !AiConfigStore.TryLoad(out var config, out _)) return;
             _configStamp = stamp;
+            ApplyConfig(config);
+            AddInLog.Info("Agent 窗口已重新读取 AI 配置。");
+        }
+
+        /// <summary>更新配置；只有需求仍等于旧模板时才替换，保留本次编辑（包括清空）。</summary>
+        internal void ApplyConfig(AiConfig config)
+        {
             var previous = _config;
+            if (AgentOptions.NormalizeRequest(RequestText.Text) == AgentOptions.NormalizeRequest(previous.Agent.DefaultRequest))
+                RequestText.Text = config.Agent.DefaultRequest;
             _config = config;
             if (config.HasSameChoices(previous)) ShowFunction();
             else LoadChoices();
-            AddInLog.Info("Agent 窗口已重新读取 AI 配置。");
         }
 
         private static DateTime ConfigStamp() => AiConfigStore.Stamp();
@@ -270,7 +280,7 @@ namespace OneNoteCodeHelper.Views
             RefreshConfig();
             var config = _config;
             var function = TextFunction();
-            var request = RequestText.Text.Trim();
+            var request = AgentOptions.NormalizeRequest(RequestText.Text);
             if (function == null && request.Length == 0) { ShowOutcome(WarningIcon, "请先输入需求。", null); return; }
             if (string.IsNullOrWhiteSpace(config.ApiKey)) { ShowOutcome(WarningIcon, "请先在「AI 配置」中填写 ApiKey。", "点右上角的「AI 配置」填写，保存后再点「执行」。"); return; }
             var model = config.FindModel(_settings.AiModel).Id;

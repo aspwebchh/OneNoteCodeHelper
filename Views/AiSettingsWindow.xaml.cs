@@ -83,6 +83,7 @@ namespace OneNoteCodeHelper.Views
             ModelList.ItemsSource = _models;
             FunctionList.ItemsSource = _functions;
             FontPicker.ItemsSource = ParagraphStyles.Fonts;
+            AgentDefaultRequestBox.MaxLength = AgentOptions.MaxRequestLength;
             _models.CollectionChanged += (_, __) => UpdateModelButtons();
             _functions.CollectionChanged += (_, __) => UpdateFunctionButtons();
             BuildAgentOptions();
@@ -183,6 +184,7 @@ namespace OneNoteCodeHelper.Views
             foreach (var option in AgentOptions.Switches)
                 _switchBoxes[option.Key].IsChecked = option.Get(config.Agent);
             FontPicker.SelectedItem = ParagraphStyles.Fonts.FirstOrDefault(f => f == config.Agent.FontFamily) ?? AgentOptions.DefaultFontFamily;
+            AgentDefaultRequestBox.Text = config.Agent.DefaultRequest;
 
             UpdateModelButtons();
             UpdateFunctionButtons();
@@ -195,7 +197,7 @@ namespace OneNoteCodeHelper.Views
             var parts = new List<string>
             {
                 ApiUrlBox.Text.Trim(), ApiKeyValue.Trim(), TimeoutBox.Text.Trim(), MaxTokensBox.Text.Trim(),
-                FontPicker.SelectedItem as string, "M" + _models.Count
+                FontPicker.SelectedItem as string, AgentOptions.NormalizeRequest(AgentDefaultRequestBox.Text), "M" + _models.Count
             };
             parts.AddRange(_models);
             parts.Add("F" + _functions.Count);
@@ -207,6 +209,12 @@ namespace OneNoteCodeHelper.Views
 
         /// <summary>文本框里按回车换出来的是 \r\n，存进文件、和文件比较都按 \n。</summary>
         private static string NormalizePrompt(string prompt) => (prompt ?? string.Empty).Replace("\r\n", "\n").Trim();
+
+        private void OnRestoreAgentDefaultRequest(object sender, RoutedEventArgs e)
+        {
+            AgentDefaultRequestBox.Text = AgentOptions.DefaultRequestText;
+            ClearError();
+        }
 
         private void ShowLoadError(Exception error)
         {
@@ -505,6 +513,10 @@ namespace OneNoteCodeHelper.Views
             }
 
             var agent = new AgentOptions();
+            var defaultRequest = AgentOptions.NormalizeRequest(AgentDefaultRequestBox.Text);
+            if (defaultRequest.Length == 0 || defaultRequest.Length > AgentOptions.MaxRequestLength)
+                return ShowError(AgentPageIndex, AgentDefaultRequestBox, $"默认需求要填 1–{AgentOptions.MaxRequestLength} 字的内容。");
+            agent.DefaultRequest = defaultRequest;
             foreach (var option in AgentOptions.Numbers)
             {
                 var box = _numberBoxes[option.Key];

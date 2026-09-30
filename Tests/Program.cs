@@ -1089,6 +1089,131 @@ internal static class Program
             Equal(60, c.Agent.MaxTurns); True(!c.Agent.ReplayReasoning); True(c.Agent.EnableMixedOutlines);
             Equal(24, AgentOptions.Parse(null).MaxTurns); Equal(96, AgentOptions.Parse(null).MaxToolCalls);
         });
+        Test("Agent default request reads legacy configurations and validates complete templates", () =>
+        {
+            Equal(AgentOptions.DefaultRequestText, AiConfigStore.Parse(XElement.Parse("<AiConfig/>")).Agent.DefaultRequest);
+            foreach (var text in new[] { null, "", " \r\n\t ", new string('字', AgentOptions.MaxRequestLength + 1) })
+            {
+                var element = new XElement("Agent", text == null ? null : new XElement("DefaultRequest", text));
+                var options = AgentOptions.Parse(element);
+                Equal(AgentOptions.DefaultRequestText, options.DefaultRequest); True(options.IsDefault);
+            }
+            foreach (var text in new[] { "字", new string('字', AgentOptions.MaxRequestLength), "  正文 <11> & 标题\r\n第二行\r第三行  " })
+            {
+                var normalized = AgentOptions.NormalizeRequest(text);
+                var options = AgentOptions.Parse(new XElement("Agent", new XElement("DefaultRequest", text)));
+                Equal(normalized, options.DefaultRequest); True(!options.IsDefault);
+                Equal(normalized, AgentOptions.Parse(new XElement("Agent", options.ToElements())).DefaultRequest);
+            }
+            Equal(AgentOptions.DefaultRequestText, (string)AiConfigStore.BuildDefaultDocument().Root.Element("Agent").Element("DefaultRequest"));
+        });
+        Test("Agent default request is saved in place while retaining unknown nodes and comments", () =>
+        {
+            var document = XDocument.Parse("<AiConfig><!-- 保留 --><Custom>x</Custom></AiConfig>");
+            AiConfigStore.Apply(document, AiConfigStore.Default);
+            True(document.Root.Element("Agent") == null);
+            var config = AiConfigStore.Parse(new XElement("AiConfig", new XElement("Agent",
+                new XElement("DefaultRequest", "  正文 <11> & 标题\r\n第二行  "))));
+            AiConfigStore.Apply(document, config);
+            Equal(config.Agent.DefaultRequest, AiConfigStore.Parse(document.Root).Agent.DefaultRequest);
+            Equal("x", (string)document.Root.Element("Custom"));
+            True(document.ToString().Contains("<!-- 保留 -->"));
+            document.Root.Element("Agent").Add(new XComment("内部注释"), new XElement("Unknown", "keep"));
+            AiConfigStore.Apply(document, AiConfigStore.Default);
+            Equal(AgentOptions.DefaultRequestText, (string)document.Root.Element("Agent").Element("DefaultRequest"));
+            Equal("keep", (string)document.Root.Element("Agent").Element("Unknown"));
+            True(document.ToString().Contains("<!--内部注释-->"));
+        });
+        Test("AI settings default request supports normalization, validation and restoring without changing other options", () =>
+        {
+            var config = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><DefaultRequest>我的模板</DefaultRequest><MaxTurns>30</MaxTurns><EnableMoves>false</EnableMoves></Agent></AiConfig>"));
+            var window = new OneNoteCodeHelper.Views.AiSettingsWindow(config, null, IntPtr.Zero);
+            try
+            {
+                bool Dirty() => (bool)window.GetType().GetProperty("IsDirty", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(window);
+                True(!Dirty()); Equal("我的模板", window.AgentDefaultRequestBox.Text);
+                Equal(AgentOptions.MaxRequestLength, window.AgentDefaultRequestBox.MaxLength);
+                window.AgentDefaultRequestBox.Text = "  正文 <11> & 标题\r\n第二行  ";
+                True(Dirty()); True(window.TryBuildConfig(out var built));
+                Equal("正文 <11> & 标题\n第二行", built.Agent.DefaultRequest);
+                foreach (var text in new[] { " \r\n ", new string('字', AgentOptions.MaxRequestLength + 1) })
+                {
+                    window.AgentDefaultRequestBox.Text = text;
+                    True(!window.TryBuildConfig(out _));
+                    Equal("默认需求要填 1–8000 字的内容。", window.StatusText.Text);
+                    Equal(System.Windows.Visibility.Visible, window.AgentPage.Visibility);
+                }
+                window.AgentDefaultRequestBox.Text = new string('字', AgentOptions.MaxRequestLength);
+                True(window.TryBuildConfig(out built)); Equal(AgentOptions.MaxRequestLength, built.Agent.DefaultRequest.Length);
+                window.RestoreAgentDefaultRequestButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                True(Dirty()); True(window.TryBuildConfig(out built));
+                Equal(AgentOptions.DefaultRequestText, built.Agent.DefaultRequest);
+                Equal(30, built.Agent.MaxTurns); True(!built.Agent.EnableMoves);
+                Equal("我的模板", config.Agent.DefaultRequest);
+                window.AgentDefaultRequestBox.Text = "我的模板"; True(!Dirty());
+            }
+            finally { window.CloseWithoutSaving(); }
+        });
+        Test("Agent request preserves edits across choices and refreshes, then reopens with the latest saved template", () =>
+        {
+            AiConfig Config(string request) => AiConfigStore.Parse(new XElement("AiConfig", new XElement("Agent", new XElement("DefaultRequest", request))));
+            var page = Page(Paragraph("a", "正文"));
+            var config = Config("正文 11 磅\n标题加粗");
+            var latest = Config("第四版模板");
+            var window = new OneNoteCodeHelper.Views.AgentWindow(new FakePage(page), "page", page.ToString(), config, new AddInSettings(), IntPtr.Zero);
+            try
+            {
+                Equal(config.Agent.DefaultRequest, AgentOptions.NormalizeRequest(window.RequestText.Text));
+                Equal(AgentOptions.MaxRequestLength, window.RequestText.MaxLength);
+                window.ApplyConfig(Config("新模板")); Equal("新模板", window.RequestText.Text);
+                window.RequestText.Text = "本次只整理标题";
+                window.FunctionPicker.SelectedIndex = 1;
+                window.ApplyConfig(Config("第三版模板"));
+                window.FunctionPicker.SelectedIndex = 0;
+                Equal("本次只整理标题", window.RequestText.Text);
+                window.RequestText.Clear(); window.ApplyConfig(latest); Equal("", window.RequestText.Text);
+                window.FunctionPicker.SelectedIndex = 1;
+                window.FunctionPicker.SelectedIndex = 0;
+                Equal("", window.RequestText.Text);
+                Equal("正文 11 磅\n标题加粗", config.Agent.DefaultRequest);
+            }
+            finally { window.Close(); }
+            // 保存到独立临时文件，验证重开使用持久化的最新模板，不碰本机 AI 配置。
+            var path = Path.Combine(Path.GetTempPath(), "onenote-agent-request-" + Guid.NewGuid().ToString("N") + ".xml");
+            try
+            {
+                AiConfigStore.Save(latest, path);
+                var saved = AiConfigStore.Parse(XDocument.Load(path).Root);
+                var reopened = new OneNoteCodeHelper.Views.AgentWindow(new FakePage(page), "page", page.ToString(), saved, new AddInSettings(), IntPtr.Zero);
+                try { Equal(latest.Agent.DefaultRequest, AgentOptions.NormalizeRequest(reopened.RequestText.Text)); }
+                finally { reopened.Close(); }
+            }
+            finally { File.Delete(path); }
+        });
+        Test("Agent sends only the current request with its complete system protocol for both page and selection scopes", () =>
+        {
+            var page = Page(Paragraph("a", "正文"));
+            var config = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><DefaultRequest>模板不应追加</DefaultRequest></Agent></AiConfig>"));
+            var window = new OneNoteCodeHelper.Views.AgentWindow(new FakePage(page), "page", page.ToString(), config, new AddInSettings(), IntPtr.Zero);
+            try
+            {
+                window.RequestText.Text = "标题加粗\n正文 11 磅";
+                var request = AgentOptions.NormalizeRequest(window.RequestText.Text);
+                foreach (var selection in new ISet<string>[] { null, new HashSet<string> { "a" } })
+                {
+                    var snapshot = new AgentPageSnapshot(page.ToString(), selection, config.Agent);
+                    var api = new FakePage(page); var client = new TruncatingClient(new ScriptedClient(snapshot));
+                    new AgentRunner(client, new AgentCommitter(api)).RunAsync(snapshot, request, null, CancellationToken.None).GetAwaiter().GetResult();
+                    var sent = (object[])AgentChatClient.Serializer().DeserializeObject(client.Sent[0]);
+                    Equal(2, sent.Length);
+                    var system = (Dictionary<string, object>)sent[0]; var user = (Dictionary<string, object>)sent[1];
+                    Equal("system", system["role"]); Equal("user", user["role"]); Equal(request, user["content"]);
+                    True(((string)system["content"]).StartsWith(AgentRunner.SystemPrompt(Tools(snapshot)), StringComparison.Ordinal));
+                    True(!client.Sent[0].Contains(config.Agent.DefaultRequest));
+                }
+            }
+            finally { window.Close(); }
+        });
         Test("AI settings window shows every option and builds the same configuration back", () =>
         {
             var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://gw.test/v1</ApiUrl><ApiKey>k</ApiKey><TimeoutSeconds>90</TimeoutSeconds><MaxTokens>0</MaxTokens>" +

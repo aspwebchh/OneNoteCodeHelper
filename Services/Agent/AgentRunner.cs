@@ -92,7 +92,8 @@ namespace OneNoteCodeHelper.Services.Agent
 
         internal async Task<AgentReport> RunAsync(AgentPageSnapshot snapshot, string request, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
-            if (string.IsNullOrWhiteSpace(request) || request.Length > 8000) throw new AiException("请输入 1–8000 字的需求。");
+            if (string.IsNullOrWhiteSpace(request) || request.Length > AgentOptions.MaxRequestLength)
+                throw new AiException($"请输入 1–{AgentOptions.MaxRequestLength} 字的需求。");
             using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(snapshot.Options.TimeoutSeconds)))
             using (var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, timeout.Token))
             {

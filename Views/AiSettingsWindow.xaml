@@ -761,7 +761,23 @@
                         <StackPanel Margin="20,16,20,20">
                             <TextBlock Text="Agent" Style="{StaticResource PageTitle}" />
                             <TextBlock Margin="0,4,0,0" Style="{StaticResource Hint}"
-                                       Text="「自定义排版（Agent）」的预算和工具开关，下次点「执行」时生效。" />
+                                       Text="「自定义排版（Agent）」的默认需求、预算和工具开关。" />
+
+                            <TextBlock Margin="0,18,0,0" Text="默认需求" Style="{StaticResource SectionLabel}" />
+                            <TextBox x:Name="AgentDefaultRequestBox"
+                                     Height="112"
+                                     Margin="0,6,0,0"
+                                     Style="{StaticResource MultiLineBox}"
+                                     ToolTip="Agent/DefaultRequest（1–8000 字）" />
+                            <TextBlock Margin="0,6,0,0" Style="{StaticResource Hint}"
+                                       Text="打开 Agent 时自动填入需求框，可在执行前修改；临时修改不会保存为默认需求。" />
+                            <Button x:Name="RestoreAgentDefaultRequestButton"
+                                    Margin="0,8,0,0"
+                                    HorizontalAlignment="Left"
+                                    Content="恢复内置默认"
+                                    Style="{StaticResource SmallButton}"
+                                    ToolTip="只恢复默认需求，点击「保存」后生效"
+                                    Click="OnRestoreAgentDefaultRequest" />
 
                             <TextBlock Margin="0,18,0,0" Text="预算" Style="{StaticResource SectionLabel}" />
                             <TextBlock Margin="0,4,0,10" Style="{StaticResource Hint}"
