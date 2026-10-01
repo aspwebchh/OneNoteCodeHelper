@@ -49,11 +49,13 @@ namespace OneNoteCodeHelper.Views
             ["EnableTags"] = (0, "待办、重要、问题标记"),
             ["EnableTableStyles"] = (0, "表格边框和底色"),
             ["EnableMarkdownCleanup"] = (0, "去除 Markdown 符号"),
+            ["EnableClearFormat"] = (0, "清除格式"),
             ["EnableBlankLineRemoval"] = (1, "删除多余的空行"),
             ["EnableIndent"] = (1, "调整缩进层级"),
             ["EnableMoves"] = (1, "移动段落、合并文本框"),
             ["EnableInsert"] = (1, "插入摘要、目录、小标题和空行"),
             ["EnableTextTables"] = (1, "把文字转成表格"),
+            ["EnableCodeUnwrap"] = (1, "拆开代码框"),
             ["SendThinking"] = (2, "发送思考参数"),
             ["ReplayReasoning"] = (2, "回传思考内容"),
             ["StreamUsage"] = (2, "请求用量统计")

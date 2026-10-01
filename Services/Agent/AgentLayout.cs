@@ -8,7 +8,7 @@ using System.Xml.Linq;
 namespace OneNoteCodeHelper.Services.Agent
 {
     /// <summary>
-    /// 结构草稿里的一次改动，按短 ID 记录。Kind 为 removed、moved、indented、inserted、merged。
+    /// 结构草稿里的一次改动，按短 ID 记录。Kind 为 removed、moved、indented、inserted、merged、unwrapped。
     /// 跨文本框的移动和合并记下源文本框 From，提交时两个文本框一起写入、一起跳过。
     /// </summary>
     internal sealed class AgentLayoutChange
@@ -17,6 +17,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string OutlineId;
         internal string From;
         internal string[] Ids;
+        /// <summary>unwrapped：拆开的代码框的短 ID（t1…），Ids 是拆出来的新段落 u1…。</summary>
+        internal string TableId;
     }
 
     /// <summary>insert_blocks 新插入的段落，短 ID 为 n1、n2…</summary>
@@ -25,6 +27,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string Id;
         internal string OutlineId;
         internal string Text;
+        /// <summary>unwrap_code 拆出来的段落（u1…）：只在概况里列出，不登记在 <see cref="AgentPageSnapshot.Inserted"/>，也不接受其他工具。</summary>
+        internal bool Unwrapped;
     }
 
     /// <summary>整框撤销记录：文本框写入后没被改过时，换回写入前的样子。</summary>
@@ -42,6 +46,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool Deleted;
         /// <summary>已核验的文字编辑计数，整框撤销成功后恢复到结果。</summary>
         internal int MarkdownMarks;
+        internal int LinksRemoved;
         internal List<string> TextFixes = new List<string>();
     }
 
@@ -202,6 +207,28 @@ namespace OneNoteCodeHelper.Services.Agent
             blank.SetAttributeValue("style", Css.Write(appearance));
             blank.SetAttributeValue("spaceBefore", "0"); blank.SetAttributeValue("spaceAfter", "0");
             return blank;
+        }
+
+        /// <summary>
+        /// unwrap_code：把代码框（外层 OE）换成正文段落，每个代码行一段。代码行复制后去掉 ID、清除行内格式、套正文预设，
+        /// 文字、硬空格和段内换行原样保留；代码框留白用的段前段后间距一并去掉。调用方已校验代码框只有平铺的文字段落。
+        /// </summary>
+        internal static List<XElement> Unwrap(XElement wrapper, Func<string> nextId, AgentOptions options, XElement styles)
+        {
+            var lines = wrapper.Element(One + "Table").Element(One + "Row").Element(One + "Cell").Element(One + "OEChildren").Elements(One + "OE").Select(line =>
+            {
+                var oe = new XElement(line);
+                AgentCode.StripIdentity(oe);
+                foreach (var a in oe.Attributes().Where(a => a.Name.Namespace == Key.Namespace || new[] { "style", "quickStyleIndex", "spaceBefore", "spaceAfter" }.Contains(a.Name.LocalName)).ToList())
+                    a.Remove();
+                new AgentRichText(oe).ClearInline(false);
+                ParagraphStyles.Apply(oe, "body", new Dictionary<string, object>(), options, false);
+                if (options.EnableNativeHeadings) oe.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(styles, ParagraphStyles.Definition("body", options)));
+                oe.SetAttributeValue(Key, nextId());
+                return oe;
+            }).ToList();
+            wrapper.ReplaceWith(lines);
+            return lines;
         }
 
         /// <summary>

@@ -22,7 +22,14 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>提供 highlight_code 工具时追加。</summary>
         internal const string CodePrompt = "排版时遇到代码要转换为代码框：连续的源代码、命令行、配置或日志段落（含 reason=unhighlighted_code 的段落）先 read_blocks，" +
             "再用 highlight_code 整体转换，代码中间的空行一并传入，一段完整代码只调用一次；能确定语言时指定 language，否则用 auto。" +
-            "代码段落不要设置段落或文字样式。普通文字、正文里的行内代码和已有代码框（highlighted_code）不要转换；用户明确要求不处理代码时不要转换。";
+            "代码段落不要设置段落或文字样式（用户要求清除格式时除外）。普通文字、正文里的行内代码和已有代码框（highlighted_code）不要转换；用户明确要求不处理代码时不要转换。";
+
+        /// <summary>提供 clear_format 时追加；后面接着用的工具按实际提供的提，见 <see cref="SystemPrompt"/>。</summary>
+        internal const string ClearFormatPrompt = "用户明确要求清除格式、去掉格式或恢复成普通文字时，先读完范围内可读取的段落，再用 clear_format 一次处理范围内的全部段落" +
+            "（包括 reason 为 empty、protected_code、unhighlighted_code 的段落），不要用 set_paragraph_style、set_text_style 逐项还原；" +
+            "用户要求保留列表、标记或链接时把 lists、tags、links 对应设为 false。用户没有另外要求时，清除格式后不要再把代码转换为代码框，也不要再设置样式。" +
+            "用户没有要求清除格式时不要调用。";
+        internal const string UnwrapPrompt = "用户明确要求去掉代码框、把代码变回普通文字时，用 unwrap_code 拆开代码框；用户没有要求时不要拆。";
 
         /// <summary>提供 strip_markdown 时追加；后面接着用的工具按实际提供的提，见 <see cref="SystemPrompt"/>。</summary>
         internal const string MarkdownPrompt = "用户要求去掉 Markdown 格式、把 Markdown 整理成普通笔记时，用 strip_markdown 一次处理完整读取的段落（可以整页一起传），" +
@@ -71,6 +78,13 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             var prompt = new System.Text.StringBuilder(Prompt);
             if (tools.Has("highlight_code")) prompt.Append(CodePrompt);
+            if (tools.Has("clear_format"))
+            {
+                prompt.Append(ClearFormatPrompt);
+                if (tools.Has("unwrap_code")) prompt.Append("清除全部格式时，页面上的代码框（tables 里 reason 为 highlighted_code）也用 unwrap_code 拆成正文段落，用户要求保留代码框时不拆。");
+                if (tools.Has("set_table_style")) prompt.Append("普通表格用 set_table_style 恢复默认外观：borders 为 true、header_row 为 false、cell_shading 为 none，外观相同的表格一次调用。");
+            }
+            if (tools.Has("unwrap_code")) prompt.Append(UnwrapPrompt);
             if (tools.Has("strip_markdown"))
             {
                 prompt.Append(MarkdownPrompt);
@@ -91,7 +105,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (tools.Has("insert_blocks")) prompt.Append(InsertPrompt);
             if (tools.Has("merge_outlines") && tools.Has("insert_blocks")) prompt.Append(MergeBlankPrompt);
             if (tools.Has("text_to_table")) prompt.Append(TextTablePrompt);
-            if (new[] { "remove_blank_lines", "normalize_code_spacing", "set_indent", "move_blocks", "merge_outlines", "insert_blocks" }.Any(tools.Has)) prompt.Append(LayoutPrompt);
+            if (new[] { "remove_blank_lines", "normalize_code_spacing", "set_indent", "move_blocks", "merge_outlines", "insert_blocks", "unwrap_code" }.Any(tools.Has)) prompt.Append(LayoutPrompt);
             return prompt.ToString();
         }
 

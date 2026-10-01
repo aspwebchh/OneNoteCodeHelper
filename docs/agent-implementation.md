@@ -6,7 +6,7 @@
 
 1. 「开始 → AI 助手 → Agent」通过 `AddIn.OnShowAgentWindow` 启动独立 STA 窗口，固定当前页及打开窗口时的选区。
 2. 用户选择整页或选中段落并输入需求。后台读取固定页面，构建短 ID、保护范围、内容和格式指纹。
-3. `AgentRunner` 把模型原生 `tool_calls` 映射到本地函数（按能力开关和页面内容注册，最多十八个），完整读取后才能修改段落。模型的文字声明不能触发写回。
+3. `AgentRunner` 把模型原生 `tool_calls` 映射到本地函数（按能力开关和页面内容注册，最多二十二个），完整读取后才能修改段落。模型的文字声明不能触发写回。
 4. 格式和改字工具只更新内存草稿。每个批量调用全部校验通过后才发布，返回修订号；参数错误不会留下半个工具调用的修改。
 5. 模型独立调用 `finish_edit` 后，提交器在页面锁内重读、识别冲突、重建完整的受影响容器、带时间戳提交，并回读核验。
 6. UI 展示实际核验结果，保存本次已确认段落的撤销记录。撤销再次校验指纹，避免覆盖后来编辑的内容。
@@ -27,10 +27,11 @@
 | `set_text_style` | `snapshot_id`、`targets`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、`style`；支持 bold/italic/underline/color |
 | `fix_text` | `snapshot_id`、`fixes`；每项指定 `block_id`、原文 `quote`、从 1 开始的 `occurrence`、改后文字 `replacement`，两者各 1–30 字、不含换行，同一段的多处按顺序应用；代码段落拒绝。除 `strip_markdown` 外唯一能改文字的工具，系统提示词要求只在用户要求时修正错别字 |
 | `strip_markdown` | `snapshot_id`、`block_ids`（≤1000，须完整读取），可选 `kinds`（heading/quote/list/emphasis/inline_code/fence/rule，默认全部）、`emphasis`（remove 默认，format 同时设粗体、斜体、删除线）。只删标记字符（`AgentMarkdown` 分析，逐处 `Replace` 为空），返回 `changed`（每段原来的 `heading` 级别、`list`、`todo`、`quote`、`indent`）、`removed_lines`、`emptied`、`code_lines`、`noop`、`skipped`（受保护、代码、已删的段落，或单段处理失败的原因）。整段只有围栏、分隔线的段落在结构草稿里删掉（变更种类 `markdown`），需要 `EnableBlankLineRemoval`、可调整结构的文本框、段落只有 T/Meta，且文本框（单元格）里至少留一段；做不到或结构校验不过时清空文字，标题里的不动。围栏按文本框逐行跟踪整页：`markdown`/`md` 围栏里照常处理，其里带语言的围栏算嵌套代码块，其他围栏里的行不动。`EnableMarkdownCleanup=false` 时不注册 |
+| `clear_format` | `snapshot_id`、`block_ids`（≤1000），可选 `lists`、`tags`、`links`（默认 true）。文字不变，去掉行内格式（`AgentRichText.ClearInline`，路径只留 `a` 的 href，emoji/符号字体保留），段落套正文预设；页面标题只清行内格式。按参数去掉列表（`SetList none`，提交时重建段落）、全部 `one:Tag` 和链接。可编辑和 `unhighlighted_code` 段落须完整读取，`empty`、`protected_code` 段落不用读；代码框行、其他保护原因、无 ID 或重复 ID、容器受保护、含图片等对象的段落列入 `skipped`。返回 `links_removed`、`kept_by_settings`（`EnableLists`/`EnableTags` 关闭时保留的项）、`appearance_only`、`hint`。`EnableClearFormat=false` 时不注册 |
 | `highlight_code` | `snapshot_id`、`block_ids`（最多 1000）、`language`（`auto` 或已支持的语言 id）；把连续的代码段落排入草稿，提交时换成高亮代码框。`Agent/EnableCodeHighlight=false` 时不注册 |
 | `set_list` | `snapshot_id`、`block_ids`、`list`（bullet/number/none）；已是同一种列表时不动，保留原符号样式。页面标题、未读和代码段落拒绝。`EnableLists=false` 时不注册 |
 | `set_tag` | `snapshot_id`、`block_ids`、`tag`（todo/important/question/none）、可选 `completed`（只用于 todo）；同类标记不重复添加，none 只去掉这三种。`EnableTags=false` 时不注册 |
-| `set_table_style` | `snapshot_id`、`table_ids`、`style`（`borders`、`header_row`、`header_shading` 至少一项）；不需要先读。`EnableTableStyles=false` 或页面没有可编辑表格时不注册 |
+| `set_table_style` | `snapshot_id`、`table_ids`、`style`（`borders`、`header_row`、`header_shading`、`cell_shading` 至少一项）；`cell_shading` 只能是 `none`，去掉全部单元格（含首行）的底色，同时给了 `header_shading` 时首行再按它设置。不需要先读。`EnableTableStyles=false` 或页面没有可编辑表格时不注册 |
 | `read_image_text` | `snapshot_id`、`image_ids`；只读，返回 OneNote 识别出的图片文字，每张最多 4000 字并标记 `truncated`。页面上有带识别文字的图片时才注册 |
 | `remove_blank_lines` | `snapshot_id`、`mode`（collapse/all）；collapse 同「排版优化」，连续空行留一行、删掉文本框和单元格首尾的空行；all 删掉全部，但不会把一摞段落删空。按当前草稿位置和选区处理原有空行及本次 `insert_blocks` 新插入的空行，带列表、标记、下级段落的空段落和已排转换里的空行不删。返回所有删除 ID；提交结果的 `removed` 只计原页已有空行，`inserted_blank_lines` 只计仍保留且核验通过的新空行。插入历史保留，删除后不复用 ID、不释放任务配额，待提交清单只列仍存在的新段落。`EnableBlankLineRemoval=false`、没有可调整结构的文本框，或既不允许插入也没有原有可清理空行时不注册；允许插入时提前提供，供同次任务清理后补的空行 |
 | `normalize_code_spacing` | `snapshot_id`；仅规范化已有或待转换代码框与文字的交界，空段落和文字首尾的 Shift+Enter 空行合计一行，多删少补。代码内部、文字之间、代码之间和文本框首尾不处理；各普通单元格独立计算。删除受 `EnableBlankLineRemoval` 控制，补入受 `EnableInsert` 和现有插入配额控制，两者都关闭时不注册。返回 `removed_paragraphs`、`removed_soft_lines`、`inserted_paragraphs`、`noop`、`skipped` 和修订号。先转换代码、完成结构操作，最后调用；之后再调用结构工具、`highlight_code`、`text_to_table` 或 `strip_markdown` 时先撤回已做的间隔调整。提交前复核，间隔不符时要求重新规范化，最后一轮则按当前草稿自动重新规范化后提交 |
@@ -39,6 +40,7 @@
 | `merge_outlines` | `snapshot_id`、`source_id`（源文本框的 container_id）、`target_id`、`position`；源文本框的全部顶层段落（含表格、图片、空行）按顺序移到目标前后，提交时删掉源文本框。目标不能在源文本框或单元格里；只处理选区时源文本框里的文字段落必须都在选区内，未选中的图片等对象也不能跟着搬走。结果另给 `mergeable_left` 和 `mergeable_outline_ids`：按页面顺序列出在本次合并后的草稿中，能在目标框内至少一个合法段落的前后继续合并的文本框；实际合并与计数共用选区、格式继承和转换校验。预检只操作副本，在发布本次合并前完成，取消或非预期异常不发布草稿。计数为 0 只表示目标框已无合法合并来源，受保护或不满足限制的框保留并说明原因；某个位置失败时选择其他合法位置，不重复相同的失败调用。`EnableMoves=false` 或可调整结构的文本框少于两个时不注册 |
 | `insert_blocks` | `snapshot_id`、`target_id`、`position`、`paragraphs`（1–20 项，每项 `text` ≤500 字、`preset_id` 为 heading1/heading2/body/quote、可选 `list`；空行项只写 `blank: true`）；纯文字按 HTML 转义，每个任务最多 50 段、5000 字（空行计入段数、不计字数），新段落短 ID 为 n1…。空行用 `AgentLayout.NewBlankLine` 建立（和代码框间隔补的空行相同：正文外观、零段前后间距、`&nbsp;` 占位），记为 `inserted_blank`，提交时按空行核验并计入 `inserted_blank_lines`；结果另给 `blank_lines`，概况里插入的空行带 `blank: true`。`EnableInsert=false` 时不注册 |
 | `text_to_table` | `snapshot_id`、`block_ids`（≤200），`delimiter` 和 `rows` 二选一，可选 `header_row`、`borders`（默认 true）、`header_shading` 和 `header`（首行前新增的列名，每项 ≤30 字）；最多 10 列、100 行。**delimiter**（tab/pipe/space/none，none 为整行一格）、可选 `lines_per_row`（1–10，每条记录占的行数，空行不算；大于 1 时每几行合成一行，记录中非末行的行尾冒号去掉）：每行文字一行（段内 `<br>` 切开的也各成一行），至少分出 2 列；space 按连续空白（含 `&nbsp;`、全角空格）拆分。**rows**（每行 ≤10 格、每格 ≤500 字，空字符串为空单元格，不能含换行）：模型逐格给出切分结果，`BuildFromRows` 把各段文字用 `\n` 连起来按顺序定位每格（空白彼此等价，换行除外），单元格按定位到的范围从原段落截取；原文里没进单元格的字只能是空白和 `\t | ｜ : ： , ， ; ； 、 =`，或去掉这些后与该列 `header` 相同的标签，否则报「没有按顺序找到」或「没有放进任何单元格」。各行按最多的列数补空单元格，header 少了补空、多了加列；返回 `padded_rows`（补了空单元格的行数）。`EnableTextTables=false` 时不注册 |
+| `unwrap_code` | `snapshot_id`、`table_ids`（≤50，`highlighted_code` 的表格）；结构工具，把代码框换成正文段落（`AgentLayout.Unwrap`）：每个代码行复制后去 ID、清除行内格式、套正文预设、去掉代码框留白的段前段后间距，新段落短 ID 为 u1…，记为 `unwrapped` 改动（`AgentLayoutChange.TableId`）。外层 OE 只能装着表格、格里只能有平铺的文字段落，文本框须可调整结构，选区模式只接受整体选中的代码框。已拆的再传入记入 `noop`。拆出的段落列在概况里（`unwrapped_code`），不接受其他工具。属于 `SpacingSensitive`。`EnableCodeUnwrap=false`、没有可调整结构的文本框或没有代码框时不注册 |
 | `get_pending_changes` | `snapshot_id`；返回草稿修订号、修改段落 ID、已排的文字修正、未完整读取的可编辑段落 ID、已排入的代码框和表格转换、结构改动（删除、移动、缩进、插入）、尚未转换的等宽代码及保护计数 |
 | `finish_edit` | `snapshot_id`、`draft_revision`；必须是当轮唯一工具，修订号匹配后冻结草稿，只提交一次 |
 
@@ -91,10 +93,26 @@
   省略 `one:Tag` 可以删掉标记，OneNote 会一并清掉不再引用的 TagDef。
 - **核验**：`SemanticFormat` 追加列表种类、编号的 `numberSequence`、`numberFormat`、`restartNumberingAt` 和「标记图标:完成状态」（`AgentMarks.Projection`），编号整数按数值比较，不看 OneNote 补上的字号、编号文字、时间。编号控制属性丢失或变化不能算核验成功。
   本次写入的段落和重建的段落不逐字比较 List/Tag 的 XML；其余段落仍严格比较，标记按引用的 TagDef 内容比较，不受 TagDef 重新编号影响。
-- **表格**：外观为 `bordersVisible`、`hasHeaderRow` 和首行各单元格的 `shadingColor`，逐格记录，撤销能还原各格不同的底色。
-  指纹只含表格 ID、外观、行列数和首行单元格 ID，处理期间改单元格文字不算冲突。外观比较把缺省的开关当 false、把缺省/none/automatic 底色当无底色。
+- **表格**：外观为 `bordersVisible`、`hasHeaderRow` 和各单元格的 `shadingColor`（首行 `HeaderShades`、其余 `BodyShades`），逐格记录，撤销能还原各格不同的底色。
+  指纹只含表格 ID、外观、行列数和全部单元格的 ID、底色，处理期间改单元格文字不算冲突。外观比较把缺省的开关当 false、把缺省/none/automatic 底色当无底色。
   单行单格且全是等宽段落的表格是代码框，只保护。
 - **图片文字**：读 `one:Image/one:OCRData/one:OCRText`；合成页面上产生不了 OCR，真实识别结果需要在 OneNote 里人工验收。
+
+## 清除格式与拆开代码框
+
+2026-10-01 追加，满足「清除所有格式，包括代码外层的框」这类需求。两者都只改草稿，沿用提交、回读核验和撤销，不另起写回路径。
+
+- **清除格式**（`clear_format`）是格式工具，按段落写回。`set_paragraph_style` 的套预设、继承检查和「仅设置外观」回退抽成 `ApplyPreset` 共用：
+  清父段会改变未指定子段的有效格式时回退成只设本段外观，做不到和正文样式一样就整次拒绝。
+  去链接放宽了「格式工具不改正文」：`PublishDrafts` 在 `removeLinks` 时要求文字逐字相同（`Signature(..., includeLinks: false)`）且链接全部去掉；
+  `AgentBlock.LinksRemoved` 并入 `TextEdited`，提交器只允许正文变成草稿的样子。撤销项带 `LinksRemoved`，撤销时链接一起还原。
+  撤销时清过格式的空行、仍在等宽上级下的行内代码仍受保护，凭已核验的撤销记录、指纹不变时照常恢复（与 `strip_markdown` 清空的段落同一规则）。
+- **拆开代码框**（`unwrap_code`）是结构工具，有它的文本框整框写回、整框撤销，跨框联动组照旧。
+  拆出的段落是新对象：内容核验按 `AgentCode.PlainText` 比文字；格式按 `AgentPageSnapshot.CodeLineFormat` 比，与 `SemanticFormat` 相同，只是跳过空白字符，
+  因为 OneNote 会改写代码行的硬空格。撤销重建的代码框（以及跨框搬来的代码框，表格没有原 ID 且 `IsCodeBox`）的行也这样核验。
+  字体、颜色等非空白字符的格式变了仍算未核验，`unwrapped` 只计全部行核验通过的代码框。冲突时 `skipped_conflict` 列代码框的短 ID。
+- **表格外观**：`set_table_style` 的 `cell_shading: none` 清掉全部单元格底色。「恢复默认」由提示词约定为显示边框、无标题行、无底色。
+- 开关 `EnableClearFormat`（格式组）、`EnableCodeUnwrap`（结构组）默认开启。提示词只在用户明确要求清除格式时使用这些工具；页面没有代码框时不注册、不提拆框。
 
 ## 结构调整
 
@@ -288,6 +306,15 @@ powershell -ExecutionPolicy Bypass -File Tools\agent-format-probe.ps1 -OutputDir
 另外，转换撤销指纹直接包含 `quickStyleIndex` 和定义的 `index`，OneNote 给样式定义重新编号后内容不变也判为冲突。现在样式和标记引用换成所引用定义的内容再计算，找不到定义时保留原编号；定义内容变了仍算冲突。
 新增 2 项测试（父段 style 带加粗、斜体、下划线时回退与原生外观一致并能先父后子提交、撤销；代码框和转表格在样式重新编号后照常撤销、改了定义内容仍冲突），两项在修正前均失败。
 Agent 147/147、AI 合并 86/86、高亮选区 11/11、语言识别 130/130 全部通过；构建到临时目录，没有改动仓库跟踪的 DLL/PDB，也未在真实 Office 中验证。
+
+### 清除格式与拆开代码框（2026-10-01）
+
+新增 12 项测试：行内格式清除（保留文字、换行、硬空格、emoji 字体，链接两种取值）；整页清除与撤销（列表重建、全部标记、链接计数、标题只清行内格式、代码框行跳过）；
+保留选项和关闭开关；父段清除回退为仅设置外观；拆框与整框撤销；OneNote 改写硬空格时仍核验通过、改了字体时不通过；处理期间文本框被改时整框跳过、选区只接受整体选中的代码框；
+单元格里的代码框；先规范化代码框间隔再拆框；全部单元格去底色与逐格撤销、冲突；Runner 全流程一次提交；步骤说明。
+Release 构建 0 警告、0 错误；Agent 270/270、AI 合并 102/102、高亮选区 11/11、语言识别 130/130 全部通过。
+`bin\Release\net48` 的 DLL 被运行中的 OneNote 占用，构建输出到临时目录，四组脚本用 `-DllPath` 指向它。只用了离线回归和 FakePage 回存模拟，没有调用真实 AI，没有修改真实笔记；
+拆出的段落、撤销重建的代码框在真实 OneNote 中的回存还没有用探针验证。
 
 ## 仍需用户环境验收的部分
 

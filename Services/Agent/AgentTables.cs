@@ -4,7 +4,7 @@ using System.Xml.Linq;
 
 namespace OneNoteCodeHelper.Services.Agent
 {
-    /// <summary>表格外观：边框、标题行和首行各单元格的底色。不含单元格文字和行列结构。</summary>
+    /// <summary>表格外观：边框、标题行和各单元格的底色。不含单元格文字和行列结构。</summary>
     internal sealed class TableLook
     {
         private static XNamespace One => OneNoteApi.One;
@@ -16,21 +16,25 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool HeaderRow;
         /// <summary>首行每个单元格的底色，没有底色记为空串。逐格记录，撤销时能还原各格不同的底色。</summary>
         internal List<string> HeaderShades = new List<string>();
+        /// <summary>首行以外每个单元格的底色，按行、列的先后顺序。同样逐格记录。</summary>
+        internal List<string> BodyShades = new List<string>();
 
         /// <summary>给模型看的首行底色：各格一致时是颜色或 none，不一致是 mixed。</summary>
-        internal string ShadingName
+        internal string ShadingName => NameOf(HeaderShades);
+        /// <summary>首行以外的单元格底色，写法同 <see cref="ShadingName"/>；只有一行时为 none。</summary>
+        internal string BodyShadingName => BodyShades.Count == 0 ? "none" : NameOf(BodyShades);
+
+        private static string NameOf(List<string> shades)
         {
-            get
-            {
-                var distinct = HeaderShades.Distinct().ToList();
-                return distinct.Count != 1 ? "mixed" : distinct[0].Length == 0 ? "none" : distinct[0];
-            }
+            var distinct = shades.Distinct().ToList();
+            return distinct.Count != 1 ? "mixed" : distinct[0].Length == 0 ? "none" : distinct[0];
         }
 
         internal static TableLook Read(XElement table) => new TableLook
         {
             Borders = Flag(table, "bordersVisible"), HeaderRow = Flag(table, "hasHeaderRow"),
-            HeaderShades = FirstRow(table).Select(c => Shade((string)c.Attribute("shadingColor"))).ToList()
+            HeaderShades = FirstRow(table).Select(c => Shade((string)c.Attribute("shadingColor"))).ToList(),
+            BodyShades = BodyCells(table).Select(c => Shade((string)c.Attribute("shadingColor"))).ToList()
         };
 
         /// <summary>只写和表格现状不同的项，没改的属性保持 OneNote 原来的写法。</summary>
@@ -40,23 +44,34 @@ namespace OneNoteCodeHelper.Services.Agent
             if (Flag(table, "hasHeaderRow") != HeaderRow) table.SetAttributeValue("hasHeaderRow", HeaderRow ? "true" : "false");
             var cells = FirstRow(table).ToList();
             if (cells.Count != HeaderShades.Count) throw new AiException("表格首行已变化。");
-            for (var i = 0; i < cells.Count; i++)
-                if (Shade((string)cells[i].Attribute("shadingColor")) != HeaderShades[i])
-                    cells[i].SetAttributeValue("shadingColor", HeaderShades[i].Length == 0 ? null : HeaderShades[i]);
+            var body = BodyCells(table).ToList();
+            if (body.Count != BodyShades.Count) throw new AiException("表格行列已变化。");
+            foreach (var (cell, shade) in cells.Zip(HeaderShades, (c, s) => (c, s)).Concat(body.Zip(BodyShades, (c, s) => (c, s))))
+                if (Shade((string)cell.Attribute("shadingColor")) != shade)
+                    cell.SetAttributeValue("shadingColor", shade.Length == 0 ? null : shade);
         }
 
-        /// <summary>按 set_table_style 的参数改出一份新外观，没给的项保持不变。</summary>
+        /// <summary>
+        /// 按 set_table_style 的参数改出一份新外观，没给的项保持不变。cell_shading 为 none 时去掉全部单元格（含首行）的底色，
+        /// 同时给了 header_shading 时首行再按它设置。
+        /// </summary>
         internal TableLook With(IDictionary<string, object> style)
         {
-            var look = new TableLook { Borders = Borders, HeaderRow = HeaderRow, HeaderShades = HeaderShades.ToList() };
+            var look = new TableLook { Borders = Borders, HeaderRow = HeaderRow, HeaderShades = HeaderShades.ToList(), BodyShades = BodyShades.ToList() };
             if (style.TryGetValue("borders", out var borders)) look.Borders = (bool)borders;
             if (style.TryGetValue("header_row", out var header)) look.HeaderRow = (bool)header;
+            if (style.ContainsKey("cell_shading"))
+            {
+                look.HeaderShades = HeaderShades.Select(_ => "").ToList();
+                look.BodyShades = BodyShades.Select(_ => "").ToList();
+            }
             if (style.TryGetValue("header_shading", out var shading))
                 look.HeaderShades = HeaderShades.Select(_ => (string)shading == "none" ? "" : Shade((string)shading)).ToList();
             return look;
         }
 
-        internal bool SameAs(TableLook other) => other != null && Borders == other.Borders && HeaderRow == other.HeaderRow && HeaderShades.SequenceEqual(other.HeaderShades);
+        internal bool SameAs(TableLook other) => other != null && Borders == other.Borders && HeaderRow == other.HeaderRow &&
+            HeaderShades.SequenceEqual(other.HeaderShades) && BodyShades.SequenceEqual(other.BodyShades);
 
         /// <summary>OneNote 可能省略值为 false 的属性。</summary>
         internal static bool Flag(XElement e, string name)
@@ -74,6 +89,7 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         private static IEnumerable<XElement> FirstRow(XElement table) => table.Element(One + "Row")?.Elements(One + "Cell") ?? Enumerable.Empty<XElement>();
+        internal static IEnumerable<XElement> BodyCells(XElement table) => table.Elements(One + "Row").Skip(1).SelectMany(r => r.Elements(One + "Cell"));
     }
 
     /// <summary>快照里的一个表格。短 ID 为 t1、t2…；代码框和不支持的文本框里的表格只保护。</summary>
@@ -101,15 +117,16 @@ namespace OneNoteCodeHelper.Services.Agent
             page.Descendants(One + "Table").FirstOrDefault(t => (string)t.Attribute("objectID") == objectId);
 
         /// <summary>
-        /// 表格 ID、外观、行列数和首行单元格的 ID。不含单元格文字：用户在处理期间改表格里的字不算冲突，
+        /// 表格 ID、外观、行列数和全部单元格的 ID、底色。不含单元格文字：用户在处理期间改表格里的字不算冲突，
         /// 改外观、增删行列才算。
         /// </summary>
         internal static string TakeFingerprint(XElement table)
         {
             var look = TableLook.Read(table);
-            var cells = table.Element(One + "Row")?.Elements(One + "Cell").Select(c => (string)c.Attribute("objectID") + "=" + TableLook.Shade((string)c.Attribute("shadingColor")));
+            var cells = table.Elements(One + "Row").SelectMany(r => r.Elements(One + "Cell"))
+                .Select(c => (string)c.Attribute("objectID") + "=" + TableLook.Shade((string)c.Attribute("shadingColor")));
             return string.Join("|", (string)table.Attribute("objectID"), look.Borders, look.HeaderRow, table.Elements(One + "Row").Count(),
-                table.Element(One + "Columns")?.Elements(One + "Column").Count() ?? 0, string.Join(",", cells ?? Enumerable.Empty<string>()));
+                table.Element(One + "Columns")?.Elements(One + "Column").Count() ?? 0, string.Join(",", cells));
         }
     }
 

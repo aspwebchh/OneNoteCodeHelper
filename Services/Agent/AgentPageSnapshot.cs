@@ -75,12 +75,16 @@ namespace OneNoteCodeHelper.Services.Agent
             new AgentSwitchOption("EnableTableStyles", o => o.EnableTableStyles, (o, v) => o.EnableTableStyles = v),
             // 去掉段落里的 Markdown 标记（# 标题、- 列表、**粗体**、`代码`、``` 围栏等），只删标记字符。
             new AgentSwitchOption("EnableMarkdownCleanup", o => o.EnableMarkdownCleanup, (o, v) => o.EnableMarkdownCleanup = v),
+            // 清除格式：行内格式、段落样式，按需去掉列表、标记和链接，文字不变。
+            new AgentSwitchOption("EnableClearFormat", o => o.EnableClearFormat, (o, v) => o.EnableClearFormat = v),
             // 改变段落结构的工具：删空行、调整缩进、移动段落、插入段落、把分隔的文字转成表格。
             new AgentSwitchOption("EnableBlankLineRemoval", o => o.EnableBlankLineRemoval, (o, v) => o.EnableBlankLineRemoval = v),
             new AgentSwitchOption("EnableIndent", o => o.EnableIndent, (o, v) => o.EnableIndent = v),
             new AgentSwitchOption("EnableMoves", o => o.EnableMoves, (o, v) => o.EnableMoves = v),
             new AgentSwitchOption("EnableInsert", o => o.EnableInsert, (o, v) => o.EnableInsert = v),
-            new AgentSwitchOption("EnableTextTables", o => o.EnableTextTables, (o, v) => o.EnableTextTables = v)
+            new AgentSwitchOption("EnableTextTables", o => o.EnableTextTables, (o, v) => o.EnableTextTables = v),
+            // 把已有代码框拆成正文段落，整框写回、整框撤销。
+            new AgentSwitchOption("EnableCodeUnwrap", o => o.EnableCodeUnwrap, (o, v) => o.EnableCodeUnwrap = v)
         };
 
         internal AgentOptions()
@@ -110,6 +114,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool EnableMoves { get; set; }
         internal bool EnableInsert { get; set; }
         internal bool EnableTextTables { get; set; }
+        internal bool EnableClearFormat { get; set; }
+        internal bool EnableCodeUnwrap { get; set; }
         internal string FontFamily { get; set; } = DefaultFontFamily;
 
         /// <summary>打开 Agent 时预填的需求；本次执行仍以需求框中的文字为准。</summary>
@@ -166,8 +172,10 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int MarkdownMarks;
         /// <summary>成功清理的原始列表标记；重复清理后仍用于恢复编号，丢弃草稿时清空。</summary>
         internal AgentMarkdown.Result MarkdownList;
-        /// <summary>草稿改了文字：只有这样的段落写回时允许正文变化，而且只能变成草稿里的样子。</summary>
-        internal bool TextEdited => TextFixes.Count > 0 || MarkdownMarks > 0;
+        /// <summary>草稿里 clear_format 去掉的链接处数。写回核验通过后计入结果，撤销时链接一起还原。</summary>
+        internal int LinksRemoved;
+        /// <summary>草稿改了正文（文字或链接）：只有这样的段落写回时允许正文变化，而且只能变成草稿里的样子。</summary>
+        internal bool TextEdited => TextFixes.Count > 0 || MarkdownMarks > 0 || LinksRemoved > 0;
         /// <summary>为保留下级段落的格式，本段预设只设置外观，保留原有原生样式。</summary>
         internal bool AppearanceOnly;
         internal string CurrentText => TextEdited ? new AgentRichText(Draft).Text : Text;
@@ -304,6 +312,12 @@ namespace OneNoteCodeHelper.Services.Agent
             if (!options.EnableCodeHighlight || Blocks.Sum(b => b.Editable || b.CodeCandidate ? b.Text.Length : 0) > options.MaxPageChars)
                 foreach (var b in Blocks.Where(b => b.CodeCandidate)) b.ProtectedReason = "protected_code";
         }
+
+        /// <summary>
+        /// 段落所在的标题或文本框本身没有保护原因。空行、代码的保护原因会盖掉容器的原因，clear_format 处理这两类段落前另外检查。
+        /// </summary>
+        internal bool ContainerAllowed(AgentBlock block) =>
+            Page.Elements().FirstOrDefault(e => ((string)e.Attribute("objectID") ?? e.Name.LocalName) == block.ContainerId) is XElement container && ContainerReason(container) == null;
 
         /// <summary>容器级的保护原因：只支持标题和文本框；图文混排要开关允许，墨迹、附件等对象所在的整个文本框跳过。</summary>
         private string ContainerReason(XElement container)
@@ -550,12 +564,20 @@ namespace OneNoteCodeHelper.Services.Agent
             }
         }
 
-        internal static string SemanticFormat(XElement oe, XElement page)
+        internal static string SemanticFormat(XElement oe, XElement page) => SemanticFormat(oe, page, false);
+
+        /// <summary>
+        /// 拆开代码框得到的段落、撤销时重建的代码框行：OneNote 会改写代码行的 span 和硬空格，格式跳过空白字符比较，
+        /// 文字由内容核验按 <see cref="AgentCode.PlainText"/> 核对。
+        /// </summary>
+        internal static string CodeLineFormat(XElement oe, XElement page) => SemanticFormat(oe, page, true);
+
+        private static string SemanticFormat(XElement oe, XElement page, bool skipWhitespace)
         {
             var rich = new AgentRichText(oe);
             var index = (string)oe.Attribute("quickStyleIndex");
             var role = (string)page.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == index)?.Attribute("name") ?? "p";
-            return rich.Signature(page, true) + "|" + ((string)oe.Attribute("alignment") ?? "left") + "|" +
+            return rich.Signature(page, true, skipWhitespace: skipWhitespace) + "|" + ((string)oe.Attribute("alignment") ?? "left") + "|" +
                 NormalizeSpacing(oe, "spaceBefore") + "|" + NormalizeSpacing(oe, "spaceAfter") + "|" + role + "|" + AgentMarks.Projection(oe, page);
         }
         internal static string BlankFormat(XElement oe, XElement page)

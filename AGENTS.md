@@ -13,7 +13,7 @@
 ## 修改时保持的约束
 
 - 保持 `OneNoteCodeHelper.csproj` 的 `net48` 目标框架、强名称签名，以及 `lib/` 中 Office PIA 的早绑定引用。此项目不能依赖 `dynamic` 或运行时类型库查找来调用 OneNote。
-- 生成 `one:T` 内容时按 HTML 转义并保留行首缩进、空行；改动页面 XML 时检查选区、嵌套段落和原有格式。文字功能的 AI 写回不能合并或拆分段落；Agent 的结构工具（删空行、缩进、移动、合并文本框、插入、转表格）必须走期望页面核验并能整框撤销，跨文本框的改动整组提交、整组撤销。两者都不能覆盖处理期间用户已经改动的段落。
+- 生成 `one:T` 内容时按 HTML 转义并保留行首缩进、空行；改动页面 XML 时检查选区、嵌套段落和原有格式。文字功能的 AI 写回不能合并或拆分段落；Agent 的结构工具（删空行、缩进、移动、合并文本框、插入、转表格、拆代码框）必须走期望页面核验并能整框撤销，跨文本框的改动整组提交、整组撤销。两者都不能覆盖处理期间用户已经改动的段落。
 - `ILanguage.Tokenize` 返回的 token 必须按顺序、无重叠、完整覆盖源码。新语言同时注册到 `LanguageRegistry.All`，按需更新语言族，并在 `Tools/detect-samples/<语言 id>/` 添加识别样本。
 - OneNote 的功能区回调不能执行耗时操作或同步弹框；WPF 窗口须在 STA 线程上创建。涉及 COM、线程或注册机制的改动先核对 `README.md` 的“几个踩过的坑”。
 - 修改 `.ps1` 文件时保留 UTF-8 BOM，以便 Windows PowerShell 5.1 正确解析中文内容。不要把本机的 API Key、`%APPDATA%\OneNoteCodeHelper\ai-settings.xml` 或日志写入仓库。

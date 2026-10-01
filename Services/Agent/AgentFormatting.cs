@@ -225,6 +225,45 @@ namespace OneNoteCodeHelper.Services.Agent
             Save();
         }
 
+        /// <summary>
+        /// 清除格式：去掉加粗、斜体、下划线、删除线、上下标、颜色、高亮、字体和字号，文字、硬空格和段内换行不变。
+        /// keepLinks 时链接只留地址，否则连链接一起去掉。emoji、符号字体保留，和 <see cref="Rewrite"/> 一样，去掉会显示成方框。
+        /// </summary>
+        internal void ClearInline(bool keepLinks)
+        {
+            foreach (var p in _pieces)
+            {
+                var path = new List<XElement>();
+                var link = keepLinks ? p.Path.LastOrDefault(tag => tag.Name.LocalName == "a") : null;
+                if (link != null) path.Add(new XElement("a", link.Attribute("href")));
+                // 实际生效的是最内层的字体；保留原写法（大小写、引号），只判断时规范化。
+                var font = p.Path.SelectMany(tag => ((string)tag.Attribute("style") ?? "").Split(';'))
+                    .LastOrDefault(item => item.IndexOf(':') > 0 && item.Substring(0, item.IndexOf(':')).Trim().Equals("font-family", StringComparison.OrdinalIgnoreCase));
+                var name = font == null ? "" : Css.Normalize(font.Substring(font.IndexOf(':') + 1));
+                if (name.Contains("emoji") || name.Contains("symbol")) path.Add(new XElement("span", new XAttribute("style", font.Trim())));
+                p.Path = path;
+            }
+            Save();
+            foreach (var t in _oe.Elements(OneNoteApi.One + "T")) t.SetAttributeValue("style", null);
+        }
+
+        /// <summary>链接处数：相邻、指向同一地址的文字算一处。</summary>
+        internal int LinkCount
+        {
+            get
+            {
+                var count = 0;
+                string previous = null;
+                foreach (var p in _pieces)
+                {
+                    var href = p.Path.LastOrDefault(tag => tag.Name.LocalName == "a") is XElement a ? (string)a.Attribute("href") ?? "" : null;
+                    if (href != null && href != previous) count++;
+                    previous = href;
+                }
+                return count;
+            }
+        }
+
         private static bool EmojiBoundary(string text, int index)
         {
             if (index == 0 || index == text.Length) return true;
@@ -305,16 +344,21 @@ namespace OneNoteCodeHelper.Services.Agent
             }
         }
 
-        /// <summary>按字符投影，容忍 OneNote 合并/拆分 span 和 T。用于回读检查。</summary>
-        internal string Signature(XElement page, bool includeStyles)
+        /// <summary>
+        /// 按字符投影，容忍 OneNote 合并/拆分 span 和 T。用于回读检查。includeLinks 为 false 时不看链接，用于核对去掉链接后文字没变；
+        /// skipWhitespace 跳过空白字符，用于 OneNote 会改写硬空格的代码行，文字另按规范化的纯文字核对。
+        /// </summary>
+        internal string Signature(XElement page, bool includeStyles, bool includeLinks = true, bool skipWhitespace = false)
         {
             var result = new StringBuilder();
             var runs = _oe.Elements(OneNoteApi.One + "T").ToList();
             foreach (var p in _pieces)
             {
                 var css = PieceStyle(p, runs, page, out var link);
+                if (!includeLinks) link = "";
                 var style = includeStyles ? Css.Write(css) : "";
-                foreach (var ch in p.Text) result.Append((int)ch).Append(':').Append(link.Length).Append(':').Append(link)
+                foreach (var ch in p.Text.Where(ch => !skipWhitespace || !char.IsWhiteSpace(ch)))
+                    result.Append((int)ch).Append(':').Append(link.Length).Append(':').Append(link)
                     .Append(':').Append(style.Length).Append(':').Append(style).Append(';');
             }
             return result.ToString();

@@ -26,6 +26,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal List<string> TextFixes = new List<string>();
         /// <summary>这段写入时去掉的 Markdown 标记处数；撤销时文字也一起还原。</summary>
         internal int MarkdownMarks;
+        /// <summary>这段写入时清除格式去掉的链接处数；撤销时链接也一起还原。</summary>
+        internal int LinksRemoved;
         /// <summary>Before 引用的 QuickStyleDef、TagDef 副本。OneNote 回存后会重新编号，撤销时按内容对应。</summary>
         internal List<XElement> Styles = new List<XElement>();
         internal List<XElement> Tags = new List<XElement>();
@@ -47,8 +49,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int Tables;
         /// <summary>text_to_table 转成的表格（撤销时是换回段落的表格数）。</summary>
         internal int TextTables;
-        /// <summary>结构改动：删掉的空行、移动、调整缩进和插入的段落数，合并掉的文本框数。</summary>
-        internal int Removed, Moved, Indented, Inserted, Merged;
+        /// <summary>结构改动：删掉的空行、移动、调整缩进和插入的段落数，合并掉的文本框数，拆开的代码框数。</summary>
+        internal int Removed, Moved, Indented, Inserted, Merged, Unwrapped;
         internal int RemovedSoftLines, InsertedBlankLines;
         internal object[] SpacingSkipped = new object[0];
         /// <summary>整框写入的文本框，含合并删掉的（撤销时是整框恢复、重建的文本框数）。</summary>
@@ -64,19 +66,23 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<string> TextFixes = new List<string>();
         /// <summary>已核验去掉的 Markdown 标记处数，含整段删掉的围栏、分隔线（撤销时是还原的处数）。</summary>
         internal int MarkdownMarks;
+        /// <summary>已核验去掉的链接处数（撤销时是还原的处数）。</summary>
+        internal int LinksRemoved;
         /// <summary>已核验写入、为保留下级格式而只设置外观的段落。</summary>
         internal readonly List<string> AppearanceOnly = new List<string>();
         internal bool CanUndo => Undo.Count + CodeUndo.Count + TableUndo.Count + OutlineUndo.Count > 0;
         /// <summary>撤销之后不再把撤销的逆操作当作可撤销。</summary>
         internal void ClearUndo() { Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
-        internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, markdown_marks = MarkdownMarks, code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
-            removed = Removed, moved = Moved, indented = Indented, inserted = Inserted, merged = Merged,
+        internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, markdown_marks = MarkdownMarks, links_removed = LinksRemoved,
+            code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
+            removed = Removed, moved = Moved, indented = Indented, inserted = Inserted, merged = Merged, unwrapped_code = Unwrapped,
             removed_soft_lines = RemovedSoftLines, inserted_blank_lines = InsertedBlankLines, spacing_skipped = SpacingSkipped,
             skipped_conflict = ConflictIds, unverified = Unverified, unread_count = UnreadCount, protected_count = Protected, appearance_only = AppearanceOnly, message = Message };
         /// <summary>结果消息里的结构改动部分。</summary>
         internal string LayoutSummary => (Removed > 0 ? $"删除空行 {Removed} 行；" : "") +
             (RemovedSoftLines > 0 ? $"删除段内空行 {RemovedSoftLines} 行；" : "") + (InsertedBlankLines > 0 ? $"补空行 {InsertedBlankLines} 行；" : "") + (Moved > 0 ? $"移动 {Moved} 段；" : "") +
             (Indented > 0 ? $"调整缩进 {Indented} 段；" : "") + (Inserted > 0 ? $"插入 {Inserted} 段；" : "") + (Merged > 0 ? $"合并文本框 {Merged} 个；" : "") +
+            (Unwrapped > 0 ? $"拆开代码框 {Unwrapped} 个；" : "") +
             (Leftover > 0 ? $"{Leftover} 个文本框合并后没能删掉，留下一行空白；" : "");
     }
 
@@ -108,7 +114,10 @@ namespace OneNoteCodeHelper.Services.Agent
                 {
                     cancellation.ThrowIfCancellationRequested();
                     var page = AgentPageSnapshot.ParsePage(_api.GetPageContent(snapshot.PageId, PageInfo.piBasic));
-                    var report = new AgentReport { Protected = snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null) };
+                    // 清除过格式的空行、代码，拆开的代码框里的行不再算作保护。
+                    var unwrappedTables = new HashSet<string>(snapshot.LayoutChanges.Where(c => c.Kind == "unwrapped").Select(c => c.TableId));
+                    var report = new AgentReport { Protected = snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null && !b.Changed &&
+                        !(b.ProtectedReason == "highlighted_code" && b.TableId != null && unwrappedTables.Contains(b.TableId))) };
                     // 写入前页面上已有的对象。OneNote 给新代码框、还原段落分配的 ID 都不在其中，核验时按新建对象比对。
                     var known = new HashSet<string>(page.Descendants().Attributes("objectID").Select(a => a.Value));
                     var untouched = new Dictionary<string, string>();
@@ -140,7 +149,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             AgentLayout.OutlineFingerprint(current, page) == AgentLayout.OutlineFingerprint(before, snapshot.Page)))
                         {
                             report.ConflictIds.AddRange(snapshot.LayoutChanges.Where(c => group.Contains(c.OutlineId))
-                                .SelectMany(c => c.Ids.Length > 0 ? c.Ids : new[] { c.From ?? c.OutlineId }).Distinct());
+                                .SelectMany(c => c.TableId != null ? new[] { c.TableId } : c.Ids.Length > 0 ? c.Ids : new[] { c.From ?? c.OutlineId }).Distinct());
                             continue;
                         }
                         var key = Guid.NewGuid().ToString("N");
@@ -311,9 +320,11 @@ namespace OneNoteCodeHelper.Services.Agent
                             report.Applied++;
                             report.TextFixes.AddRange(item.Block.TextFixes);
                             report.MarkdownMarks += item.Block.MarkdownMarks;
+                            report.LinksRemoved += item.Block.LinksRemoved;
                             if (item.Block.AppearanceOnly) report.AppearanceOnly.Add(item.Block.Id);
                             report.Undo.Add(new AgentUndoItem { ObjectId = (string)written.Attribute("objectID"), Before = item.Before,
                                 AfterFingerprint = AgentPageSnapshot.Fingerprint(written, actual), TextFixes = item.Block.TextFixes.ToList(), MarkdownMarks = item.Block.MarkdownMarks,
+                                LinksRemoved = item.Block.LinksRemoved,
                                 Styles = AgentLayout.Styles(item.Before, original), Tags = AgentLayout.Tags(item.Before, original) });
                         }
                         catch (Exception) { NoteUnverified(report, "paragraph", item.Block.ObjectId, "format_unreadable"); }
@@ -385,7 +396,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     report.Status = report.Unverified > 0 || report.Conflicts > 0 || report.Leftover > 0 ? "PartiallyApplied" : "Verified";
                     var conversions = codes.Select(c => c.Conversion).Concat(edits.SelectMany(e => e.Boxes.Select(b => b.Conversion))).ToList();
                     report.Message = $"已验证修改 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"修正文字 {report.TextFixes.Count} 处；" : "") +
-                        (report.MarkdownMarks > 0 ? $"去除 Markdown 符号 {report.MarkdownMarks} 处；" : "") + report.LayoutSummary +
+                        (report.MarkdownMarks > 0 ? $"去除 Markdown 符号 {report.MarkdownMarks} 处；" : "") +
+                        (report.LinksRemoved > 0 ? $"去掉链接 {report.LinksRemoved} 处；" : "") + report.LayoutSummary +
                         (conversions.Any(c => !c.TextTable) ? $"高亮代码 {report.CodeBlocks} 处；" : "") + (conversions.Any(c => c.TextTable) ? $"转换表格 {report.TextTables} 个；" : "") +
                         (tables.Count + edits.Sum(e => e.Tables.Count) > 0 ? $"表格样式 {report.Tables} 个；" : "") +
                         $"冲突跳过 {report.Conflicts} 处；未验证 {report.Unverified} 处；保护 {report.Protected} 段。";
@@ -426,15 +438,17 @@ namespace OneNoteCodeHelper.Services.Agent
                 foreach (var item in previous.Undo)
                 {
                     var block = snapshot.Blocks.FirstOrDefault(b => b.ObjectId == item.ObjectId);
-                    // strip_markdown 清空的围栏、分隔线现在是受保护空段，只允许凭已核验的撤销记录恢复。
-                    var emptiedMarkdown = block?.ProtectedReason == "empty" && item.MarkdownMarks > 0;
-                    if (block == null || !(block.Editable || emptiedMarkdown) || block.Fingerprint != item.AfterFingerprint)
+                    // strip_markdown 清空的围栏、分隔线现在是受保护空段；clear_format 清过的空行、仍在等宽上级下的行内代码也受保护。
+                    // 它们只允许凭已核验的撤销记录、在写入后没被改过时恢复。
+                    var restorable = block != null && (block.ProtectedReason == "empty" || block.ProtectedReason == "protected_code" || block.ProtectedReason == "unhighlighted_code");
+                    if (block == null || !(block.Editable || restorable) || block.Fingerprint != item.AfterFingerprint)
                     { skipped.Add(item.ObjectId); continue; }
-                    if (emptiedMarkdown) block.ProtectedReason = null;
+                    if (restorable) block.ProtectedReason = null;
                     AgentPageSnapshot.CopyFormat(Renumbered(item, snapshot), block.Draft);
-                    // 把修正过的文字改回去，提交时按改文字的段落核验。
+                    // 把修正过的文字、去掉的链接改回去，提交时按改了正文的段落核验。
                     block.TextFixes.AddRange(item.TextFixes);
                     block.MarkdownMarks = item.MarkdownMarks;
+                    block.LinksRemoved = item.LinksRemoved;
                 }
                 var report = Commit(snapshot, cancellation);
                 report.Conflicts += skipped.Count;
@@ -442,6 +456,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (report.Status == "Verified" && report.Conflicts > 0) report.Status = "PartiallyApplied";
                 report.Message = $"撤销已验证恢复 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"还原文字 {report.TextFixes.Count} 处；" : "") +
                     (report.MarkdownMarks > 0 ? $"还原 Markdown 符号 {report.MarkdownMarks} 处；" : "") +
+                    (report.LinksRemoved > 0 ? $"还原链接 {report.LinksRemoved} 处；" : "") +
                     (previous.OutlineUndo.Count > 0 ? $"恢复文本框结构 {report.Outlines} 个；" : "") +
                     (previous.CodeUndo.Any(u => !u.TextTable) ? $"恢复代码 {report.CodeBlocks} 处；" : "") +
                     (previous.CodeUndo.Any(u => u.TextTable) ? $"表格换回段落 {report.TextTables} 个；" : "") +
@@ -487,11 +502,14 @@ namespace OneNoteCodeHelper.Services.Agent
             internal readonly List<(AgentBlock Block, XElement Node)> Changed = new List<(AgentBlock, XElement)>();
             internal readonly List<(XElement Node, int Lines)> SoftLines = new List<(XElement, int)>();
             internal readonly HashSet<XElement> BlankLines = new HashSet<XElement>();
+            /// <summary>unwrap_code 拆出来的段落，每个代码框一组：OneNote 会改写代码行的硬空格，格式按 <see cref="AgentPageSnapshot.CodeLineFormat"/> 核验。</summary>
+            internal readonly List<List<XElement>> Unwrapped = new List<List<XElement>>();
             internal readonly List<(XElement Box, AgentCodeConversion Conversion)> Boxes = new List<(XElement, AgentCodeConversion)>();
             /// <summary>改了外观的表格和它在写入内容里的元素；跨框移过来的表格没有原 ID，按位置核对。</summary>
             internal readonly List<(AgentTable Table, XElement Target)> Tables = new List<(AgentTable, XElement)>();
             internal readonly List<AgentLayoutChange> Changes = new List<AgentLayoutChange>();
             internal int RestoredMarkdownMarks;
+            internal int RestoredLinks;
             internal List<string> RestoredTextFixes = new List<string>();
         }
 
@@ -507,6 +525,9 @@ namespace OneNoteCodeHelper.Services.Agent
             var written = Outline(draft, id);
             foreach (var inserted in snapshot.LayoutChanges.Where(c => c.Kind == "inserted_blank").SelectMany(c => c.Ids).Distinct())
                 if (AgentLayout.Find(written, inserted) is XElement blank) edit.BlankLines.Add(blank);
+            // 私有 ID 在写入前去掉，先按 ID 记下拆出来的段落。拆完又被合并的文本框带着它们到了别的框，按实际位置找。
+            foreach (var change in snapshot.LayoutChanges.Where(c => c.Kind == "unwrapped"))
+                if (change.Ids.Select(u => AgentLayout.Find(written, u)).Where(line => line != null).ToList() is var lines && lines.Count > 0) edit.Unwrapped.Add(lines);
             var converted = new HashSet<string>(snapshot.CodeConversions.SelectMany(c => c.Blocks).Select(b => b.Id));
             foreach (var node in written.Descendants(One + "OE").Where(AgentCodeSpacing.HasTrim).Where(n => !converted.Contains(AgentLayout.KeyOf(n) ?? "")))
             {
@@ -607,7 +628,7 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             var current = item.Deleted ? null : Outline(page, item.OutlineId);
             var edit = new OutlineEdit { Id = item.OutlineId, Restore = true, Before = current == null ? null : new XElement(current),
-                RestoredMarkdownMarks = item.MarkdownMarks, RestoredTextFixes = item.TextFixes };
+                RestoredMarkdownMarks = item.MarkdownMarks, RestoredLinks = item.LinksRemoved, RestoredTextFixes = item.TextFixes };
             var written = new XElement(item.Before);
             if (current == null) AgentCode.StripIdentity(written);
             AgentLayout.StripForeign(written, item.OutlineId, homes);
@@ -638,19 +659,25 @@ namespace OneNoteCodeHelper.Services.Agent
             ISet<string> originalIds)
         {
             var marksBefore = report.MarkdownMarks;
+            var linksBefore = report.LinksRemoved;
             var fixesBefore = report.TextFixes.Count;
             var boxLines = new HashSet<XElement>(edit.Boxes.SelectMany(b => b.Box.Descendants(One + "OE")));
+            // 拆出来的代码行、重建的代码框（撤销拆框、跨框搬来的代码框没有原 ID）：OneNote 会改写代码行的硬空格，格式跳过空白比较，文字已由内容核验核对。
+            var codeLines = new HashSet<XElement>(edit.Unwrapped.SelectMany(lines => lines).Concat(edit.Written.Descendants(One + "Table")
+                .Where(t => t.Attribute("objectID") == null && AgentPageSnapshot.IsCodeBox(t, page)).SelectMany(t => t.Descendants(One + "OE"))));
             var failed = new HashSet<XElement>();
             // 合并删掉的文本框不在期望页面里，没有要按位置核对的段落。
             foreach (var line in edit.Delete ? Enumerable.Empty<XElement>() : edit.Written.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any() && !boxLines.Contains(e)))
             {
                 string expected;
                 var blankLine = edit.BlankLines.Contains(line) || edit.SoftLines.Any(s => s.Node == line) && string.IsNullOrWhiteSpace(new AgentRichText(line).Text);
-                try { expected = blankLine ? AgentPageSnapshot.BlankFormat(line, page) : AgentPageSnapshot.SemanticFormat(line, page); } catch (Exception) { continue; }
+                Func<XElement, XElement, string> format = blankLine ? AgentPageSnapshot.BlankFormat : codeLines.Contains(line) ? (Func<XElement, XElement, string>)AgentPageSnapshot.CodeLineFormat
+                    : AgentPageSnapshot.SemanticFormat;
+                try { expected = format(line, page); } catch (Exception) { continue; }
                 try
                 {
                     var written = actualLines[expectedLines.IndexOf(line)];
-                    if ((blankLine ? AgentPageSnapshot.BlankFormat(written, actual) : AgentPageSnapshot.SemanticFormat(written, actual)) != expected)
+                    if (format(written, actual) != expected)
                     {
                         failed.Add(line);
                         AddInLog.Info(VerificationDiagnostic("outline_paragraph", (string)line.Attribute("objectID") ?? AgentLayout.KeyOf(line), "semantic_format_mismatch"));
@@ -668,8 +695,10 @@ namespace OneNoteCodeHelper.Services.Agent
                 report.Applied++;
                 report.TextFixes.AddRange(block.TextFixes);
                 report.MarkdownMarks += block.MarkdownMarks;
+                report.LinksRemoved += block.LinksRemoved;
                 if (block.AppearanceOnly) report.AppearanceOnly.Add(block.Id);
             }
+            report.Unwrapped += edit.Unwrapped.Count(lines => !lines.Any(failed.Contains));
             foreach (var (box, conversion) in edit.Boxes)
             {
                 if (!ConversionWritten(box, actualLines[expectedLines.IndexOf(box)], conversion, page, actual))
@@ -699,6 +728,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (edit.Restore && failed.Count == 0)
             {
                 report.MarkdownMarks += edit.RestoredMarkdownMarks;
+                report.LinksRemoved += edit.RestoredLinks;
                 report.TextFixes.AddRange(edit.RestoredTextFixes);
             }
             report.Outlines++;
@@ -707,7 +737,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (after != null)
                 report.OutlineUndo.Add(new AgentOutlineUndoItem { OutlineId = edit.Id, Before = edit.Before, Styles = edit.Styles, Tags = edit.Tags, Group = edit.Group,
                     AfterFingerprint = AgentLayout.OutlineFingerprint(after, actual), MarkdownMarks = report.MarkdownMarks - marksBefore,
-                    TextFixes = report.TextFixes.Skip(fixesBefore).ToList() });
+                    LinksRemoved = report.LinksRemoved - linksBefore, TextFixes = report.TextFixes.Skip(fixesBefore).ToList() });
         }
 
         /// <summary>

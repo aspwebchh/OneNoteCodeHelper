@@ -3189,6 +3189,7 @@ internal static class Program
             True(off.Has("merge_outlines")); True(!off.Has("insert_blocks")); True(!AgentRunner.SystemPrompt(off).Contains(AgentRunner.MergeBlankPrompt));
         });
         ReviewRegressions();
+        ClearFormatTests();
         Console.WriteLine($"Agent: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
     }
@@ -3571,6 +3572,276 @@ internal static class Program
             }
         });
     }
+
+    /// <summary>清除格式（clear_format）、拆开代码框（unwrap_code）和清除表格底色（cell_shading）。</summary>
+    private static void ClearFormatTests()
+    {
+        Test("clearing inline formats keeps text, breaks, emoji fonts and optionally links", () =>
+        {
+            var source = Paragraph("a", "<span style='font-weight:bold;color:red;background:yellow;font-family:Arial;font-size:20pt'>粗</span><b>B</b><i>I</i><u>U</u><s>S</s>x<sup>2</sup><sub>3</sub>&nbsp;<br>行" +
+                "<a href='https://e.com/' style='color:red'><span style='font-weight:bold'>链</span>接</a><span style='font-family:Segoe UI Emoji'>😀</span>");
+            source.Element(One + "T").SetAttributeValue("style", "color:blue");
+            var page = Page(source);
+            var original = new AgentRichText(source);
+            Equal(1, original.LinkCount);
+            foreach (var keep in new[] { true, false })
+            {
+                var oe = new XElement(source);
+                new AgentRichText(oe).ClearInline(keep);
+                var cleared = new AgentRichText(oe);
+                Equal(original.Text, cleared.Text);
+                Equal(original.Signature(page, false, false), cleared.Signature(page, false, false));
+                Equal(keep ? 1 : 0, cleared.LinkCount);
+                var html = oe.Element(One + "T").Value;
+                foreach (var gone in new[] { "bold", "color", "background", "Arial", "20pt", "<b>", "<i>", "<u>", "<s>", "<sup>", "<sub>" }) True(!html.Contains(gone));
+                True(html.Contains("Segoe UI Emoji")); True(html.Contains("<br")); True(html.Contains("&nbsp;"));
+                Equal(keep, html.Contains("<a href=\"https://e.com/\">链接</a>"));
+                Equal(null, (string)oe.Element(One + "T").Attribute("style"));
+            }
+        });
+        Test("clear_format resets paragraphs, lists, every tag and links; code box lines are skipped with a hint; undo restores all", () =>
+        {
+            var s = Snapshot(ClearPage()); var t = Tools(s);
+            True(t.Has("clear_format")); True(t.Has("unwrap_code"));
+            var all = s.Blocks.Select(b => b.Id).ToArray();
+            Rejects("请先完整读取", () => Clear(t, s, all));
+            Equal(0, s.Revision);
+            ReadAll(t, s);
+            var result = Clear(t, s, all);
+            Equal(1, (int)ToolField(result, "links_removed"));
+            Equal("p6,p7,p8,p9", string.Join(",", ((IEnumerable<object>)ToolField(result, "skipped")).Select(x => (string)ToolField(x, "id"))));
+            True(((string)ToolField(result, "hint")).Contains("unwrap_code"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api);
+            var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal(1, done.LinksRemoved); True(done.Message.Contains("去掉链接 1 处"));
+            Equal(Texts(s.Page), Texts(api.Page));
+            var rich = ByText(api.Page, "重点");
+            True(rich.Element(One + "List") == null); True(!rich.Elements(One + "Tag").Any());
+            var html = rich.Element(One + "T").Value;
+            True(!html.Contains("<a") && !html.Contains("bold") && !html.Contains("<sup>") && !html.Contains("yellow"));
+            Equal("left", (string)rich.Attribute("alignment"));
+            // 段落 style 上的加粗、背景色也去掉。
+            True(!((string)rich.Attribute("style")).Contains("bold")); True(!((string)rich.Attribute("style")).Contains("background"));
+            Equal("normal", Css.Effective(rich.Element(One + "T"), api.Page)["font-weight"]);
+            // 行内代码、整段等宽的代码都改成正文字体。
+            foreach (var text in new[] { "运行", "x = 1" }) True(!new AgentRichText(ByText(api.Page, text)).Monospace(api.Page).Any);
+            // 标题只去掉文字格式，不套正文样式；代码框没动。
+            var title = api.Page.Element(One + "Title").Element(One + "OE");
+            True(!title.Element(One + "T").Value.Contains("color")); Equal(null, (string)title.Attribute("quickStyleIndex"));
+            True(api.Page.Descendants(One + "Table").Any(table => AgentPageSnapshot.IsCodeBox(table, api.Page)));
+            var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(1, undo.LinksRemoved); True(undo.Message.Contains("还原链接 1 处")); Equal(0, undo.Conflicts);
+            foreach (var text in new[] { "重点", "运行", "x = 1", "名称" })
+                Equal(AgentPageSnapshot.SemanticFormat(ByText(s.Page, text), s.Page), AgentPageSnapshot.SemanticFormat(ByText(api.Page, text), api.Page));
+            foreach (var id in new[] { "title", "blank" })
+                Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, id), s.Page), AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, id), api.Page));
+        });
+        Test("clear_format keeps lists, tags and links on request or when their switches are off; all-protected targets change nothing", () =>
+        {
+            var s = Snapshot(ClearPage()); var t = Tools(s); ReadAll(t, s);
+            var result = Invoke(t, "clear_format", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, lists = false, tags = false, links = false });
+            Equal(0, (int)ToolField(result, "links_removed"));
+            var draft = s.Blocks.Single(b => b.Id == "p2").Draft;
+            Equal("bullet", AgentMarks.ListKind(draft)); Equal(2, draft.Elements(One + "Tag").Count());
+            True(draft.Element(One + "T").Value.Contains("<a href")); True(!draft.Element(One + "T").Value.Contains("bold"));
+            var off = new AgentPageSnapshot(ClearPage().ToString(), null, new AgentOptions { EnableLists = false, EnableTags = false });
+            var tools = Tools(off); ReadAll(tools, off);
+            Equal("lists,tags", string.Join(",", (string[])ToolField(Clear(tools, off, "p2"), "kept_by_settings")));
+            var kept = off.Blocks.Single(b => b.Id == "p2").Draft;
+            Equal("bullet", AgentMarks.ListKind(kept)); Equal(2, kept.Elements(One + "Tag").Count()); True(!kept.Element(One + "T").Value.Contains("<a"));
+            var fresh = Snapshot(ClearPage());
+            Rejects("unwrap_code", () => Clear(Tools(fresh), fresh, "p6", "p7"));
+            Equal(0, fresh.Revision);
+            var disabled = Tools(new AgentPageSnapshot(ClearPage().ToString(), null, new AgentOptions { EnableClearFormat = false, EnableCodeUnwrap = false }));
+            True(!disabled.Has("clear_format")); True(!disabled.Has("unwrap_code"));
+        });
+        Test("clearing a parent keeps the inherited look of an untouched child", () =>
+        {
+            var parent = Paragraph("parent", "父段"); parent.SetAttributeValue("style", "font-size:20pt;color:#C00000");
+            parent.Add(new XElement(One + "OEChildren", Paragraph("child", "子段")));
+            var s = Snapshot(Page(parent)); var t = Tools(s); ReadAll(t, s);
+            var before = s.CreateDraftPage();
+            var result = Clear(t, s, "p1");
+            Equal("p1", string.Join(",", (string[])ToolField(result, "appearance_only")));
+            var after = s.CreateDraftPage();
+            Equal(AgentPageSnapshot.SemanticFormat(AgentLayout.Find(before, "p2"), before), AgentPageSnapshot.SemanticFormat(AgentLayout.Find(after, "p2"), after));
+            Equal("Verified", new AgentCommitter(new FakePage(s.Page)).Commit(s, CancellationToken.None).Status);
+        });
+        Test("unwrap_code turns a code box into body paragraphs with the same lines; undo rebuilds the box", () =>
+        {
+            var s = Snapshot(ClearPage()); var t = Tools(s);
+            Rejects("不是代码框", () => Invoke(t, "unwrap_code", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t2" } }));
+            Equal(0, s.Revision);
+            var result = Invoke(t, "unwrap_code", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" } });
+            Equal(1, s.Revision);
+            Equal("u1,u2,u3,u4", string.Join(",", (string[])ToolField(((Array)ToolField(result, "unwrapped")).GetValue(0), "block_ids")));
+            Equal("t1", string.Join(",", (string[])ToolField(Invoke(t, "unwrap_code", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" } }), "noop")));
+            Equal(1, s.Revision);
+            var overview = Json(Invoke(t, "get_page_overview", new { }));
+            True(overview.Contains("\"unwrapped_code\":true")); True(!overview.Contains("\"id\":\"t1\""));
+            Rejects("拆开代码框得到的", () => Move(t, s, new[] { "u1" }, "p2", "before"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api);
+            var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal(1, done.Unwrapped); True(done.Message.Contains("拆开代码框 1 个"));
+            Equal(Texts(s.Page), Texts(api.Page));
+            True(!api.Page.Descendants(One + "Table").Any(table => AgentPageSnapshot.IsCodeBox(table, api.Page)));
+            var indented = ByText(api.Page, "    return 1");
+            True(!new AgentRichText(indented).Monospace(api.Page).Any); True(!indented.Element(One + "T").Value.Contains("color"));
+            // 代码框留白用的段前间距去掉，按正文预设。
+            Equal("0", (string)ByText(api.Page, "if x:").Attribute("spaceBefore"));
+            var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(Texts(s.Page), Texts(api.Page)); True(undo.Message.Contains("恢复文本框结构 1 个"));
+            var box = api.Page.Descendants(One + "Table").Single(table => AgentPageSnapshot.IsCodeBox(table, api.Page));
+            Equal("#F6F8FA", (string)box.Descendants(One + "Cell").Single().Attribute("shadingColor"));
+            True(box.Descendants(One + "T").Any(x => x.Value.Contains("color:#0000FF")));
+        });
+        Test("unwrapped lines and the rebuilt box stay verified when OneNote rewrites hard spaces, but not when it changes their look", () =>
+        {
+            // OneNote 会改写代码行的硬空格（见 AgentCode.PlainText）：新建的段落按规范化文字和非空白字符的格式核验。
+            void Rewrite(FakePage page)
+            {
+                foreach (var t in page.Page.Descendants(One + "OE").Where(e => ((string)e.Attribute("objectID") ?? "").StartsWith("new-", StringComparison.Ordinal)).Elements(One + "T"))
+                    t.ReplaceNodes(new XCData(t.Value.Replace("&nbsp;", " ")));
+            }
+            var s = Snapshot(ClearPage()); var t0 = Tools(s);
+            Invoke(t0, "unwrap_code", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" } });
+            var api = new FakePage(s.Page); api.AfterSave = () => Rewrite(api); var c = new AgentCommitter(api);
+            var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); True(!ByText(api.Page, "    return").Element(One + "T").Value.Contains("&nbsp;"));
+            Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
+            Equal(Texts(s.Page), Texts(api.Page));
+            // 字体被改掉不能算核验通过。
+            var other = Snapshot(ClearPage());
+            Invoke(Tools(other), "unwrap_code", new { snapshot_id = other.SnapshotId, table_ids = new[] { "t1" } });
+            var changed = new FakePage(other.Page);
+            changed.AfterSave = () =>
+            {
+                foreach (var oe in changed.Page.Descendants(One + "OE").Where(e => ((string)e.Attribute("objectID") ?? "").StartsWith("new-", StringComparison.Ordinal) && e.Elements(One + "T").Any()))
+                    oe.SetAttributeValue("style", "font-family:Consolas;font-size:10pt");
+            };
+            var report = new AgentCommitter(changed).Commit(other, CancellationToken.None);
+            Equal("PartiallyApplied", report.Status); Equal(0, report.Unwrapped); True(report.Unverified > 0);
+        });
+        Test("unwrap_code skips the box when its text box changes meanwhile and only takes fully selected boxes", () =>
+        {
+            var s = Snapshot(ClearPage()); var t = Tools(s);
+            Invoke(t, "unwrap_code", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" } });
+            var api = new FakePage(s.Page);
+            AgentCommitter.Find(api.Page, "mono").Element(One + "T").ReplaceNodes(new XCData("x = 2"));
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            True(r.ConflictIds.Contains("t1")); Equal(0, api.Writes);
+            True(api.Page.Descendants(One + "Table").Any(table => AgentPageSnapshot.IsCodeBox(table, api.Page)));
+            // 只选中代码框的一部分时它不在范围内，不提供拆框；整个选中时可以拆，选区边界检查通过。
+            True(!Tools(new AgentPageSnapshot(ClearPage().ToString(), new HashSet<string> { "rich", "box1", "box2" }, new AgentOptions())).Has("unwrap_code"));
+            var whole = new AgentPageSnapshot(ClearPage().ToString(), new HashSet<string> { "rich", "box1", "box2", "box3", "box4" }, new AgentOptions());
+            Invoke(Tools(whole), "unwrap_code", new { snapshot_id = whole.SnapshotId, table_ids = new[] { "t1" } });
+            var selected = new FakePage(whole.Page);
+            Equal("Verified", new AgentCommitter(selected).Commit(whole, CancellationToken.None).Status);
+            Equal(Texts(whole.Page), Texts(selected.Page));
+        });
+        Test("unwrap_code works on a code box inside a table cell", () =>
+        {
+            var page = GridPage();
+            page.Descendants(One + "Cell").First().Element(One + "OEChildren").Add(CodeBox("inner", "a = 1", "b = 2"));
+            var s = Snapshot(page); var t = Tools(s);
+            Equal("highlighted_code", s.Tables.Single(x => x.Id == "t2").ProtectedReason);
+            Invoke(t, "unwrap_code", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t2" } });
+            var api = new FakePage(s.Page);
+            Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+            Equal("名称|a = 1|b = 2|说明|甲|乙", Texts(api.Page)); Equal(1, api.Page.Descendants(One + "Table").Count());
+        });
+        Test("unwrap_code withdraws earlier code spacing and the task still commits", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "说明"), CodeBox("box", "x = 1", "y = 2"), Paragraph("b", "结尾")));
+            var api = new FakePage(s.Page); var t = new AgentTools(s, new AgentCommitter(api), CancellationToken.None); Read(t, s);
+            Normalize(t, s);
+            True(s.Inserted.Count > 0);
+            Invoke(t, "unwrap_code", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" } });
+            Equal(0, s.Inserted.Count);
+            Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal("Verified", t.Report.Status); Equal("说明|x = 1|y = 2|结尾", Texts(api.Page));
+        });
+        Test("cell_shading none clears every cell; undo restores each colour and a changed cell is a conflict", () =>
+        {
+            var page = GridPage(); var colors = new[] { "#DEEAF6", "#F2F2F2", "#E2EFDA", "#FFF2CC" };
+            var cells = page.Descendants(One + "Cell").ToList();
+            for (var i = 0; i < cells.Count; i++) cells[i].SetAttributeValue("shadingColor", colors[i]);
+            var s = Snapshot(page); var t = Tools(s);
+            True(Json(Invoke(t, "get_page_overview", new { })).Contains("\"cell_shading\":\"mixed\""));
+            Invoke(t, "set_table_style", new { snapshot_id = s.SnapshotId, table_ids = new[] { "t1" }, style = new { borders = true, header_row = false, cell_shading = "none" } });
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api);
+            var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); True(api.Page.Descendants(One + "Cell").All(x => x.Attribute("shadingColor") == null));
+            var undo = c.Undo(s.PageId, done, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(string.Join(",", colors), string.Join(",", api.Page.Descendants(One + "Cell").Select(x => (string)x.Attribute("shadingColor"))));
+            // header_shading 和 cell_shading 一起给时，首行按 header_shading。
+            var both = TableLook.Read(page.Descendants(One + "Table").Single()).With(new Dictionary<string, object> { ["cell_shading"] = "none", ["header_shading"] = "#F2F2F2" });
+            Equal("#F2F2F2,#F2F2F2|,", string.Join(",", both.HeaderShades) + "|" + string.Join(",", both.BodyShades));
+            var again = Snapshot(page);
+            Invoke(Tools(again), "set_table_style", new { snapshot_id = again.SnapshotId, table_ids = new[] { "t1" }, style = new { cell_shading = "none" } });
+            var edited = new FakePage(again.Page); edited.Page.Descendants(One + "Cell").Last().SetAttributeValue("shadingColor", "#FF0000");
+            var conflict = new AgentCommitter(edited).Commit(again, CancellationToken.None);
+            Equal(1, conflict.Conflicts); Equal(0, edited.Writes);
+        });
+        Test("runner clears all formats with clear_format, unwrap_code and set_table_style in one verified commit", () =>
+        {
+            var s = Snapshot(ClearPage()); var api = new FakePage(s.Page); var model = new ClearScriptClient(s);
+            var prompt = AgentRunner.SystemPrompt(Tools(Snapshot(ClearPage())));
+            True(prompt.Contains(AgentRunner.ClearFormatPrompt)); True(prompt.Contains("unwrap_code")); True(prompt.Contains("cell_shading"));
+            // 没有代码框的页面不提供拆框，提示词也不提。
+            True(!Tools(Snapshot()).Has("unwrap_code")); True(!AgentRunner.SystemPrompt(Tools(Snapshot())).Contains("unwrap_code"));
+            var r = new AgentRunner(model, new AgentCommitter(api)).RunAsync(s, "清除所有格式，包括代码外层的框", null, CancellationToken.None).GetAwaiter().GetResult();
+            Equal("Verified", r.Status); Equal(1, api.Writes); True(model.SawTools);
+            True(r.Message.Contains("拆开代码框 1 个")); True(r.Message.Contains("去掉链接 1 处")); True(r.Message.Contains("表格样式 1 个"));
+            Equal(Texts(s.Page), Texts(api.Page));
+            True(!api.Page.Descendants(One + "Table").Any(x => AgentPageSnapshot.IsCodeBox(x, api.Page)));
+            True(api.Page.Descendants(One + "Cell").All(x => x.Attribute("shadingColor") == null));
+            True(api.Page.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any()).All(e => !new AgentRichText(e).Monospace(api.Page).Any));
+        });
+        Test("clear and unwrap step descriptions", () =>
+        {
+            Equal(("清除格式 · 2 段 · 去掉链接 1 处 · 跳过受保护 1 段", AgentStepState.Done), AgentTools.DescribeStep("clear_format", "{\"block_ids\":[\"p1\",\"p2\",\"p3\"]}",
+                "{\"ok\":true,\"changed\":[\"p1\",\"p2\"],\"links_removed\":1,\"skipped\":[{\"id\":\"p3\",\"reason\":\"highlighted_code\"}]}"));
+            Equal(("拆开代码框 · 1 个代码框", AgentStepState.Done), AgentTools.DescribeStep("unwrap_code", "{\"table_ids\":[\"t1\"]}", "{\"ok\":true,\"unwrapped\":[{\"table_id\":\"t1\"}]}"));
+        });
+    }
+
+    /// <summary>
+    /// 清除格式页：红色加粗的标题（p1）；加粗、高亮、带链接和上标、居中 20pt、带项目符号和两个标记（待办、自定义）的段落（p2）；行内代码段落（p3）；
+    /// 30pt 的空行（p4）；整段 Consolas 的代码（p5）；代码框 t1（p6–p9，含缩进行和空行）；两行两列、每格有底色的表格 t2（p10–p13）。
+    /// </summary>
+    private static XElement ClearPage()
+    {
+        var rich = Paragraph("rich", "<span style='font-weight:bold;color:#C00000;background:yellow'>重点</span>和<a href='https://example.com/x'><span style='font-style:italic'>链接</span></a>&nbsp;x<sup>2</sup>");
+        rich.SetAttributeValue("style", "font-family:Calibri;font-size:20pt;font-weight:bold;background:#FFFF00"); rich.SetAttributeValue("alignment", "center");
+        rich.AddFirst(Tag("0"), Tag("1"), new XElement(One + "List", new XElement(One + "Bullet", new XAttribute("bullet", "2"))));
+        var mono = Paragraph("mono", "x = 1"); mono.SetAttributeValue("style", "font-family:Consolas;font-size:10pt");
+        var grid = new XElement(GridPage().Element(One + "Outline").Element(One + "OEChildren").Element(One + "OE"));
+        foreach (var cell in grid.Descendants(One + "Cell")) cell.SetAttributeValue("shadingColor", "#DEEAF6");
+        var page = Page(rich, Paragraph("inline", "运行 <span style='font-family:Consolas'>npm i</span> 即可"), Paragraph("blank", "<span style='font-size:30pt'>&nbsp;</span>"), mono,
+            CodeBox("box", "if x:", "&nbsp;&nbsp;&nbsp;&nbsp;<span style='color:#0000FF'>return</span> 1", "&nbsp;", "end"), grid);
+        page.AddFirst(TagDef("0", 3, "待办事项"), TagDef("1", 99, "自定义"));
+        page.Element(One + "Outline").AddBeforeSelf(new XElement(One + "Title",
+            new XElement(One + "OE", new XAttribute("objectID", "title"), new XElement(One + "T", new XCData("<span style='color:#FF0000;font-weight:bold'>标题</span>")))));
+        return page;
+    }
+    /// <summary>插件生成的代码框：单行单格、有底色，每行一个 Consolas 段落（objectID 为 id1、id2…），首行段前、末行段后各 6 磅。</summary>
+    private static XElement CodeBox(string id, params string[] lines) => new XElement(One + "OE", new XAttribute("objectID", id + "Wrapper"),
+        new XElement(One + "Table", new XAttribute("objectID", id), new XAttribute("bordersVisible", "false"), new XAttribute("hasHeaderRow", "false"),
+            new XElement(One + "Columns", new XElement(One + "Column", new XAttribute("index", 0), new XAttribute("width", 300))),
+            new XElement(One + "Row", new XAttribute("objectID", id + "Row"), new XElement(One + "Cell", new XAttribute("objectID", id + "Cell"), new XAttribute("shadingColor", "#F6F8FA"),
+                new XElement(One + "OEChildren", lines.Select((text, i) =>
+                {
+                    var oe = Paragraph(id + (i + 1), text); oe.SetAttributeValue("style", "font-family:Consolas;font-size:10pt;color:#24292E");
+                    if (i == 0) oe.SetAttributeValue("spaceBefore", "6");
+                    if (i == lines.Length - 1) oe.SetAttributeValue("spaceAfter", "6");
+                    return oe;
+                }))))));
+    private static XElement ByText(XElement page, string start) =>
+        page.Descendants(One + "OE").First(e => e.Elements(One + "T").Any() && AgentCode.PlainText(e).StartsWith(start, StringComparison.Ordinal));
+    private static void ReadAll(AgentTools tools, AgentPageSnapshot s) => Invoke(tools, "read_blocks",
+        new { snapshot_id = s.SnapshotId, block_ids = s.Blocks.Where(b => b.Editable || b.CodeCandidate).Select(b => b.Id).ToArray() });
+    private static object Clear(AgentTools tools, AgentPageSnapshot s, params string[] ids) => Invoke(tools, "clear_format", new { snapshot_id = s.SnapshotId, block_ids = ids });
 
     private static void ConversionUndoConflict(bool code, Action<XElement> edit)
     {
@@ -3986,6 +4257,30 @@ internal static class Program
             }
             var reply = new AgentReply { FinishReason = "tool_calls", Reasoning = "opaque provider history" };
             reply.Calls.Add(0, new AgentToolCall { Id = "c" + _turn, Name = name, Arguments = AgentChatClient.Serializer().Serialize(args) });
+            return Task.FromResult(reply);
+        }
+    }
+    /// <summary>「清除所有格式，包括代码外层的框」：读完后清除全部段落的格式，拆开代码框 t1，表格 t2 恢复默认外观，再提交。</summary>
+    private sealed class ClearScriptClient : IAgentChatClient
+    {
+        private readonly AgentPageSnapshot _s; private int _turn;
+        internal bool SawTools;
+        internal ClearScriptClient(AgentPageSnapshot s) { _s = s; }
+        public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
+        {
+            var defined = Json(tools);
+            SawTools |= defined.Contains("clear_format") && defined.Contains("unwrap_code");
+            string name; object args;
+            switch (_turn++)
+            {
+                case 0: name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = _s.Blocks.Where(b => b.Editable || b.CodeCandidate).Select(b => b.Id).ToArray() }; break;
+                case 1: name = "clear_format"; args = new { snapshot_id = _s.SnapshotId, block_ids = _s.Blocks.Select(b => b.Id).ToArray() }; break;
+                case 2: name = "unwrap_code"; args = new { snapshot_id = _s.SnapshotId, table_ids = new[] { "t1" } }; break;
+                case 3: name = "set_table_style"; args = new { snapshot_id = _s.SnapshotId, table_ids = new[] { "t2" }, style = new { borders = true, header_row = false, cell_shading = "none" } }; break;
+                default: name = "finish_edit"; args = new { snapshot_id = _s.SnapshotId, draft_revision = _s.Revision }; break;
+            }
+            var reply = new AgentReply { FinishReason = "tool_calls" };
+            reply.Calls.Add(0, new AgentToolCall { Id = "clear" + _turn, Name = name, Arguments = Json(args) });
             return Task.FromResult(reply);
         }
     }
