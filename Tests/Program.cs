@@ -1909,11 +1909,11 @@ internal static class Program
         Test("code spacing tool reports meaningful steps and exposes capability even without current blanks", () =>
         {
             var s = Snapshot(Page(Paragraph("a", "正文"), SpacingBox("code"))); var t = Tools(s);
-            True(t.Has("normalize_code_spacing")); True(!t.Has("remove_blank_lines"));
+            True(t.Has("normalize_code_spacing")); True(t.Has("remove_blank_lines"));
             var overview = AgentChatClient.Parse(Json(Invoke(t, "get_page_overview", new { })));
             Equal(true, AiClient.Get(overview, "code_spacing"));
-            // 没有可删的空行时不注册 remove_blank_lines，概览也不能说它可用。
-            Equal(false, AiClient.Get(overview, "blank_lines"));
+            // 允许插入时提前提供清理工具，供同一任务清理之后补入的空行。
+            Equal(true, AiClient.Get(overview, "blank_lines"));
             True(AgentRunner.SystemPrompt(t).Contains("只处理交界处"));
             Equal(("规范化代码框间隔 · 删除 2 个空段落、3 个段内空行，补入 1 行", AgentStepState.Done), AgentTools.DescribeStep("normalize_code_spacing", "{}",
                 "{\"ok\":true,\"removed_paragraphs\":2,\"removed_soft_lines\":3,\"inserted_paragraphs\":1,\"skipped\":[]}"));
@@ -2407,6 +2407,141 @@ internal static class Program
             for (var i = 0; i < 2; i++) Add(blanks);
             Rejects("最多插入", () => Add(blanks));
             Equal(2, s.Revision); Equal(40, s.Inserted.Count);
+        });
+        Test("blank cleanup is available before insertion and removes generated blanks in the same task", () =>
+        {
+            foreach (var removal in new[] { false, true }) foreach (var insertion in new[] { false, true }) foreach (var existing in new[] { false, true })
+            {
+                var page = existing ? Page(Paragraph("a", "正文"), Paragraph("e", "")) : Page(Paragraph("a", "正文"));
+                var tools = Tools(new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = removal, EnableInsert = insertion }));
+                var available = removal && (insertion || existing);
+                Equal(available, tools.Has("remove_blank_lines"));
+                Equal(available, AiClient.Get(AgentChatClient.Parse(Json(Invoke(tools, "get_page_overview", new { }))), "blank_lines"));
+                Equal(available, AgentRunner.SystemPrompt(tools).Contains(AgentRunner.BlankLinePrompt));
+            }
+            var s = Snapshot(); var t = Tools(s); Read(t, s);
+            InsertBlanks(t, s, "p1", 2);
+            Equal("n1,n2", string.Join(",", (string[])ToolField(RemoveBlanks(t, s), "removed")));
+            Equal("第一段|第二段", Texts(s.Layout)); Equal(2, s.Inserted.Count);
+            True(Json(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId })).Contains("\"inserted\":[]"));
+            var revision = s.Revision; RemoveBlanks(t, s); Equal(revision, s.Revision);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(0, r.Removed); Equal(0, r.InsertedBlankLines); Equal("第一段|第二段", Texts(api.Page));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal("第一段|第二段", Texts(api.Page));
+        });
+        Test("blank cleanup collapses mixed original and generated blanks and counts only original deletions", () =>
+        {
+            foreach (var mode in new[] { "collapse", "all" })
+            {
+                var s = Snapshot(Page(Paragraph("head", ""), Paragraph("a", "第一段"), Paragraph("middle", ""), Paragraph("b", "第二段"), Paragraph("tail", "")));
+                var t = Tools(s); Read(t, s);
+                InsertBlanks(t, s, "p2", 1, "before"); InsertBlanks(t, s, "p4", 2, "before"); InsertBlanks(t, s, "p4");
+                var removed = (string[])ToolField(RemoveBlanks(t, s, mode), "removed");
+                Equal(mode == "collapse" ? 6 : 7, removed.Length); True(new[] { "n1", "n2", "n3", "n4" }.All(removed.Contains));
+                var expected = mode == "collapse" ? "第一段||第二段" : "第一段|第二段";
+                Equal(expected, Texts(s.Layout));
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(mode == "collapse" ? 2 : 3, r.Removed); Equal(0, r.InsertedBlankLines); Equal(expected, Texts(api.Page));
+                Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(s.Page), Texts(api.Page));
+            }
+        });
+        Test("collapse keeps one generated blank and reports only the surviving insertion", () =>
+        {
+            var s = Snapshot(); var t = Tools(s); Read(t, s); InsertBlanks(t, s, "p1", 2);
+            Equal("n2", string.Join(",", (string[])ToolField(RemoveBlanks(t, s, "collapse"), "removed")));
+            var pending = Json(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId }));
+            True(pending.Contains("\"inserted\":[{\"id\":\"n1\",\"text\":\"\"}]"));
+            True(!Json(Invoke(t, "get_page_overview", new { })).Contains("\"id\":\"n2\""));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(0, r.Removed); Equal(1, r.InsertedBlankLines); Equal("第一段||第二段", Texts(api.Page));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal("第一段|第二段", Texts(api.Page));
+        });
+        Test("deleted generated blanks retain their IDs and consume the task insertion quota", () =>
+        {
+            var s = Snapshot(); var t = Tools(s); var total = 0;
+            foreach (var count in new[] { 20, 20, 10 })
+            {
+                var added = (string[])ToolField(InsertBlanks(t, s, "p1", count), "inserted");
+                Equal("n" + (total + 1), added[0]); total += count; Equal("n" + total, added.Last());
+                Equal(count, ((string[])ToolField(RemoveBlanks(t, s), "removed")).Length);
+                Equal(total, s.Inserted.Count); Equal("第一段|第二段", Texts(s.Layout));
+            }
+            Equal(50, s.Inserted.Select(i => i.Id).Distinct().Count());
+            var state = MergeDraftState(s);
+            Rejects("不存在", () => InsertBlanks(t, s, "n1"));
+            Rejects("最多插入", () => InsertBlanks(t, s, "p1")); Equal(state, MergeDraftState(s));
+        });
+        Test("generated blank cleanup preserves unselected, marked and code blanks", () =>
+        {
+            var tagged = Paragraph("tagged", ""); tagged.AddFirst(Tag("0"));
+            var parent = Paragraph("parent", ""); parent.Add(new XElement(One + "OEChildren", Paragraph("child", "细节")));
+            var mono = Paragraph("mono", "&nbsp;"); mono.SetAttributeValue("style", "font-family:Consolas");
+            var page = Page(Paragraph("a", "正文"), Paragraph("outside", ""), Paragraph("b", "结尾"), Listed("listed", "", "2"), tagged, parent, mono, SpacingBox("code"));
+            page.AddFirst(TagDef("0", 3, "待办事项"));
+            var selection = new HashSet<string>(page.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID"))); selection.Remove("outside");
+            var s = new AgentPageSnapshot(page.ToString(), selection, new AgentOptions()); var t = Tools(s); var original = new XElement(s.Layout);
+            InsertBlanks(t, s, "p1", 2);
+            Equal("n1,n2", string.Join(",", (string[])ToolField(RemoveBlanks(t, s, "collapse"), "removed")));
+            RemoveBlanks(t, s); True(XNode.DeepEquals(original, s.Layout));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(0, r.Removed); Equal(0, r.InsertedBlankLines); Equal(Texts(s.Page), Texts(api.Page));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(s.Page), Texts(api.Page));
+            // 新空行成为上级段落后，也不能连同它的子段落一起删除。
+            var nested = Snapshot(); var nt = Tools(nested); InsertBlanks(nt, nested, "p1"); Insert(nt, nested, "n1", "新细节");
+            Indent(nt, nested, "in", "n2"); InsertBlanks(nt, nested, "p2", 1, "before");
+            Equal("n3", string.Join(",", (string[])ToolField(RemoveBlanks(nt, nested), "removed")));
+            True(AgentLayout.Find(nested.Layout, "n2").Ancestors(One + "OE").Contains(AgentLayout.Find(nested.Layout, "n1")));
+        });
+        Test("generated blank cleanup follows cross-frame moves and merges with grouped commit, conflict and undo", () =>
+        {
+            foreach (var operation in new[] { "move", "merge" }) foreach (var editTime in new[] { "none", "during", "after" })
+            {
+                var s = Snapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("b", "乙"), Paragraph("e", ""), Paragraph("b2", "乙二"))));
+                var t = Tools(s); Read(t, s); InsertBlanks(t, s, "p2", 2);
+                if (operation == "merge") Merge(t, s, "B", "p1", "after");
+                else Move(t, s, new[] { "n1", "n2", "p3" }, "p1", "after");
+                var removed = (string[])ToolField(RemoveBlanks(t, s), "removed"); Equal(3, removed.Length); True(removed.Contains("p3"));
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api);
+                if (editTime == "during") AgentCommitter.Find(api.Page, "b").Element(One + "T").Value = "处理中编辑";
+                var r = c.Commit(s, CancellationToken.None);
+                if (editTime == "during")
+                {
+                    Equal("NoChange", r.Status); True(r.Conflicts > 0); Equal(0, api.Writes); Equal(0, r.Removed); Equal(0, r.InsertedBlankLines);
+                    Equal("甲|处理中编辑||乙二", Texts(api.Page)); continue;
+                }
+                Equal("Verified", r.Status); Equal(1, api.Writes); Equal(1, r.Removed); Equal(0, r.InsertedBlankLines); Equal(2, r.OutlineUndo.Count);
+                Equal("甲|乙|乙二", Texts(api.Page));
+                if (editTime == "after") api.Page.Descendants(One + "OE").Single(e => AgentCode.PlainText(e) == "乙").Element(One + "T").Value = "提交后编辑";
+                var beforeUndo = api.Page.ToString(); var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+                if (editTime == "after") { Equal("NoChange", undo.Status); True(undo.Conflicts > 0); Equal(1, api.Writes); Equal(beforeUndo, api.Page.ToString()); }
+                else { Equal("Verified", undo.Status); Equal(2, api.Page.Elements(One + "Outline").Count()); Equal(Texts(s.Page), Texts(api.Page)); }
+            }
+        });
+        Test("manual blank cleanup reverts code spacing first and safely renormalizes before commit", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文"), SpacingBox("code"), Paragraph("b", "结尾")));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var t = new AgentTools(s, c, CancellationToken.None); Read(t, s);
+            InsertBlanks(t, s, "p1", 1, "before"); InsertBlanks(t, s, "p1", 2);
+            Normalize(t, s); Equal(4, s.Inserted.Count); True(AgentLayout.Find(s.Layout, "n3") == null);
+            Equal("n1,n2,n3", string.Join(",", (string[])ToolField(RemoveBlanks(t, s), "removed")));
+            Equal(3, s.Inserted.Count); Equal("正文|#|结尾", SpacingTexts(s.Layout)); True(AgentCommitter.Find(s.Layout, "code2") != null);
+            True(Json(Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision })).Contains("normalize_code_spacing")); Equal(0, api.Writes);
+            Normalize(t, s); Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal("Verified", t.Report.Status); Equal(0, t.Report.Removed); Equal(2, t.Report.InsertedBlankLines); Equal("正文||#||结尾", SpacingTexts(api.Page));
+            Equal("Verified", c.Undo(s.PageId, t.Report, s.Options, CancellationToken.None).Status); Equal("正文|#|结尾", SpacingTexts(api.Page));
+            // 没有手动空行可删时，清理无改动，已经规范化的草稿应完整保留。
+            var unchanged = Snapshot(s.Page); var ut = Tools(unchanged); Read(ut, unchanged); Normalize(ut, unchanged);
+            var state = MergeDraftState(unchanged); Equal(0, ((string[])ToolField(RemoveBlanks(ut, unchanged), "removed")).Length); Equal(state, MergeDraftState(unchanged));
+        });
+        Test("cancelled generated blank cleanup preserves the complete code spacing draft", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文"), SpacingBox("code"), Paragraph("b", "结尾"))); var api = new FakePage(s.Page);
+            using (var cancel = new CancellationTokenSource())
+            {
+                var t = new AgentTools(s, new AgentCommitter(api), cancel.Token); Read(t, s); InsertBlanks(t, s, "p1", 2); Normalize(t, s);
+                var state = MergeDraftState(s); cancel.Cancel();
+                Throws<OperationCanceledException>(() => RemoveBlanks(t, s)); Equal(state, MergeDraftState(s)); Equal(0, api.Writes);
+            }
         });
         Test("text_to_table converts pipe rows keeping links and bold, verifies and undo restores paragraphs", () =>
         {
@@ -3544,6 +3679,11 @@ internal static class Program
         Invoke(tools, "set_indent", new { snapshot_id = s.SnapshotId, block_ids = ids, direction });
     private static object Insert(AgentTools tools, AgentPageSnapshot s, string target, string text) =>
         Invoke(tools, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = target, position = "after", paragraphs = new[] { new { text, preset_id = "body" } } });
+    private static object InsertBlanks(AgentTools tools, AgentPageSnapshot s, string target, int count = 1, string position = "after") =>
+        Invoke(tools, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = target, position,
+            paragraphs = Enumerable.Range(0, count).Select(_ => new { blank = true }).ToArray() });
+    private static object RemoveBlanks(AgentTools tools, AgentPageSnapshot s, string mode = "all") =>
+        Invoke(tools, "remove_blank_lines", new { snapshot_id = s.SnapshotId, mode });
     private static object Table(AgentTools tools, AgentPageSnapshot s, string delimiter, params string[] ids) =>
         Invoke(tools, "text_to_table", new { snapshot_id = s.SnapshotId, block_ids = ids, delimiter, header_shading = "#DEEAF6" });
     private static AgentTools Tools(AgentPageSnapshot s) => new AgentTools(s, new AgentCommitter(new FakePage(s.Page)), CancellationToken.None);

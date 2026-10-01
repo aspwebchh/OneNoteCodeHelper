@@ -220,13 +220,14 @@ namespace OneNoteCodeHelper.Services.Agent
                     "先转换代码并完成其他结构调整，最后调用此工具；之后再调整结构、转换代码或清理 Markdown 会撤回已做的间隔调整。代码内部、文字之间及文本框首尾不处理。" +
                     "删除和补入分别受删空行、插入段落开关控制，关闭时对应边界返回 skipped。",
                     SnapshotOnly(), NormalizeCodeSpacing);
-            if (snapshot.Options.EnableBlankLineRemoval && snapshot.Blocks.Any(b => b.ProtectedReason == "empty" && snapshot.EditableOutlines.Contains(b.ContainerId)))
+            if (structural && snapshot.Options.EnableBlankLineRemoval && (snapshot.Options.EnableInsert ||
+                snapshot.Blocks.Any(b => b.ProtectedReason == "empty" && snapshot.EditableOutlines.Contains(b.ContainerId))))
             {
                 var blank = SnapshotOnly();
                 blank.Properties["mode"] = AgentSchema.Str("collapse", "all");
                 blank.Required = new[] { "snapshot_id", "mode" };
                 Register("remove_blank_lines", "删除多余的空行（只有空白的段落）：collapse 把连续空行合并为一行，并删掉文本框、单元格首尾的空行；all 删掉全部空行。" +
-                    "带列表、标记或下级段落的空段落和代码里的空行不删。", blank, RemoveBlankLines);
+                    "也处理本次用 insert_blocks 插入的空行；带列表、标记或下级段落的空段落和代码里的空行不删。", blank, RemoveBlankLines);
             }
             if (structural && snapshot.Options.EnableIndent)
             {
@@ -1111,10 +1112,13 @@ namespace OneNoteCodeHelper.Services.Agent
 
         private object RemoveBlankLines(IDictionary<string, object> args)
         {
-            var blanks = new HashSet<string>(_snapshot.Blocks.Where(b => b.ProtectedReason == "empty" && b.Conversion == null && _snapshot.EditableOutlines.Contains(b.ContainerId)).Select(b => b.Id));
+            var blanks = new HashSet<string>(_snapshot.Blocks.Where(b => b.ProtectedReason == "empty" && b.Conversion == null).Select(b => b.Id)
+                .Concat(_snapshot.Inserted.Where(i => i.Text.Length == 0).Select(i => i.Id)));
             var candidate = new XElement(_snapshot.Layout);
-            var outlines = candidate.Descendants(OneNoteApi.One + "OE").Where(e => blanks.Contains(AgentLayout.KeyOf(e) ?? "")).ToDictionary(e => e, OutlineOf);
-            var removed = AgentLayout.RemoveBlankLines(candidate, e => blanks.Contains(AgentLayout.KeyOf(e) ?? ""), (string)args["mode"] == "all");
+            // 按草稿里的当前位置判断范围；插入历史保留，避免清理后复用 ID 或释放本次任务的插入配额。
+            var outlines = candidate.Elements(OneNoteApi.One + "Outline").Where(o => _snapshot.EditableOutlines.Contains((string)o.Attribute("objectID")))
+                .Descendants(OneNoteApi.One + "OE").Where(e => blanks.Contains(AgentLayout.KeyOf(e) ?? "") && _snapshot.InSelection(e)).ToDictionary(e => e, OutlineOf);
+            var removed = AgentLayout.RemoveBlankLines(candidate, outlines.ContainsKey, (string)args["mode"] == "all");
             PublishLayout(candidate, "removed", removed.Select(e => (outlines[e], (string)null, AgentLayout.KeyOf(e))).ToList());
             return new { ok = true, draft_revision = _snapshot.Revision, removed = removed.Select(AgentLayout.KeyOf).ToArray() };
         }
@@ -1401,6 +1405,7 @@ namespace OneNoteCodeHelper.Services.Agent
         private object Pending(IDictionary<string, object> args)
         {
             var unread = UnreadBlockIds();
+            var present = new HashSet<string>(_snapshot.Layout.Descendants(OneNoteApi.One + "OE").Select(AgentLayout.KeyOf));
             return new { snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
                 changed = _snapshot.Blocks.Where(b => b.Changed).Select(b => b.Id).ToArray(),
                 text_fixes = _snapshot.Blocks.Where(b => b.TextFixes.Count > 0).Select(b => new { id = b.Id, fixes = b.TextFixes.ToArray() }).ToArray(),
@@ -1411,7 +1416,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 text_tables = _snapshot.CodeConversions.Where(c => c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray() }).ToArray(),
                 layout = new { removed = LayoutIds("removed"), markdown_removed = LayoutIds("markdown"), moved = LayoutIds("moved"), indented = LayoutIds("indented"),
                     code_spacing = _snapshot.CodeSpacingRequested, soft_blank_lines = _snapshot.Layout.Descendants(OneNoteApi.One + "OE").Sum(AgentCodeSpacing.TrimCount),
-                inserted = _snapshot.Inserted.Select(i => new { id = i.Id, text = i.Text }).ToArray(),
+                inserted = _snapshot.Inserted.Where(i => present.Contains(i.Id)).Select(i => new { id = i.Id, text = i.Text }).ToArray(),
                 merged = _snapshot.LayoutChanges.Where(c => c.Kind == "merged").Select(c => new { from = c.From, into = c.OutlineId }).ToArray() },
                 unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
                 tables_changed = _snapshot.Tables.Where(t => t.Changed).Select(t => t.Id).ToArray(),

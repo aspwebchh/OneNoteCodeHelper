@@ -360,7 +360,8 @@ namespace OneNoteCodeHelper.Services.Agent
                             report.TextFixes.AddRange(restored.Item.TextFixes);
                         }
                     }
-                    foreach (var edit in edits) VerifyOutline(edit, page, actual, expectedLines, actualLines, report);
+                    var originalIds = new HashSet<string>(snapshot.Blocks.Select(b => b.Id));
+                    foreach (var edit in edits) VerifyOutline(edit, page, actual, expectedLines, actualLines, report, originalIds);
                     // 重建的段落里的图片（跨框移动、撤销重建）只带着数据写入，piBasic 看不出坏图，按二进制数据核对。
                     var images = page.Descendants(One + "Image").Where(i => i.Parent?.Name == One + "OE" && !known.Contains((string)i.Parent.Attribute("objectID") ?? "")).ToList();
                     if (images.Count > 0 && !ImagesWritten(snapshot.PageId, page, images, known))
@@ -633,7 +634,8 @@ namespace OneNoteCodeHelper.Services.Agent
         /// 整框写入的核验：框里每个文字段落按位置比较格式（期望一侧解析不了的段落已由内容核验比过原文）；
         /// 新代码框只比文字，已在内容核验里做过；新表格的单元格另比正文和链接。执行时记下整框撤销。
         /// </summary>
-        private static void VerifyOutline(OutlineEdit edit, XElement page, XElement actual, List<XElement> expectedLines, List<XElement> actualLines, AgentReport report)
+        private static void VerifyOutline(OutlineEdit edit, XElement page, XElement actual, List<XElement> expectedLines, List<XElement> actualLines, AgentReport report,
+            ISet<string> originalIds)
         {
             var marksBefore = report.MarkdownMarks;
             var fixesBefore = report.TextFixes.Count;
@@ -685,7 +687,8 @@ namespace OneNoteCodeHelper.Services.Agent
                 report.Tables++;
             }
             string[] Ids(string kind) => edit.Changes.Where(c => c.Kind == kind).SelectMany(c => c.Ids).Distinct().ToArray();
-            report.Removed += Ids("removed").Length;
+            // 草稿里新增后又删掉的空行没有从原页删除，不计入写回结果；补空行只统计仍在 written 里的行。
+            report.Removed += Ids("removed").Count(originalIds.Contains);
             report.RemovedSoftLines += edit.SoftLines.Where(s => !failed.Contains(s.Node)).Sum(s => s.Lines);
             report.InsertedBlankLines += edit.BlankLines.Count(b => !failed.Contains(b));
             report.MarkdownMarks += Ids("markdown").Length;

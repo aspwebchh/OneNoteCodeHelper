@@ -32,7 +32,7 @@
 | `set_tag` | `snapshot_id`、`block_ids`、`tag`（todo/important/question/none）、可选 `completed`（只用于 todo）；同类标记不重复添加，none 只去掉这三种。`EnableTags=false` 时不注册 |
 | `set_table_style` | `snapshot_id`、`table_ids`、`style`（`borders`、`header_row`、`header_shading` 至少一项）；不需要先读。`EnableTableStyles=false` 或页面没有可编辑表格时不注册 |
 | `read_image_text` | `snapshot_id`、`image_ids`；只读，返回 OneNote 识别出的图片文字，每张最多 4000 字并标记 `truncated`。页面上有带识别文字的图片时才注册 |
-| `remove_blank_lines` | `snapshot_id`、`mode`（collapse/all）；collapse 同「排版优化」，连续空行留一行、删掉文本框和单元格首尾的空行；all 删掉全部，但不会把一摞段落删空。带列表、标记、下级段落的空段落和已排转换里的空行不删。`EnableBlankLineRemoval=false` 或没有可删空行时不注册 |
+| `remove_blank_lines` | `snapshot_id`、`mode`（collapse/all）；collapse 同「排版优化」，连续空行留一行、删掉文本框和单元格首尾的空行；all 删掉全部，但不会把一摞段落删空。按当前草稿位置和选区处理原有空行及本次 `insert_blocks` 新插入的空行，带列表、标记、下级段落的空段落和已排转换里的空行不删。返回所有删除 ID；提交结果的 `removed` 只计原页已有空行，`inserted_blank_lines` 只计仍保留且核验通过的新空行。插入历史保留，删除后不复用 ID、不释放任务配额，待提交清单只列仍存在的新段落。`EnableBlankLineRemoval=false`、没有可调整结构的文本框，或既不允许插入也没有原有可清理空行时不注册；允许插入时提前提供，供同次任务清理后补的空行 |
 | `normalize_code_spacing` | `snapshot_id`；仅规范化已有或待转换代码框与文字的交界，空段落和文字首尾的 Shift+Enter 空行合计一行，多删少补。代码内部、文字之间、代码之间和文本框首尾不处理；各普通单元格独立计算。删除受 `EnableBlankLineRemoval` 控制，补入受 `EnableInsert` 和现有插入配额控制，两者都关闭时不注册。返回 `removed_paragraphs`、`removed_soft_lines`、`inserted_paragraphs`、`noop`、`skipped` 和修订号。先转换代码、完成结构操作，最后调用；之后再调用结构工具、`highlight_code`、`text_to_table` 或 `strip_markdown` 时先撤回已做的间隔调整。提交前复核，间隔不符时要求重新规范化，最后一轮则按当前草稿自动重新规范化后提交 |
 | `set_indent` | `snapshot_id`、`block_ids`、`direction`（in/out）；in 挂到前一个兄弟段落下，out 移到上级之后、原来排在后面的兄弟段落改挂到它下面，上下顺序不变。上级也在列表里的段落跟着上级走。`EnableIndent=false` 时不注册 |
 | `move_blocks` | `snapshot_id`、`block_ids`、`target_id`、`position`（before/after）；连同下级段落按原顺序移到目标前后，成为目标的同级段落。可以移到另一个文本框，单元格里的段落只能在同一单元格里移动，不能把文本框移空。`EnableMoves=false` 时不注册 |
