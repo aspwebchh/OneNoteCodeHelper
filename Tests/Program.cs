@@ -2376,6 +2376,38 @@ internal static class Program
             Rejects("最多插入", () => Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = "p2", position = "after", paragraphs = many.Take(20).ToArray() }));
             Equal(2, s.Revision); Equal(40, s.Inserted.Count);
         });
+        Test("insert_blocks blank items add body-look blank lines that verify as blank lines and undo removes them", () =>
+        {
+            var s = Snapshot(); var t = Tools(s); Read(t, s);
+            var result = Json(Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = "p1", position = "after", paragraphs = new object[] { new { blank = true } } }));
+            True(result.Contains("\"inserted\":[\"n1\"]")); True(result.Contains("\"blank_lines\":[\"n1\"]"));
+            True(Json(Invoke(t, "get_page_overview", new { })).Contains("\"blank\":true"));
+            var draft = AgentLayout.Find(s.Layout, "n1");
+            Equal(null, (string)draft.Attribute("quickStyleIndex")); Equal("0", (string)draft.Attribute("spaceBefore")); Equal("0", (string)draft.Attribute("spaceAfter"));
+            Insert(t, s, "n1", "补充");
+            True(Json(Invoke(t, "get_pending_changes", new { snapshot_id = s.SnapshotId })).Contains("\"inserted\":[{\"id\":\"n1\",\"text\":\"\"},{\"id\":\"n2\""));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.InsertedBlankLines); Equal(1, r.Inserted); Equal(1, r.OutlineUndo.Count);
+            True(r.Message.Contains("补空行 1 行")); True(r.Message.Contains("插入 1 段"));
+            Equal("第一段||补充|第二段", Texts(api.Page));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal("第一段|第二段", Texts(api.Page));
+        });
+        Test("insert_blocks blank items reject extra fields, missing text and empty items; blank lines count toward the quota", () =>
+        {
+            var s = Snapshot(); var t = Tools(s); Read(t, s);
+            object Add(params object[] items) => Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = "p1", position = "after", paragraphs = items });
+            Rejects("空行项", () => Add(new { blank = true, text = "x" }));
+            Rejects("空行项", () => Add(new { blank = true, preset_id = "body" }));
+            Rejects("要么", () => Add(new { preset_id = "body" }));
+            Rejects("要么", () => Add(new { blank = false }));
+            Rejects("字段不符合", () => Add(new { }));
+            Rejects("blank: true", () => Add(new { text = "  ", preset_id = "body" }));
+            Equal(0, s.Revision);
+            var blanks = Enumerable.Range(0, 20).Select(i => (object)new { blank = true }).ToArray();
+            for (var i = 0; i < 2; i++) Add(blanks);
+            Rejects("最多插入", () => Add(blanks));
+            Equal(2, s.Revision); Equal(40, s.Inserted.Count);
+        });
         Test("text_to_table converts pipe rows keeping links and bold, verifies and undo restores paragraphs", () =>
         {
             var s = Snapshot(Page(Paragraph("a", "对比如下："), Paragraph("r1", "| 名称 | 说明 |"), Paragraph("r2", "|---|:--:|"),
@@ -2730,6 +2762,29 @@ internal static class Program
             var off = Tools(new AgentPageSnapshot(TwoBoxes().ToString(), null, new AgentOptions { EnableMoves = false }));
             True(!Json(off.Definitions).Contains("merge_outlines")); True(!Json(off.Definitions).Contains("move_blocks")); True(!AgentRunner.SystemPrompt(off).Contains("merge_outlines"));
             Equal(("合并文本框 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"]}"));
+        });
+        Test("three boxes merge into one with a blank line at each seam; undo rebuilds all three", () =>
+        {
+            var s = Snapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("b", "乙")), Box("C", 500, Paragraph("c", "丙"))));
+            var t = Tools(s); Read(t, s);
+            // p1 甲；p2 乙；p3 丙
+            Merge(t, s, "B", "p1", "after"); Merge(t, s, "C", "p2", "after");
+            foreach (var target in new[] { "p2", "p3" })
+                Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = target, position = "before", paragraphs = new object[] { new { blank = true } } });
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(2, r.Merged); Equal(2, r.InsertedBlankLines); Equal(0, r.Inserted);
+            Equal(1, api.Page.Elements(One + "Outline").Count()); Equal("甲||乙||丙", BoxTexts(api.Page, "A"));
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+            Equal("Verified", undo.Status); Equal(3, api.Page.Elements(One + "Outline").Count()); Equal("甲|乙|丙", Texts(api.Page));
+        });
+        Test("blank line guidance and step text follow the registered tools", () =>
+        {
+            Equal(("插入段落 · 1 段 · 空行 1 行", AgentStepState.Done), AgentTools.DescribeStep("insert_blocks", "{\"paragraphs\":[{\"text\":\"x\"},{\"blank\":true}]}", "{\"ok\":true}"));
+            Equal(("插入段落 · 空行 2 行", AgentStepState.Done), AgentTools.DescribeStep("insert_blocks", "{\"paragraphs\":[{\"blank\":true},{\"blank\":true}]}", "{\"ok\":true}"));
+            True(AgentRunner.SystemPrompt(Tools(Snapshot(TwoBoxes()))).Contains(AgentRunner.MergeBlankPrompt));
+            True(!AgentRunner.SystemPrompt(Tools(Snapshot())).Contains(AgentRunner.MergeBlankPrompt));
+            var off = Tools(new AgentPageSnapshot(TwoBoxes().ToString(), null, new AgentOptions { EnableInsert = false }));
+            True(off.Has("merge_outlines")); True(!off.Has("insert_blocks")); True(!AgentRunner.SystemPrompt(off).Contains(AgentRunner.MergeBlankPrompt));
         });
         ReviewRegressions();
         Console.WriteLine($"Agent: {_passed} passed, {_failed} failed");

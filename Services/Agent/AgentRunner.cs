@@ -47,7 +47,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal const string MovePrompt = "用户明确要求调整段落顺序、或把段落挪到另一个文本框时用 move_blocks；不要自行重排内容。";
         internal const string MergePrompt = "用户明确要求把整个文本框并入另一个文本框时用 merge_outlines，它会删掉空了的源文本框；只挪一部分段落用 move_blocks。" +
             "文本框见 get_page_overview 的 outlines；不要自行合并文本框。";
-        internal const string InsertPrompt = "用户明确要求添加摘要、目录或小标题时用 insert_blocks 插入新段落，内容要忠于原文、简短；不要用它复制、改写或替换原有段落。";
+        internal const string InsertPrompt = "用户明确要求添加摘要、目录或小标题时用 insert_blocks 插入新段落，内容要忠于原文、简短；不要用它复制、改写或替换原有段落。" +
+            "用户明确要求在段落或文本框之间留空行时，用 insert_blocks 的 blank 项插入空行。";
+        /// <summary>merge_outlines 和 insert_blocks 都提供时追加。</summary>
+        internal const string MergeBlankPrompt = "用户要求合并后各部分之间留空行时，先全部合并，再在每个交界处插一行空行：target_id 用后一部分的第一个段落，position 用 before；" +
+            "交界处已经有空行（get_page_overview 里 reason 为 empty 或 blank 为 true 的段落）的不要再加。";
         internal const string TextTablePrompt = "用户明确要求把段落整理成表格时，先 read_blocks 再用 text_to_table。文本规整时用 delimiter：制表符用 tab，竖线用 pipe，" +
             "单元格里没有空格的空格分隔内容用 space；每条记录固定分成几行（如名称一行、地址一行）时用 lines_per_row 按记录合行，整行一格时 delimiter 用 none。" +
             "分隔方式不统一、键值对、有缺项或会错位等其他情况用 rows 逐格给出：每格逐字复制原文、按原文顺序，除分隔符外不删字，缺项用空字符串；" +
@@ -85,6 +89,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (tools.Has("move_blocks")) prompt.Append(MovePrompt);
             if (tools.Has("merge_outlines")) prompt.Append(MergePrompt);
             if (tools.Has("insert_blocks")) prompt.Append(InsertPrompt);
+            if (tools.Has("merge_outlines") && tools.Has("insert_blocks")) prompt.Append(MergeBlankPrompt);
             if (tools.Has("text_to_table")) prompt.Append(TextTablePrompt);
             if (new[] { "remove_blank_lines", "normalize_code_spacing", "set_indent", "move_blocks", "merge_outlines", "insert_blocks" }.Any(tools.Has)) prompt.Append(LayoutPrompt);
             return prompt.ToString();

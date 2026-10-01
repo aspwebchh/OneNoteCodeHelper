@@ -190,6 +190,21 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         /// <summary>
+        /// 新补的空行（insert_blocks 的 blank 项、代码框间隔补入）：只取正文字体外观，不引用标题、列表或原生样式的段间距，用 &amp;nbsp; 占位。
+        /// styles 只用来算外观，不往里加定义。
+        /// </summary>
+        internal static XElement NewBlankLine(string id, AgentOptions options, XElement styles)
+        {
+            var blank = NewParagraph(id, "\u00a0", "body", null, options, new XElement(styles));
+            blank.Attribute("quickStyleIndex")?.Remove();
+            var appearance = Css.Read((string)blank.Attribute("style"));
+            Css.Merge(appearance, Css.Emphasis(ParagraphStyles.Definition("body", options)));
+            blank.SetAttributeValue("style", Css.Write(appearance));
+            blank.SetAttributeValue("spaceBefore", "0"); blank.SetAttributeValue("spaceAfter", "0");
+            return blank;
+        }
+
+        /// <summary>
         /// 整框指纹：文本框的全部 XML（不含选中状态、修改时间和 OneNote 后台补上的图片识别文字），加上框内引用的样式和标记定义。
         /// 提交时比较，处理期间文本框里有任何改动都不整框替换；撤销时比较写入后的指纹。
         /// </summary>

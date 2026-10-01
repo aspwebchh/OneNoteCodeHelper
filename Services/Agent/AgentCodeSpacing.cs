@@ -217,13 +217,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     if (gap == 0)
                     {
                         var id = "n" + (snapshot.Inserted.Count + result.Inserted.Count + 1);
-                        // 只取正文字体外观，空行不引用标题、列表或原生样式的段间距。
-                        var inserted = AgentLayout.NewParagraph(id, "\u00a0", "body", null, snapshot.Options, new XElement(snapshot.DraftStyles));
-                        inserted.Attribute("quickStyleIndex")?.Remove();
-                        var appearance = Css.Read((string)inserted.Attribute("style"));
-                        Css.Merge(appearance, Css.Emphasis(ParagraphStyles.Definition("body", snapshot.Options)));
-                        inserted.SetAttributeValue("style", Css.Write(appearance));
-                        inserted.SetAttributeValue("spaceBefore", "0"); inserted.SetAttributeValue("spaceAfter", "0");
+                        var inserted = AgentLayout.NewBlankLine(id, snapshot.Options, snapshot.DraftStyles);
                         LayoutNode(right).AddBeforeSelf(inserted);
                         result.Inserted.Add(new AgentInserted { Id = id, OutlineId = outline, Text = "" });
                         result.Changes.Add(new AgentLayoutChange { Kind = "inserted_blank", OutlineId = outline, Ids = new[] { id } });

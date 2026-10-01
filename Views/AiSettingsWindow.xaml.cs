@@ -52,7 +52,7 @@ namespace OneNoteCodeHelper.Views
             ["EnableBlankLineRemoval"] = (1, "删除多余的空行"),
             ["EnableIndent"] = (1, "调整缩进层级"),
             ["EnableMoves"] = (1, "移动段落、合并文本框"),
-            ["EnableInsert"] = (1, "插入摘要、目录、小标题"),
+            ["EnableInsert"] = (1, "插入摘要、目录、小标题和空行"),
             ["EnableTextTables"] = (1, "把文字转成表格"),
             ["SendThinking"] = (2, "发送思考参数"),
             ["ReplayReasoning"] = (2, "回传思考内容"),

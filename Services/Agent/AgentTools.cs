@@ -253,12 +253,17 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             if (structural && snapshot.Options.EnableInsert)
             {
-                var item = new Dictionary<string, AgentSchema> { ["text"] = AgentSchema.Short(MaxInsertChars), ["preset_id"] = AgentSchema.Str("heading1", "heading2", "body", "quote") };
+                var item = new Dictionary<string, AgentSchema> { ["text"] = AgentSchema.Short(MaxInsertChars), ["preset_id"] = AgentSchema.Str("heading1", "heading2", "body", "quote"),
+                    ["blank"] = new AgentSchema { Type = "boolean" } };
                 if (snapshot.Options.EnableLists) item["list"] = AgentSchema.Str("bullet", "number");
-                var paragraphs = AgentSchema.Array(AgentSchema.Obj(item, "text", "preset_id"));
+                // 文字项要 text 和 preset_id，空行项只写 blank，由 InsertBlocks 逐项校验。
+                var entry = AgentSchema.Obj(item);
+                entry.NonEmpty = true;
+                var paragraphs = AgentSchema.Array(entry);
                 paragraphs.MaxItems = MaxInsertPerCall;
                 Register("insert_blocks", $"在目标段落前面或后面插入同级的新段落：只写纯文字、不含换行，使用预设样式。每次最多 {MaxInsertPerCall} 段，每段最多 {MaxInsertChars} 字，" +
-                    $"每个任务最多 {MaxInserted} 段、{MaxInsertedChars} 字。新段落的 ID 为 n1、n2…，可以作为之后插入、移动的目标。",
+                    $"每个任务最多 {MaxInserted} 段、{MaxInsertedChars} 字。新段落的 ID 为 n1、n2…，可以作为之后插入、移动的目标。" +
+                    "需要空行时这一项只写 {\"blank\": true}（不带 text、preset_id、list），插入一行正文外观的空段落，比如合并文本框后隔开交界处；空行也算段数，已经有空行的地方不要再加。",
                     AgentSchema.Obj(new Dictionary<string, AgentSchema>
                     {
                         ["snapshot_id"] = AgentSchema.Str(), ["target_id"] = AgentSchema.Str(), ["position"] = AgentSchema.Str("before", "after"), ["paragraphs"] = paragraphs
@@ -452,7 +457,11 @@ namespace OneNoteCodeHelper.Services.Agent
                     detail = CountOf(args, "block_ids");
                     break;
                 case "insert_blocks":
-                    detail = AiClient.Get(args, "paragraphs") is IList inserted ? $"{inserted.Count} 段" : null;
+                    if (AiClient.Get(args, "paragraphs") is IList inserted)
+                    {
+                        var blankCount = inserted.Cast<object>().Count(p => Equals(AiClient.Get(p, "blank"), true));
+                        detail = JoinDetail(inserted.Count > blankCount ? $"{inserted.Count - blankCount} 段" : null, blankCount > 0 ? $"空行 {blankCount} 行" : null);
+                    }
                     break;
                 case "merge_outlines":
                     detail = AiClient.Get(outcome, "moved") is IList merged ? $"{merged.Count} 段" : null;
@@ -575,7 +584,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 // 按结构草稿里的顺序和层级列出，已删除的空行不在其中，新插入的段落带 inserted。container_id 是现在所在的文本框。
                 blocks = items.Skip(offset).Take(100).Select(x => x.Block == null
                     ? (object)new { id = x.Id, container_id = ContainerOf(x.Node), parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
-                        inserted = true, summary = x.New.Text.Substring(0, Math.Min(80, x.New.Text.Length)) }
+                        inserted = true, blank = x.New.Text.Length == 0, summary = x.New.Text.Substring(0, Math.Min(80, x.New.Text.Length)) }
                     : new { id = x.Id, container_id = ContainerOf(x.Node), parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
                         table_id = x.Block.TableId, editable = x.Block.Editable, reason = x.Block.ProtectedReason,
                         list = AgentMarks.ListKind(x.Block.Draft), tags = AgentMarks.Describe(x.Block.Draft, _snapshot.DraftTags),
@@ -1194,20 +1203,35 @@ namespace OneNoteCodeHelper.Services.Agent
             var candidate = new XElement(_snapshot.Layout);
             var target = Node(candidate, (string)args["target_id"], out _);
             var items = ((IList)args["paragraphs"]).Cast<IDictionary<string, object>>().ToList();
-            var texts = items.Select(i => ((string)i["text"]).Trim()).ToList();
-            if (texts.Any(t => t.Length == 0)) throw new AiException("插入的段落不能是空白。");
+            var blanks = items.Select(i => i.TryGetValue("blank", out var b) && (bool)b).ToList();
+            for (var i = 0; i < items.Count; i++)
+            {
+                if (blanks[i] && new[] { "text", "preset_id", "list" }.Any(items[i].ContainsKey)) throw new AiException("空行项只写 blank: true，不要带 text、preset_id 或 list。");
+                if (!blanks[i] && !(items[i].ContainsKey("text") && items[i].ContainsKey("preset_id"))) throw new AiException("每项要么写 text 和 preset_id，要么写 blank: true 插入空行。");
+            }
+            // 空行的文字记为空，和代码框间隔补的空行一样。
+            var texts = items.Select((i, n) => blanks[n] ? "" : ((string)i["text"]).Trim()).ToList();
+            if (texts.Where((t, n) => !blanks[n]).Any(t => t.Length == 0)) throw new AiException("插入的段落不能是空白；要插空行请写 blank: true。");
             if (texts.Any(t => t.IndexOfAny(Breaks) >= 0)) throw new AiException("插入的文字不能含换行或制表符，每段单独写一项。");
             if (_snapshot.Inserted.Count + items.Count > MaxInserted || _snapshot.Inserted.Sum(i => i.Text.Length) + texts.Sum(t => t.Length) > MaxInsertedChars)
                 throw new AiException($"每个任务最多插入 {MaxInserted} 段、{MaxInsertedChars} 字。");
             var styles = new XElement(_snapshot.DraftStyles);
             var outline = OutlineOf(target);
-            var created = items.Select((item, i) => AgentLayout.NewParagraph("n" + (_snapshot.Inserted.Count + i + 1), texts[i], (string)item["preset_id"],
-                item.TryGetValue("list", out var list) ? (string)list : null, _snapshot.Options, styles)).ToList();
+            var created = items.Select((item, i) =>
+            {
+                var id = "n" + (_snapshot.Inserted.Count + i + 1);
+                return blanks[i] ? AgentLayout.NewBlankLine(id, _snapshot.Options, styles)
+                    : AgentLayout.NewParagraph(id, texts[i], (string)item["preset_id"], item.TryGetValue("list", out var list) ? (string)list : null, _snapshot.Options, styles);
+            }).ToList();
             if ((string)args["position"] == "before") target.AddBeforeSelf(created); else target.AddAfterSelf(created);
-            PublishLayout(candidate, "inserted", created.Select(e => (outline, (string)null, AgentLayout.KeyOf(e))).ToList());
+            // 空行记 inserted_blank：提交时按空行核验（允许 OneNote 把 &nbsp; 回存成空 T），结果计入补空行。
+            var added = created.Where((e, i) => !blanks[i]).Select(AgentLayout.KeyOf).ToArray();
+            var blankIds = created.Where((e, i) => blanks[i]).Select(AgentLayout.KeyOf).ToArray();
+            PublishLayout(candidate, new[] { ("inserted", added), ("inserted_blank", blankIds) }.Where(c => c.Item2.Length > 0)
+                .Select(c => new AgentLayoutChange { Kind = c.Item1, OutlineId = outline, Ids = c.Item2 }).ToList());
             _snapshot.DraftStyles.ReplaceNodes(styles.Elements().Select(e => new XElement(e)));
             _snapshot.Inserted.AddRange(created.Select((e, i) => new AgentInserted { Id = AgentLayout.KeyOf(e), OutlineId = outline, Text = texts[i] }));
-            return new { ok = true, draft_revision = _snapshot.Revision, inserted = created.Select(AgentLayout.KeyOf).ToArray() };
+            return new { ok = true, draft_revision = _snapshot.Revision, inserted = created.Select(AgentLayout.KeyOf).ToArray(), blank_lines = blankIds };
         }
 
         private static List<string> Ids(IDictionary<string, object> args, string key)
