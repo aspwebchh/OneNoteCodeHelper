@@ -137,7 +137,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         else
                         {
                             item.Monospace = rich.Monospace(page).All;
-                            if (block != null && !block.CodeCandidate && block.ProtectedReason != "highlighted_code" && !item.Monospace) item.Kind = "text";
+                            if (block?.Editable == true && !item.Monospace) item.Kind = "text";
                             else if (snapshot.Inserted.Any(n => n.Id == key && n.Text.Length > 0)) item.Kind = "text";
                         }
                     }

@@ -557,12 +557,23 @@ namespace OneNoteCodeHelper.Services.Agent
         internal static string BlankFormat(XElement oe, XElement page)
         {
             var rich = new AgentRichText(oe);
+            var breaks = "|blank_breaks=" + rich.Text.Count(c => c == '\n' || c == '\r').ToString(CultureInfo.InvariantCulture);
+            var styles = rich.IsSingleBlank ? rich.BlankStyles(page) : null;
+            var signatures = styles?.Select(Css.Write).ToList();
+            if (signatures == null || signatures.Any(s => s != signatures[0]))
+            {
+                // 混合样式不享受空白字符归一化；完整逐字核对，并保留没有字符的空 T 的样式。
+                // 相邻相同样式合并，OneNote 拆分、合并文字片段不算改变格式。
+                var ordered = signatures?.Where((s, i) => i == 0 || s != signatures[i - 1]);
+                return SemanticFormat(oe, page) + "|blank=exact|styles=" +
+                    (ordered == null ? "" : string.Concat(ordered.Select(s => s.Length.ToString(CultureInfo.InvariantCulture) + ":" + s))) + breaks;
+            }
             var normalized = new XElement(oe);
-            normalized.SetAttributeValue("style", Css.Write(rich.BlankStyle(page)));
+            normalized.SetAttributeValue("style", signatures[0]);
             normalized.Elements(One + "T").Remove();
             normalized.Add(new XElement(One + "T", new XCData("x")));
-            // 只归一化空白字符，不能把多行空白当成一个空段落。
-            return SemanticFormat(normalized, page) + "|blank_breaks=" + rich.Text.Count(c => c == '\n' || c == '\r').ToString(CultureInfo.InvariantCulture);
+            // 只有所有片段样式一致的单行空段落，才允许空格、&nbsp; 与空 T 等价。
+            return SemanticFormat(normalized, page) + "|blank=uniform" + breaks;
         }
         private static string NormalizeSpacing(XElement e, string key) => double.TryParse((string)e.Attribute(key), NumberStyles.Float, CultureInfo.InvariantCulture, out var n)
             ? n.ToString("0.###", CultureInfo.InvariantCulture) : "0";

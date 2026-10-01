@@ -339,12 +339,24 @@ namespace OneNoteCodeHelper.Services.Agent
             _pieces.All(p => !p.Break && p.Text.All(c => char.IsWhiteSpace(c) && c != '\n' && c != '\r') &&
                 p.Path.All(tag => tag.Name.LocalName != "a"));
 
-        /// <summary>OneNote 将空段落的 &amp;nbsp; 回存为空 T；空行外观仍须按字体等有效属性核验。</summary>
-        internal Dictionary<string, string> BlankStyle(XElement page)
+        /// <summary>空行各文字片段的有效样式；空 T 也须核对自身样式，不能只取第一个片段。</summary>
+        internal List<Dictionary<string, string>> BlankStyles(XElement page)
         {
             if (!string.IsNullOrWhiteSpace(Text)) throw new AiException("期望的空行出现了文字。");
-            var piece = _pieces.FirstOrDefault(p => !p.Break) ?? _pieces.FirstOrDefault();
-            return piece == null ? Css.Effective(_oe, page) : PieceStyle(piece, _oe.Elements(OneNoteApi.One + "T").ToList(), page, out _);
+            var runs = _oe.Elements(OneNoteApi.One + "T").ToList();
+            var styles = new List<Dictionary<string, string>>();
+            for (var run = 0; run < runs.Count; run++)
+            {
+                var pieces = _pieces.Where(p => p.Run == run && p.Text.Length > 0).ToList();
+                if (pieces.Count > 0) styles.AddRange(pieces.Select(p => PieceStyle(p, runs, page, out _)));
+                else
+                {
+                    var style = Css.Effective(runs[run], page);
+                    style.Remove("text-align"); // 和文字片段一样，段落对齐另行核验。
+                    styles.Add(style);
+                }
+            }
+            return styles;
         }
 
         private static Dictionary<string, string> PieceStyle(Piece p, List<XElement> runs, XElement page, out string link)

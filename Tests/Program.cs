@@ -1989,6 +1989,125 @@ internal static class Program
                 Equal("PartiallyApplied", r.Status); Equal(1, r.Unverified); Equal(0, r.RemovedSoftLines);
             }
         });
+        Test("code spacing rejects changes to later inline styles of uniform blank readback", () =>
+        {
+            foreach (var existing in new[] { false, true })
+            foreach (var style in new[] { "font-size:80pt", "font-family:Calibri", "color:#FF0000", "font-weight:bold", "font-style:italic", "text-decoration:underline" })
+            {
+                var s = Snapshot(existing ? Page(Paragraph("a", "正文"), Paragraph("e", "&nbsp;<br>&nbsp;<br>&nbsp;"), SpacingBox("code")) :
+                    Page(Paragraph("a", "正文"), SpacingBox("code")));
+                var t = Tools(s); Read(t, s); Normalize(t, s);
+                var api = new FakePage(s.Page);
+                api.AfterSave = () =>
+                {
+                    var blank = existing ? AgentCommitter.Find(api.Page, "e") : api.Page.Descendants(One + "OE")
+                        .Single(e => ((string)e.Attribute("objectID") ?? "").StartsWith("new-", StringComparison.Ordinal));
+                    blank.Element(One + "T").ReplaceNodes(new XCData("&nbsp;<span style='" + style + "'>&nbsp;</span>"));
+                };
+                var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+                if (r.Status != "PartiallyApplied") throw new Exception($"Changed blank was verified: existing={existing}, style={style}, status={r.Status}");
+                Equal(1, r.Unverified);
+                Equal(0, r.RemovedSoftLines); Equal(0, r.InsertedBlankLines);
+            }
+        });
+        Test("code spacing strictly verifies every style of an existing mixed blank", () =>
+        {
+            foreach (var style in new[] { "font-size:20pt", "font-size:80pt", "font-family:Arial;font-size:20pt", "font-size:20pt;color:#FF0000",
+                "font-size:20pt;font-weight:bold", "font-size:20pt;font-style:italic", "font-size:20pt;text-decoration:underline", null })
+            {
+                var blank = Paragraph("e", "&nbsp;<span style='font-size:20pt'>&nbsp;</span><br>&nbsp;<br>&nbsp;");
+                blank.SetAttributeValue("style", "font-family:Calibri;font-size:11pt;color:#222222");
+                var s = Snapshot(Page(Paragraph("a", "正文"), blank, SpacingBox("code"))); var t = Tools(s); Read(t, s); Normalize(t, s);
+                var api = new FakePage(s.Page);
+                api.AfterSave = () => AgentCommitter.Find(api.Page, "e").Element(One + "T").ReplaceNodes(new XCData(style == null ? "" :
+                    "&nbsp;<span style='" + style + "'>&nbsp;</span>"));
+                var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+                var preserved = style == "font-size:20pt";
+                Equal(preserved ? "Verified" : "PartiallyApplied", r.Status); Equal(preserved ? 0 : 1, r.Unverified);
+                Equal(preserved ? 2 : 0, r.RemovedSoftLines); Equal(0, r.InsertedBlankLines);
+            }
+        });
+        Test("mixed blank styles survive native run splitting, verify, undo and later edit protection", () =>
+        {
+            foreach (var laterEdit in new[] { false, true })
+            {
+                var blank = Paragraph("e", "&nbsp;<span style='font-size:20pt'><b>&nbsp;</b></span><br>&nbsp;<br>&nbsp;");
+                blank.SetAttributeValue("style", "font-family:Calibri;font-size:11pt;color:#222222");
+                var s = Snapshot(Page(Paragraph("a", "正文"), blank, SpacingBox("code"))); var t = Tools(s); Read(t, s); Normalize(t, s);
+                var api = new FakePage(s.Page);
+                api.AfterSave = () =>
+                {
+                    var e = AgentCommitter.Find(api.Page, "e"); e.Elements(One + "T").Remove();
+                    e.Add(new XElement(One + "T", new XCData("&nbsp;")),
+                        new XElement(One + "T", new XCData("<strong><span style='font-size:20pt'>&nbsp;</span></strong>")));
+                };
+                var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(2, r.RemovedSoftLines); Equal(1, r.OutlineUndo.Count);
+                Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.CreateDraftPage(), "e"), s.CreateDraftPage()),
+                    AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "e"), api.Page));
+                api.AfterSave = null;
+                if (laterEdit) AgentCommitter.Find(api.Page, "e").SetAttributeValue("style", "font-family:Arial;font-size:30pt");
+                var writes = api.Writes; var beforeUndo = api.Page.ToString();
+                var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+                if (laterEdit) { True(undo.Conflicts > 0); Equal(writes, api.Writes); Equal(beforeUndo, api.Page.ToString()); }
+                else
+                {
+                    Equal("Verified", undo.Status);
+                    Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "e"), s.Page),
+                        AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "e"), api.Page));
+                }
+            }
+        });
+        Test("blank projection permits uniform native runs but keeps mixed styles and empty-T formatting", () =>
+        {
+            string Format(params XElement[] runs)
+            {
+                var e = new XElement(One + "OE", new XAttribute("objectID", "e"), new XAttribute("style", "font-family:Calibri;font-size:11pt;color:#222222"), runs);
+                var page = Page(e); return AgentPageSnapshot.BlankFormat(AgentCommitter.Find(page, "e"), page);
+            }
+            XElement Run(string html, string style = null) => new XElement(One + "T", style == null ? null : new XAttribute("style", style), new XCData(html));
+            var uniform = Format(Run("&nbsp;"));
+            Equal(uniform, Format(Run(""))); Equal(uniform, Format(Run(" ")));
+            Equal(uniform, Format(Run("<span style='font-size:11pt'>&nbsp;</span>"), Run("&nbsp;")));
+            Equal(uniform, Format(Run("", "font-size:11pt")));
+            True(uniform != Format(Run("", "font-size:80pt")));
+            True(uniform != Format(Run("&nbsp;"), Run("", "font-size:80pt")));
+            var mixed = Format(Run("&nbsp;<span style='font-size:20pt'><b>&nbsp;</b></span>"));
+            Equal(mixed, Format(Run("&nbsp;"), Run("<strong>&nbsp;</strong>", "font-size:20pt")));
+            True(mixed != Format(Run("&nbsp;"), Run("<strong>&nbsp;</strong>", "font-size:80pt")));
+            True(mixed != Format(Run("")));
+        });
+        Test("code spacing skips protected text on both sides and still normalizes independent boundaries", () =>
+        {
+            foreach (var beforeCode in new[] { false, true })
+            foreach (var selected in new[] { false, true })
+            foreach (var gap in new[] { (Paragraphs: 0, Soft: 0), (Paragraphs: 1, Soft: 0), (Paragraphs: 3, Soft: 0), (Paragraphs: 0, Soft: 3), (Paragraphs: 1, Soft: 2) })
+            {
+                var text = "调用 <span style='font-family:Consolas'>foo()</span>";
+                var soft = string.Concat(Enumerable.Repeat(beforeCode ? "<br>&nbsp;" : "&nbsp;<br>", gap.Soft));
+                var protectedText = Paragraph("protected", beforeCode ? text + soft : soft + text);
+                var blanks = Enumerable.Range(0, gap.Paragraphs).Select(i => Paragraph("gap" + i, "&nbsp;")).ToList();
+                foreach (var blank in blanks) blank.SetAttributeValue("style", "font-family:Consolas");
+                var page = Page(beforeCode ? new[] { protectedText }.Concat(blanks).Concat(new[] { SpacingBox("code"), Paragraph("normal", "普通正文") }).ToArray() :
+                    new[] { Paragraph("normal", "普通正文"), SpacingBox("code") }.Concat(blanks).Concat(new[] { protectedText }).ToArray());
+                var selection = selected ? new HashSet<string>(page.Descendants(One + "OE").Attributes("objectID").Select(a => a.Value)) : null;
+                var s = new AgentPageSnapshot(page.ToString(), selection, new AgentOptions());
+                var api = new FakePage(s.Page); var t = new AgentTools(s, new AgentCommitter(api), CancellationToken.None); Read(t, s);
+                Equal("protected_code", s.Blocks.Single(b => b.ObjectId == "protected").ProtectedReason);
+                var result = Normalize(t, s);
+                Equal(1, AiClient.Get(result, "inserted_paragraphs")); Equal(0, AiClient.Get(result, "removed_paragraphs")); Equal(0, AiClient.Get(result, "removed_soft_lines"));
+                var settled = gap.Paragraphs + gap.Soft == 1;
+                True(Json(result).Contains(settled ? "\"skipped\":[]" : "\"reason\":\"protected_text\""));
+                Equal(0, AgentCodeSpacing.TrimCount(AgentCommitter.Find(s.Layout, "protected")));
+                foreach (var blank in blanks) True(AgentCommitter.Find(s.Layout, (string)blank.Attribute("objectID")) != null);
+                Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+                Equal("Verified", t.Report.Status); Equal(1, t.Report.InsertedBlankLines); Equal(settled ? 0 : 1, t.Report.SpacingSkipped.Length);
+                Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "protected"), s.Page),
+                    AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "protected"), api.Page));
+                Equal("Verified", new AgentCommitter(api).Undo(s.PageId, t.Report, s.Options, CancellationToken.None).Status);
+                Equal(Texts(s.Page), Texts(api.Page));
+            }
+        });
         Test("code spacing normalization does not exempt untouched or linked blank paragraphs", () =>
         {
             var s = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e", "&nbsp;<br>&nbsp;<br>&nbsp;"), SpacingBox("code"),
