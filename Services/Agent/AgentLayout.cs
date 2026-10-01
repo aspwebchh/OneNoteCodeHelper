@@ -63,7 +63,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>去掉结构草稿的私有属性，得到能交给 OneNote 的 XML。</summary>
         internal static void Strip(XElement root)
         {
-            foreach (var a in root.DescendantsAndSelf().Attributes(Key).ToList()) a.Remove();
+            foreach (var a in root.DescendantsAndSelf().Attributes().Where(a => a.Name.Namespace == Key.Namespace).ToList()) a.Remove();
         }
 
         /// <summary>

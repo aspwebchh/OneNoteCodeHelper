@@ -37,7 +37,12 @@ namespace OneNoteCodeHelper.Services.Agent
 
         // 改变段落结构的工具。删空行可以随整理排版使用，其余只在用户明确要求时使用。
         internal const string BlankLinePrompt = "用户要求整理、美化排版或删空行时，可以用 remove_blank_lines 删多余的空行：一般用 collapse（连续空行留一行，删掉文本框首尾的空行），" +
-            "只有用户要求删掉全部空行时才用 all。";
+            "只有用户要求删掉全部空行时才用 all。用户只要求代码框与文字之间保留一个空行时，不要调用全范围的 remove_blank_lines。";
+        internal const string CodeSpacingPrompt = "用户明确要求代码块（代码框）与文字之间一个空行、多删少补时，使用 normalize_code_spacing。" +
+            "先确定代码范围并用 highlight_code 转换，首尾的分隔空行不要并入源码，代码内部空行必须保留；" +
+            "完成其余格式和结构操作后最后规范化间隔，再检查并 finish_edit；规范化之后再调整结构、转换代码或清理 Markdown，会撤回已做的间隔调整，需要重新调用。这个工具同时计算空段落与文字首尾的 Shift+Enter 空行，" +
+            "不要用段间距模拟空行，也不要用 insert_blocks 插入空白；只处理交界处，不清理文字之间、代码之间或文本框首尾的空行。" +
+            "skipped 中无法调整的边界须如实说明。";
         internal const string IndentPrompt = "用户明确要求调整缩进或层级时用 set_indent；不要为了排版美观自行调整层级。";
         internal const string MovePrompt = "用户明确要求调整段落顺序、或把段落挪到另一个文本框时用 move_blocks；不要自行重排内容。";
         internal const string MergePrompt = "用户明确要求把整个文本框并入另一个文本框时用 merge_outlines，它会删掉空了的源文本框；只挪一部分段落用 move_blocks。" +
@@ -75,12 +80,13 @@ namespace OneNoteCodeHelper.Services.Agent
             if (tools.Has("set_table_style")) prompt.Append(TablePrompt);
             if (tools.Has("read_image_text")) prompt.Append(ImagePrompt);
             if (tools.Has("remove_blank_lines")) prompt.Append(BlankLinePrompt);
+            if (tools.Has("normalize_code_spacing")) prompt.Append(CodeSpacingPrompt);
             if (tools.Has("set_indent")) prompt.Append(IndentPrompt);
             if (tools.Has("move_blocks")) prompt.Append(MovePrompt);
             if (tools.Has("merge_outlines")) prompt.Append(MergePrompt);
             if (tools.Has("insert_blocks")) prompt.Append(InsertPrompt);
             if (tools.Has("text_to_table")) prompt.Append(TextTablePrompt);
-            if (new[] { "remove_blank_lines", "set_indent", "move_blocks", "merge_outlines", "insert_blocks" }.Any(tools.Has)) prompt.Append(LayoutPrompt);
+            if (new[] { "remove_blank_lines", "normalize_code_spacing", "set_indent", "move_blocks", "merge_outlines", "insert_blocks" }.Any(tools.Has)) prompt.Append(LayoutPrompt);
             return prompt.ToString();
         }
 

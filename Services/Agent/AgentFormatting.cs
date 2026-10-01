@@ -333,6 +333,20 @@ namespace OneNoteCodeHelper.Services.Agent
             return (any, any && all);
         }
 
+        /// <summary>能按空 T 归一化的单行空段落：必须有 T，无链接、换行、标记或其他对象。</summary>
+        internal bool IsSingleBlank => _oe.Elements(OneNoteApi.One + "T").Any() &&
+            _oe.Elements().All(e => e.Name == OneNoteApi.One + "T" || e.Name == OneNoteApi.One + "Meta") &&
+            _pieces.All(p => !p.Break && p.Text.All(c => char.IsWhiteSpace(c) && c != '\n' && c != '\r') &&
+                p.Path.All(tag => tag.Name.LocalName != "a"));
+
+        /// <summary>OneNote 将空段落的 &amp;nbsp; 回存为空 T；空行外观仍须按字体等有效属性核验。</summary>
+        internal Dictionary<string, string> BlankStyle(XElement page)
+        {
+            if (!string.IsNullOrWhiteSpace(Text)) throw new AiException("期望的空行出现了文字。");
+            var piece = _pieces.FirstOrDefault(p => !p.Break) ?? _pieces.FirstOrDefault();
+            return piece == null ? Css.Effective(_oe, page) : PieceStyle(piece, _oe.Elements(OneNoteApi.One + "T").ToList(), page, out _);
+        }
+
         private static Dictionary<string, string> PieceStyle(Piece p, List<XElement> runs, XElement page, out string link)
         {
             var css = Css.Effective(runs[p.Run], page);

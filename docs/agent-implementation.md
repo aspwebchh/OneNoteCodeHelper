@@ -33,6 +33,7 @@
 | `set_table_style` | `snapshot_id`、`table_ids`、`style`（`borders`、`header_row`、`header_shading` 至少一项）；不需要先读。`EnableTableStyles=false` 或页面没有可编辑表格时不注册 |
 | `read_image_text` | `snapshot_id`、`image_ids`；只读，返回 OneNote 识别出的图片文字，每张最多 4000 字并标记 `truncated`。页面上有带识别文字的图片时才注册 |
 | `remove_blank_lines` | `snapshot_id`、`mode`（collapse/all）；collapse 同「排版优化」，连续空行留一行、删掉文本框和单元格首尾的空行；all 删掉全部，但不会把一摞段落删空。带列表、标记、下级段落的空段落和已排转换里的空行不删。`EnableBlankLineRemoval=false` 或没有可删空行时不注册 |
+| `normalize_code_spacing` | `snapshot_id`；仅规范化已有或待转换代码框与文字的交界，空段落和文字首尾的 Shift+Enter 空行合计一行，多删少补。代码内部、文字之间、代码之间和文本框首尾不处理；各普通单元格独立计算。删除受 `EnableBlankLineRemoval` 控制，补入受 `EnableInsert` 和现有插入配额控制，两者都关闭时不注册。返回 `removed_paragraphs`、`removed_soft_lines`、`inserted_paragraphs`、`noop`、`skipped` 和修订号。先转换代码、完成结构操作，最后调用；之后再调用结构工具、`highlight_code`、`text_to_table` 或 `strip_markdown` 时先撤回已做的间隔调整。提交前复核，间隔不符时要求重新规范化，最后一轮则按当前草稿自动重新规范化后提交 |
 | `set_indent` | `snapshot_id`、`block_ids`、`direction`（in/out）；in 挂到前一个兄弟段落下，out 移到上级之后、原来排在后面的兄弟段落改挂到它下面，上下顺序不变。上级也在列表里的段落跟着上级走。`EnableIndent=false` 时不注册 |
 | `move_blocks` | `snapshot_id`、`block_ids`、`target_id`、`position`（before/after）；连同下级段落按原顺序移到目标前后，成为目标的同级段落。可以移到另一个文本框，单元格里的段落只能在同一单元格里移动，不能把文本框移空。`EnableMoves=false` 时不注册 |
 | `merge_outlines` | `snapshot_id`、`source_id`（源文本框的 container_id）、`target_id`、`position`；源文本框的全部顶层段落（含表格、图片、空行）按顺序移到目标前后，提交时删掉源文本框。目标不能在源文本框或单元格里；只处理选区时源文本框里的文字段落必须都在选区内。`EnableMoves=false` 或可调整结构的文本框少于两个时不注册 |
@@ -116,6 +117,21 @@
   已经不在页面上的对象（删掉的空行、转换前的段落、表格外层）去掉 ID 重建，插入的段落和新表格写回时一并删除。
 - **转表格**复用代码框转换：选段规则相同（连续、下级段落在范围内、不带列表和标记），没有结构改动的文本框里按段落补丁提交，撤销时换回原段落。
   单元格复制源段落的 `style` 和 `T`，用 `AgentRichText.Keep` 截取，保留加粗和链接。
+
+- **代码框间隔**：`AgentCodeSpacing` 将已有表格代码框和待转换代码范围作为整体识别，不进入代码内部。
+  框外空段落的字体不影响判断；空段落仍必须没有列表、标记、对象或下级段落，无 `T` 的占位必须有唯一身份。
+  段内删行以私有 `trim-leading` / `trim-trailing` 行数保存在结构草稿中，`CreateDraftPage` 套完文字与格式草稿后再按完整空白行截取。
+  结构检查及提交器只允许这些记录指定的空白删除，其余文字、链接和格式仍逐字核验；写回前统一去掉私有属性。
+  有段内删行的文本框也走整框提交、核验和撤销，冲突时不把删行单独作为文字补丁提交。
+  首次产生删补时记下调整前的结构草稿；之后的结构和转换工具在这份草稿上执行，补入、删掉的空段和段内删行一起撤回，工具失败或没有改动时原样恢复，避免旧的删补留在已不相邻的段落上。
+  格式工具不撤回；标题的「仅设置外观」回退写回格式草稿后，按记录重新截取空白行。
+  结果另计 `removed_soft_lines`、`inserted_blank_lines`、`spacing_skipped`；独立插入的空行使用正文外观、零段前后间距和 `&nbsp;` 占位。
+  Office16 实测会把空段落的 `&nbsp;` 回存成空 `T`。内容核验只对本次专用工具新补的空段落、或删段内空行后剩下一行空白的原有段落允许空格、`&nbsp;` 与空 `T` 等价；
+  两侧必须可解析、有 `T` 且没有换行、链接、标记或其他对象，仍按期望节点的位置严格核对身份、层级和顺序。其余段落不享受归一化豁免。
+  空行格式投影保留实际换行数量，并继续核对有效字体、字号、颜色、对齐及段间距；空行数量或内容不符报告写回未确认，不记录空行调整的成功计数和整框撤销。
+  本机通过 API 创建测试页时，OneNote 丢掉了写入的全部 `<br>`（包括段中的，如 `A<br><br>B` 回读为 `AB`），专用真实探针按回读基线计算期望数量，实际没有覆盖段内空行；
+  软换行交界只由离线回归覆盖，写回段内空行的真机行为尚未验证。
+  专用真实往返探针：构建 Agent 测试程序后运行 `OneNoteCodeHelper.AgentTests.exe --probe-code-spacing <绝对输出目录>`，只创建新的专用分区和测试页，保留 before/expected/after/after-undo XML，不调用 AI。
 
 ### 跨文本框与合并
 

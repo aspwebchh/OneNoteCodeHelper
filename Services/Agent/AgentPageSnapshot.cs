@@ -249,6 +249,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int Revision;
         internal bool Frozen;
         internal bool SelectionOnly;
+        internal bool CodeSpacingRequested;
         internal static XNamespace One => OneNoteApi.One;
 
         internal AgentPageSnapshot(string xml, ISet<string> selection, AgentOptions options)
@@ -395,7 +396,7 @@ namespace OneNoteCodeHelper.Services.Agent
             .Select(e => (string)e.Attribute("objectID")).Where(id => !string.IsNullOrEmpty(id)));
 
         /// <summary>草稿页面：结构草稿（默认当前的 <see cref="Layout"/>）加上格式草稿和草稿里的样式、标记定义。段落仍带 <see cref="AgentLayout.Key"/>。</summary>
-        internal XElement CreateDraftPage(XElement layout = null, IDictionary<AgentBlock, XElement> formats = null, XElement styles = null, XElement tags = null)
+        internal XElement CreateDraftPage(XElement layout = null, IDictionary<AgentBlock, XElement> formats = null, XElement styles = null, XElement tags = null, bool applyCodeSpacing = true)
         {
             var page = new XElement(layout ?? Layout);
             page.Elements(One + "QuickStyleDef").Remove();
@@ -407,6 +408,12 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (format == null) continue;
                 var target = AgentLayout.Find(page, b.Id);
                 if (target != null) CopyFormat(format, target);
+            }
+            if (applyCodeSpacing)
+            {
+                var converted = new HashSet<string>(CodeConversions.SelectMany(c => c.Blocks).Select(b => b.Id));
+                foreach (var oe in page.Descendants(One + "OE").Where(AgentCodeSpacing.HasTrim))
+                    if (!converted.Contains(AgentLayout.KeyOf(oe) ?? "")) AgentCodeSpacing.Apply(oe);
             }
             return page;
         }
@@ -427,13 +434,15 @@ namespace OneNoteCodeHelper.Services.Agent
                 try { selection = AgentCode.Select(candidate, conversion.Blocks.Select(b => b.ObjectId).ToList()); } catch (AiException) { }
                 if (selection == null || selection.Code != conversion.Code) throw new AiException("这样调整会打断已排入的代码框或表格转换，没有应用。");
             }
-            var before = CreateDraftPage();
+            var before = CreateDraftPage(applyCodeSpacing: false);
             var after = CreateDraftPage(candidate);
             foreach (var b in Blocks)
             {
                 var left = AgentLayout.Find(before, b.Id);
                 var right = AgentLayout.Find(after, b.Id);
                 if (left == null || right == null) continue;
+                // 只允许结构工具记录的完整空白行删除；文字、链接和剩余字符的格式照旧比较。
+                if (b.Conversion == null) AgentCodeSpacing.Apply(left, right);
                 string expected;
                 try { expected = SemanticFormat(left, before); } catch (Exception) { continue; }
                 string actual;
@@ -451,6 +460,9 @@ namespace OneNoteCodeHelper.Services.Agent
             .Select(t => (string)t.Attribute("objectID"))
             .Concat(oe.Elements(One + "Image").Select(i => (string)i.Attribute("objectID") ?? (string)oe.Attribute("objectID")))
             .Any(id => id != null && SelectedObjects.Contains(id));
+
+        internal bool InSelection(XElement oe) => !SelectionOnly || AgentLayout.KeyOf(oe) != null || InSelectedObject(oe);
+        internal bool SelectedObjectContains(XElement oe) => !SelectionOnly || InSelectedObject(oe);
 
         private static bool IsBinary(XElement e) => new[] { "Image", "InkDrawing", "InkWord", "InkParagraph", "InsertedFile", "MediaFile", "FutureObject", "HTMLBlock" }.Contains(e.Name.LocalName);
         /// <summary>
@@ -541,6 +553,16 @@ namespace OneNoteCodeHelper.Services.Agent
             var role = (string)page.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == index)?.Attribute("name") ?? "p";
             return rich.Signature(page, true) + "|" + ((string)oe.Attribute("alignment") ?? "left") + "|" +
                 NormalizeSpacing(oe, "spaceBefore") + "|" + NormalizeSpacing(oe, "spaceAfter") + "|" + role + "|" + AgentMarks.Projection(oe, page);
+        }
+        internal static string BlankFormat(XElement oe, XElement page)
+        {
+            var rich = new AgentRichText(oe);
+            var normalized = new XElement(oe);
+            normalized.SetAttributeValue("style", Css.Write(rich.BlankStyle(page)));
+            normalized.Elements(One + "T").Remove();
+            normalized.Add(new XElement(One + "T", new XCData("x")));
+            // 只归一化空白字符，不能把多行空白当成一个空段落。
+            return SemanticFormat(normalized, page) + "|blank_breaks=" + rich.Text.Count(c => c == '\n' || c == '\r').ToString(CultureInfo.InvariantCulture);
         }
         private static string NormalizeSpacing(XElement e, string key) => double.TryParse((string)e.Attribute(key), NumberStyles.Float, CultureInfo.InvariantCulture, out var n)
             ? n.ToString("0.###", CultureInfo.InvariantCulture) : "0";

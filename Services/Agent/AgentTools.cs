@@ -92,6 +92,11 @@ namespace OneNoteCodeHelper.Services.Agent
         private readonly AddInSettings _code;
         /// <summary>执行开始时的围栏上下文；不随删围栏、改字或移动段落重新分类。</summary>
         private readonly Dictionary<string, List<AgentMarkdown.LineRole>> _markdownRoles = new Dictionary<string, List<AgentMarkdown.LineRole>>();
+        /// <summary>规范化代码框间隔前的结构草稿，以及当时已有的插入段落数和结构改动数；之后没有间隔改动时为 null。</summary>
+        private (XElement Layout, int Inserted, int Changes)? _spacingBase;
+        /// <summary>会改变结构或转换范围的工具：执行前先撤回间隔调整，免得旧的删补留在已不相邻的段落上。</summary>
+        private static readonly HashSet<string> SpacingSensitive = new HashSet<string>
+            { "remove_blank_lines", "set_indent", "move_blocks", "merge_outlines", "insert_blocks", "strip_markdown", "highlight_code", "text_to_table" };
         internal AgentReport Report { get; private set; }
         // 只由运行器在最后一轮开启；模型的工具参数不能绕过完整读取检查。
         internal bool AllowIncompleteFinish { get; set; }
@@ -210,6 +215,11 @@ namespace OneNoteCodeHelper.Services.Agent
                     "language 为 auto 时自动识别，识别不出会报错，可改用 text。已有代码框和行内代码不要转换。", code, HighlightCode);
             }
             var structural = snapshot.EditableOutlines.Count > 0;
+            if (structural && (snapshot.Options.EnableBlankLineRemoval || snapshot.Options.EnableInsert))
+                Register("normalize_code_spacing", "只规范化同一文本框或单元格内代码框与文字的交界，空段落和文字首尾的 Shift+Enter 空行合计保留一行，多删少补。" +
+                    "先转换代码并完成其他结构调整，最后调用此工具；之后再调整结构、转换代码或清理 Markdown 会撤回已做的间隔调整。代码内部、文字之间及文本框首尾不处理。" +
+                    "删除和补入分别受删空行、插入段落开关控制，关闭时对应边界返回 skipped。",
+                    SnapshotOnly(), NormalizeCodeSpacing);
             if (snapshot.Options.EnableBlankLineRemoval && snapshot.Blocks.Any(b => b.ProtectedReason == "empty" && snapshot.EditableOutlines.Contains(b.ContainerId)))
             {
                 var blank = SnapshotOnly();
@@ -316,6 +326,7 @@ namespace OneNoteCodeHelper.Services.Agent
             ["read_image_text"] = "读取图片文字",
             ["highlight_code"] = "高亮代码",
             ["remove_blank_lines"] = "删除空行",
+            ["normalize_code_spacing"] = "规范化代码框间隔",
             ["set_indent"] = "调整缩进",
             ["move_blocks"] = "移动段落",
             ["merge_outlines"] = "合并文本框",
@@ -427,6 +438,11 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "remove_blank_lines":
                     detail = AiClient.Get(outcome, "removed") is IList removed ? $"{removed.Count} 行" : null;
                     break;
+                case "normalize_code_spacing":
+                    detail = $"删除 {AiClient.Get(outcome, "removed_paragraphs") ?? 0} 个空段落、{AiClient.Get(outcome, "removed_soft_lines") ?? 0} 个段内空行，补入 {AiClient.Get(outcome, "inserted_paragraphs") ?? 0} 行";
+                    if (AiClient.Get(outcome, "skipped") is IList spacingSkipped && spacingSkipped.Count > 0)
+                        detail += $"，跳过 {spacingSkipped.Count} 处：" + (AiClient.Get(outcome, "skip_message") as string);
+                    break;
                 case "set_indent":
                     var direction = AiClient.Get(args, "direction") as string;
                     detail = JoinDetail(direction == "in" ? "增加缩进" : direction == "out" ? "减少缩进" : null, CountOf(args, "block_ids"));
@@ -511,7 +527,27 @@ namespace OneNoteCodeHelper.Services.Agent
             tool.Schema.Validate(parsed);
             var args = (IDictionary<string, object>)parsed;
             if (args.TryGetValue("snapshot_id", out var id) && (string)id != _snapshot.SnapshotId) throw new AiException("快照 ID 已失效。");
-            return tool.Execute(args);
+            if (_spacingBase == null || !SpacingSensitive.Contains(call.Name)) return tool.Execute(args);
+            // 先撤回间隔调整，在不含删补的草稿上执行；提交前复核会要求重新规范化。工具失败或没有改动时原样恢复。
+            var saved = (Layout: _snapshot.Layout, Inserted: _snapshot.Inserted.ToList(), Changes: _snapshot.LayoutChanges.ToList(), Base: _spacingBase, Revision: _snapshot.Revision);
+            void Restore()
+            {
+                _snapshot.Layout = saved.Layout;
+                _snapshot.Inserted.Clear(); _snapshot.Inserted.AddRange(saved.Inserted);
+                _snapshot.LayoutChanges.Clear(); _snapshot.LayoutChanges.AddRange(saved.Changes);
+                _spacingBase = saved.Base;
+                _snapshot.Revision = saved.Revision;
+            }
+            var spacingBase = _spacingBase.Value;
+            _snapshot.Layout = new XElement(spacingBase.Layout);
+            _snapshot.Inserted.RemoveRange(spacingBase.Inserted, _snapshot.Inserted.Count - spacingBase.Inserted);
+            _snapshot.LayoutChanges.RemoveRange(spacingBase.Changes, _snapshot.LayoutChanges.Count - spacingBase.Changes);
+            _spacingBase = null;
+            object result;
+            try { result = tool.Execute(args); }
+            catch { Restore(); throw; }
+            if (_snapshot.Revision == saved.Revision) Restore();
+            return result;
         }
 
         private object Overview(IDictionary<string, object> args)
@@ -524,7 +560,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 languages = _snapshot.Options.EnableCodeHighlight ? Languages : null,
                 list_edit = Has("set_list"), tag_edit = Has("set_tag"), markdown_cleanup = Has("strip_markdown"), table_style = Has("set_table_style"),
                 table_shadings = Has("set_table_style") ? TableLook.Shadings : null,
-                blank_lines = Has("remove_blank_lines"), indent = Has("set_indent"), move = Has("move_blocks"), insert = Has("insert_blocks"), text_table = Has("text_to_table"),
+                blank_lines = Has("remove_blank_lines"), code_spacing = Has("normalize_code_spacing"), indent = Has("set_indent"), move = Has("move_blocks"), insert = Has("insert_blocks"), text_table = Has("text_to_table"),
                 total = items.Count, next_offset = offset + 100 < items.Count ? (int?)(offset + 100) : null,
                 // 文本框按结构草稿列出，合并掉的不在其中；structure 表示能不能调整结构（移动、合并等）。
                 outlines = _snapshot.Layout.Elements(OneNoteApi.One + "Outline").Select(o =>
@@ -606,13 +642,13 @@ namespace OneNoteCodeHelper.Services.Agent
             if (blocks.Count == 0) throw new AiException("目标段落都受到保护：" + string.Join("、", skipped.Select(s => $"{s.id}（{s.reason}）")) + "。");
             var page = _snapshot.CreateDraftPage();
             foreach (var b in blocks) b.Read = true;
-            return new { snapshot_id = _snapshot.SnapshotId, skipped = skipped.Length > 0 ? skipped : null, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = b.CurrentText,
+            return new { snapshot_id = _snapshot.SnapshotId, skipped = skipped.Length > 0 ? skipped : null, blocks = blocks.Select(b => new { id = b.Id, kind = b.CodeCandidate ? "unhighlighted_code" : "text", text = new AgentRichText(AgentLayout.Find(page, b.Id)).Text,
                 depth = AgentLayout.Find(page, b.Id).Ancestors(OneNoteApi.One + "OE").Count(), container_id = ContainerOf(AgentLayout.Find(_snapshot.Layout, b.Id), b.ContainerId),
                 parent_id = ParentKey(AgentLayout.Find(page, b.Id)),
                 table_id = b.TableId, style = Css.Effective(AgentLayout.Find(page, b.Id), page),
                 list = AgentMarks.ListKind(b.Draft), tags = AgentMarks.Describe(b.Draft, _snapshot.DraftTags),
                 // 有加粗、链接等行内格式时才给原始 HTML；纯文字和 text 一样，不重复输出。
-                runs = b.Draft.Elements(OneNoteApi.One + "T").Any(t => t.Value.IndexOf('<') >= 0) ? b.Draft.Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() : null }).ToArray() };
+                runs = AgentLayout.Find(page, b.Id).Elements(OneNoteApi.One + "T").Any(t => t.Value.IndexOf('<') >= 0) ? AgentLayout.Find(page, b.Id).Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() : null }).ToArray() };
         }
 
         private object Paragraph(IDictionary<string, object> args)
@@ -651,6 +687,8 @@ namespace OneNoteCodeHelper.Services.Agent
                 foreach (var name in new[] { "style", "quickStyleIndex" }) draft.SetAttributeValue(name, (string)b.Draft.Attribute(name));
                 ParagraphStyles.PinEmphasis(draft, ParagraphStyles.Definition(preset, _snapshot.Options));
                 AgentPageSnapshot.CopyFormat(draft, target);
+                // 格式草稿带的是未截取的正文，按结构草稿的记录重新去掉代码框间隔删除的空白行。
+                AgentCodeSpacing.Apply(target);
                 // 仅设置外观必须和原生样式看起来一样，做不到就不改，不把别的外观当成完成。
                 if (new AgentRichText(target).Signature(after, true) != native) throw new AiException($"段落 {b.Id} 无法在保留下级段落格式的同时设置这种外观，没有修改。");
                 appearanceOnly.Add(b.Id);
@@ -1048,6 +1086,26 @@ namespace OneNoteCodeHelper.Services.Agent
             return new { ok = true, draft_revision = _snapshot.Revision, removed = removed.Select(AgentLayout.KeyOf).ToArray() };
         }
 
+        private object NormalizeCodeSpacing(IDictionary<string, object> args)
+        {
+            var result = AgentCodeSpacing.Build(_snapshot);
+            var changed = PublishSpacing(result);
+            return new { ok = true, draft_revision = _snapshot.Revision, removed_paragraphs = result.Removed,
+                removed_soft_lines = result.SoftLines, inserted_paragraphs = result.Inserted.Count, noop = !changed,
+                skipped = result.Skipped.Select(s => s.ToResult()).ToArray(), skip_message = AgentCodeSpacing.SkipMessage(result.Skipped) };
+        }
+
+        /// <summary>发布间隔调整。首次产生删补时记下调整前的草稿，后续结构工具据此撤回。</summary>
+        private bool PublishSpacing(AgentCodeSpacing.Result result)
+        {
+            var before = (_snapshot.Layout, _snapshot.Inserted.Count, _snapshot.LayoutChanges.Count);
+            var changed = PublishLayout(result.Layout, result.Changes);
+            if (changed && _spacingBase == null) _spacingBase = before;
+            _snapshot.Inserted.AddRange(result.Inserted);
+            _snapshot.CodeSpacingRequested = true;
+            return changed;
+        }
+
         private object SetIndent(IDictionary<string, object> args)
         {
             var ids = Ids(args, "block_ids");
@@ -1224,6 +1282,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 code_blocks = _snapshot.CodeConversions.Where(c => !c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray(), language = c.LanguageId }).ToArray(),
                 text_tables = _snapshot.CodeConversions.Where(c => c.TextTable).Select(c => new { block_ids = c.Blocks.Select(b => b.Id).ToArray() }).ToArray(),
                 layout = new { removed = LayoutIds("removed"), markdown_removed = LayoutIds("markdown"), moved = LayoutIds("moved"), indented = LayoutIds("indented"),
+                    code_spacing = _snapshot.CodeSpacingRequested, soft_blank_lines = _snapshot.Layout.Descendants(OneNoteApi.One + "OE").Sum(AgentCodeSpacing.TrimCount),
                 inserted = _snapshot.Inserted.Select(i => new { id = i.Id, text = i.Text }).ToArray(),
                 merged = _snapshot.LayoutChanges.Where(c => c.Kind == "merged").Select(c => new { from = c.From, into = c.OutlineId }).ToArray() },
                 unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
@@ -1240,8 +1299,19 @@ namespace OneNoteCodeHelper.Services.Agent
                 return new { ok = false, error = $"范围内还有 {unread.Length} 段未完整读取，未提交草稿。请分批 read_blocks 后重试。",
                     snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
                     unread_count = unread.Length, next_read_block_ids = unread.Take(ReadBatchSize).ToArray() };
+            var spacing = _snapshot.CodeSpacingRequested ? AgentCodeSpacing.Build(_snapshot) : null;
+            if (spacing != null && !XNode.DeepEquals(spacing.Layout, _snapshot.Layout))
+            {
+                if (!AllowIncompleteFinish)
+                    return new { ok = false, error = "后续修改改变了代码框间隔，未提交草稿。请重新调用 normalize_code_spacing 后重试。",
+                        snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision };
+                // 最后一轮不能再调用其他工具：按当前草稿重新规范化后提交，而不是丢掉整个任务。
+                PublishSpacing(spacing);
+            }
             _snapshot.Frozen = true;
             Report = _committer.Commit(_snapshot, _cancellation);
+            Report.SpacingSkipped = spacing?.Skipped.Select(s => s.ToResult()).ToArray() ?? new object[0];
+            if (Report.SpacingSkipped.Length > 0) Report.Message += $"\n代码框间隔跳过 {Report.SpacingSkipped.Length} 处：" + AgentCodeSpacing.SkipMessage(spacing.Skipped) + "。";
             Report.UnreadCount = unread.Length;
             if (unread.Length > 0)
             {

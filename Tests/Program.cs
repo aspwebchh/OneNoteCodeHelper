@@ -25,6 +25,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--probe") return Probe.Run(args.Skip(1).ToArray());
+        if (args.Length == 2 && args[0] == "--probe-code-spacing") return CodeSpacingProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--render-ui") return WindowPreview.Render(args[1]);
         if (args.Length == 2 && args[0] == "--inspect-fixture")
         {
@@ -1704,6 +1705,389 @@ internal static class Program
             Equal(("设置表格样式 · 1 个表格", AgentStepState.Done), AgentTools.DescribeStep("set_table_style", "{\"table_ids\":[\"t1\"]}", "{\"ok\":true}"));
             Equal(("读取图片文字 · 2 张", AgentStepState.Done), AgentTools.DescribeStep("read_image_text", "{\"image_ids\":[\"i1\",\"i2\"]}", "{}"));
         });
+        Test("code spacing normalizes both sides for zero, one and many ordinary or monospace blank paragraphs", () =>
+        {
+            foreach (var count in new[] { 0, 1, 3 }) foreach (var mono in new[] { false, true })
+            {
+                var blanks = Enumerable.Range(0, count).Select(i => Paragraph("e" + i, i % 2 == 0 ? "&nbsp; " : " ")).ToList();
+                if (mono) foreach (var blank in blanks) blank.SetAttributeValue("style", "font-family:Consolas");
+                var s = Snapshot(Page(new[] { Paragraph("a", "正文") }.Concat(blanks).Concat(new[] { SpacingBox("code"), Paragraph("b", "结尾") }).ToArray()));
+                var t = Tools(s); Read(t, s); var result = Normalize(t, s);
+                Equal(count == 3 ? 2 : 0, AiClient.Get(result, "removed_paragraphs"));
+                Equal(count == 0 ? 2 : 1, AiClient.Get(result, "inserted_paragraphs"));
+                Equal(count == 1 ? "e0" : count == 3 ? "e0" : null, (string)s.Layout.Element(One + "Outline").Element(One + "OEChildren").Elements(One + "OE").ElementAt(1).Attribute("objectID"));
+                var revision = s.Revision; True((bool)AiClient.Get(Normalize(t, s), "noop")); Equal(revision, s.Revision);
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(1, r.OutlineUndo.Count);
+                Equal("正文||#||结尾", SpacingTexts(api.Page));
+                Equal("x = 1\n\ny = 2", string.Join("\n", api.Page.Descendants(One + "Table").Single().Descendants(One + "OE").Select(AgentCode.PlainText)));
+                True(!api.LastXml.Contains("trim-leading") && !api.LastXml.Contains("trim-trailing") && !api.LastXml.Contains("urn:onenote-code-helper:agent"));
+                Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+                Equal(SpacingTexts(s.Page), SpacingTexts(api.Page));
+            }
+        });
+        Test("code spacing preserves a single soft blank and trims excess soft blanks on either edge", () =>
+        {
+            foreach (var count in new[] { 1, 3 })
+            {
+                var html = string.Concat(Enumerable.Repeat("<br>&nbsp;", count));
+                var s = Snapshot(Page(Paragraph("a", "<b>正文</b>" + html), SpacingBox("code"), Paragraph("b", string.Concat(Enumerable.Repeat("&nbsp;<br>", count)) + "<a href='https://example.com'>链接</a>")));
+                var t = Tools(s); Read(t, s); var result = Normalize(t, s);
+                Equal((count - 1) * 2, AiClient.Get(result, "removed_soft_lines")); Equal(0, AiClient.Get(result, "inserted_paragraphs"));
+                if (count == 1) { Equal(0, s.Revision); continue; }
+                Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1", s.Blocks.Last().Id }, preset_id = "body" });
+                var read = Json(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" } })); True(!read.Contains("\\n\\u00a0\\n"));
+                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(4, r.RemovedSoftLines); Equal(2, r.Applied); Equal(1, r.OutlineUndo.Count);
+                Equal("正文\n\u00a0", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+                Equal("\u00a0\n链接", new AgentRichText(AgentCommitter.Find(api.Page, "b")).Text);
+                True(AgentCommitter.Find(api.Page, "a").ToString().Contains("<b>")); True(AgentCommitter.Find(api.Page, "b").ToString().Contains("https://example.com"));
+                Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+                Equal(new AgentRichText(s.Blocks.First().Original).Text, new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+            }
+        });
+        Test("code spacing counts mixed paragraph and soft blanks and keeps the first existing blank", () =>
+        {
+            var blank = Paragraph("e1", "&nbsp;<br> <br>&nbsp;"); blank.SetAttributeValue("style", "font-family:Consolas");
+            var s = Snapshot(Page(Paragraph("a", "<b>正文</b><br><br>"), blank, Paragraph("e2", ""), SpacingBox("code"), Paragraph("b", "<br><br>结尾")));
+            var t = Tools(s); Read(t, s); var result = Normalize(t, s);
+            Equal(1, AiClient.Get(result, "removed_paragraphs")); Equal(5, AiClient.Get(result, "removed_soft_lines"));
+            Equal("正文||#|\n结尾", SpacingTexts(s.CreateDraftPage()));
+            var api = new FakePage(s.Page); var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.Removed); Equal(5, r.RemovedSoftLines);
+            True(AgentCommitter.Find(api.Page, "e1") != null); Equal("\u00a0", new AgentRichText(AgentCommitter.Find(api.Page, "e1")).Text);
+        });
+        Test("code spacing handles scheduled conversions and leaves code interior and unrelated gaps unchanged", () =>
+        {
+            var s = CodePrepared(); var t = Tools(s); var result = Normalize(t, s);
+            Equal(2, AiClient.Get(result, "inserted_paragraphs"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.CodeBlocks); Equal(2, r.InsertedBlankLines); Equal(1, r.OutlineUndo.Count);
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(Texts(s.Page), Texts(api.Page));
+            var p = Page(Paragraph("edge", ""), Paragraph("a", "甲<br><br><br>乙"), Paragraph("e1", ""), Paragraph("e2", ""), Paragraph("b", "正文"),
+                SpacingBox("c1"), Paragraph("between1", ""), Paragraph("between2", ""), SpacingBox("c2"), Paragraph("tail", ""));
+            var other = Snapshot(p); var ot = Tools(other); Read(ot, other); Normalize(ot, other);
+            foreach (var id in new[] { "edge", "e1", "e2", "between1", "between2", "tail" }) True(AgentCommitter.Find(other.Layout, id) != null);
+            Equal("甲\n\n\n乙", new AgentRichText(AgentCommitter.Find(other.CreateDraftPage(), "a")).Text);
+        });
+        Test("code spacing handles nested flows, ordinary cells and identifiable blank OEs without T", () =>
+        {
+            var parent = Paragraph("parent", "父段落"); parent.Add(new XElement(One + "OEChildren", Paragraph("child", "子段落<br><br>"), SpacingBox("nested")));
+            var s = Snapshot(Page(parent, new XElement(One + "OE", new XAttribute("objectID", "noT1")), new XElement(One + "OE", new XAttribute("objectID", "noT2")), SpacingBox("outer"), Paragraph("b", "结尾")));
+            var t = Tools(s); Read(t, s); Normalize(t, s);
+            Equal("子段落\n", new AgentRichText(AgentCommitter.Find(s.CreateDraftPage(), "child")).Text);
+            True(AgentCommitter.Find(s.Layout, "child").Parent.Parent == AgentCommitter.Find(s.Layout, "parent"));
+            True(AgentCommitter.Find(s.Layout, "noT1") != null && AgentCommitter.Find(s.Layout, "noT2") != null); // 两个代码块之间不清理。
+            var noT = Snapshot(Page(Paragraph("a", "正文"), new XElement(One + "OE", new XAttribute("objectID", "e1")), new XElement(One + "OE", new XAttribute("objectID", "e2")), SpacingBox("c")));
+            var nt = Tools(noT); Read(nt, noT); Equal(1, AiClient.Get(Normalize(nt, noT), "removed_paragraphs"));
+            Equal("Verified", new AgentCommitter(new FakePage(noT.Page)).Commit(noT, CancellationToken.None).Status);
+            var table = new XElement(One + "OE", new XAttribute("objectID", "wrapper"), new XElement(One + "Table", new XAttribute("objectID", "grid"),
+                new XElement(One + "Columns", new XElement(One + "Column", new XAttribute("index", 0), new XAttribute("width", 300))),
+                new XElement(One + "Row", new XElement(One + "Cell", new XElement(One + "OEChildren", Paragraph("ca", "文字"), SpacingBox("cellCode"), Paragraph("cb", "结尾"))))));
+            var cell = Snapshot(Page(table)); var ct = Tools(cell); Read(ct, cell); Equal(2, AiClient.Get(Normalize(ct, cell), "inserted_paragraphs"));
+            Equal("Verified", new AgentCommitter(new FakePage(cell.Page)).Commit(cell, CancellationToken.None).Status);
+        });
+        Test("code spacing respects selection boundaries, protected blanks and disabled capabilities", () =>
+        {
+            var page = Page(Paragraph("a", "正文"), Paragraph("e1", ""), Paragraph("e2", ""), SpacingBox("code"), Paragraph("b", "结尾"));
+            var selected = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "a", "e1", "code1", "code3" }, new AgentOptions());
+            var t = Tools(selected); Read(t, selected); var result = Normalize(t, selected);
+            Equal(0, selected.Revision); True(Json(result).Contains("outside_selection"));
+            var full = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "a", "e1", "e2", "code1", "code3", "b" }, new AgentOptions());
+            var ft = Tools(full); Read(ft, full); Equal(1, AiClient.Get(Normalize(ft, full), "removed_paragraphs"));
+            Equal("Verified", new AgentCommitter(new FakePage(full.Page)).Commit(full, CancellationToken.None).Status);
+            var marked = Paragraph("marked", ""); marked.Add(new XElement(One + "List", new XElement(One + "Bullet", new XAttribute("bullet", "2"))));
+            var protectedPage = Snapshot(Page(Paragraph("a", "正文"), marked, Paragraph("empty", ""), SpacingBox("code")));
+            var pt = Tools(protectedPage); Read(pt, protectedPage); True(Json(Normalize(pt, protectedPage)).Contains("protected_blank")); Equal(0, protectedPage.Revision);
+            var singleMarked = Snapshot(Page(Paragraph("a", "正文"), new XElement(marked), SpacingBox("code")));
+            var mt = Tools(singleMarked); Read(mt, singleMarked); True(Json(Normalize(mt, singleMarked)).Contains("protected_blank")); Equal(0, singleMarked.Revision);
+            foreach (var removing in new[] { true, false })
+            {
+                var p = removing ? Page(Paragraph("a", "正文<br><br>"), SpacingBox("c")) : Page(Paragraph("a", "正文"), SpacingBox("c"));
+                var off = new AgentPageSnapshot(p.ToString(), null, new AgentOptions { EnableBlankLineRemoval = !removing, EnableInsert = removing });
+                var ot = Tools(off); Read(ot, off); True(Json(Normalize(ot, off)).Contains(removing ? "removal_disabled" : "insert_disabled")); Equal(0, off.Revision);
+            }
+            var disabled = Tools(new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = false, EnableInsert = false }));
+            True(!disabled.Has("normalize_code_spacing")); True(!AgentRunner.SystemPrompt(disabled).Contains("normalize_code_spacing"));
+        });
+        Test("code spacing soft edits skip the entire conflicted frame while independent style changes can commit", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文<br><br><br>"), Paragraph("e1", ""), Paragraph("e2", ""), SpacingBox("code"), Paragraph("b", "结尾")));
+            var t = Tools(s); Read(t, s); Normalize(t, s);
+            Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "body" });
+            var api = new FakePage(s.Page); AgentCommitter.Find(api.Page, "b").Element(One + "T").Value = "用户后来编辑";
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            True(r.Conflicts > 0); Equal(0, r.Removed); Equal(0, r.RemovedSoftLines); Equal(0, r.InsertedBlankLines); Equal(1, r.Applied);
+            Equal("正文\n\n\n", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text); True(AgentCommitter.Find(api.Page, "e2") != null);
+            Equal("用户后来编辑", AgentCode.PlainText(AgentCommitter.Find(api.Page, "b")));
+        });
+        Test("finish rejects code spacing changed after normalization and permits an idempotent refresh", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e", ""), SpacingBox("code"), Paragraph("b", "结尾")));
+            var api = new FakePage(s.Page); var t = new AgentTools(s, new AgentCommitter(api), CancellationToken.None); Read(t, s); Normalize(t, s);
+            Invoke(t, "remove_blank_lines", new { snapshot_id = s.SnapshotId, mode = "all" });
+            True(Json(Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision })).Contains("normalize_code_spacing"));
+            Equal(0, api.Writes); True(!s.Frozen);
+            Normalize(t, s); var revision = s.Revision; Normalize(t, s); Equal(revision, s.Revision);
+            Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision }); Equal("Verified", t.Report.Status);
+        });
+        Test("code spacing never reports an unverified write as successful and undo preserves later edits", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文<br><br>"), SpacingBox("code"))); var t = Tools(s); Read(t, s); Normalize(t, s);
+            var unread = new FakePage(s.Page) { FailReadAfterSave = true }; var ur = new AgentCommitter(unread).Commit(s, CancellationToken.None);
+            Equal("CommitOutcomeUnknown", ur.Status); Equal(0, ur.RemovedSoftLines); Equal(0, ur.OutlineUndo.Count);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            AgentCommitter.Find(api.Page, "a").Element(One + "T").Value = "用户编辑";
+            var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None); True(undo.Conflicts > 0); Equal("用户编辑", AgentCode.PlainText(AgentCommitter.Find(api.Page, "a")));
+        });
+        Test("code spacing preserves rich runs, emoji, text fixes and links through soft-line trimming", () =>
+        {
+            var p = Paragraph("a", "<br><br><b>按装😀</b>", "<a href='https://example.com'>链接</a><br><br>");
+            var s = Snapshot(Page(SpacingBox("first"), p, SpacingBox("second"))); var t = Tools(s); Read(t, s);
+            var id = s.Blocks.Single(b => b.ObjectId == "a").Id;
+            Fix(t, s, id, "按装", "安装"); Normalize(t, s);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(2, r.RemovedSoftLines); Equal(1, r.TextFixes.Count);
+            Equal("\n安装😀链接\n", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+            Equal(2, AgentCommitter.Find(api.Page, "a").Elements(One + "T").Count());
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+            Equal("\n\n按装😀链接\n\n", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+        });
+        Test("code spacing observes insertion quota, unknown blank identity, code fonts and ordinary empty tables", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文"), SpacingBox("code"))); var t = Tools(s); Read(t, s);
+            for (var i = 0; i < AgentTools.MaxInserted; i++) Insert(t, s, "p1", "摘要");
+            var before = new XElement(s.Layout); True(Json(Normalize(t, s)).Contains("insert_limit")); True(XNode.DeepEquals(before, s.Layout));
+            var unknown = Snapshot(Page(Paragraph("a", "正文"), new XElement(One + "OE"), Paragraph("e", ""), SpacingBox("code")));
+            var ut = Tools(unknown); Read(ut, unknown); True(Json(Normalize(ut, unknown)).Contains("protected_blank")); Equal(0, unknown.Revision);
+            var missingId = Snapshot(Page(Paragraph("a", "正文"), new XElement(One + "OE", new XElement(One + "T", "")), Paragraph("e", ""), SpacingBox("code")));
+            var it = Tools(missingId); Read(it, missingId); True(Json(Normalize(it, missingId)).Contains("protected_blank")); Equal(0, missingId.Revision);
+            var separate = Snapshot(Boxes(Box("A", 100, Paragraph("a", "正文")), Box("B", 300, SpacingBox("code"))));
+            var st = Tools(separate); Read(st, separate); Normalize(st, separate); Equal(0, separate.Revision);
+            var unsupported = Snapshot(Page(Paragraph("a", "<b>不完整 HTML"), SpacingBox("code")));
+            True(Json(Normalize(Tools(unsupported), unsupported)).Contains("protected_text")); Equal(0, unsupported.Revision);
+            var ordinary = SpacingBox("ordinary"); ordinary.Descendants(One + "OE").Attributes("style").Remove();
+            var empty = SpacingBox("empty"); foreach (var line in empty.Descendants(One + "T")) line.ReplaceNodes(new XCData("&nbsp;"));
+            var other = Snapshot(Page(Paragraph("a", "正文"), ordinary, Paragraph("b", "正文"), empty)); var ot = Tools(other); Read(ot, other);
+            Normalize(ot, other); Equal(0, other.Revision);
+            var raw = Paragraph("raw", "print(1)"); raw.SetAttributeValue("style", "font-family:Consolas");
+            var rawPage = new AgentPageSnapshot(Page(Paragraph("a", "正文"), raw, Paragraph("b", "结尾")).ToString(), null, new AgentOptions { EnableCodeHighlight = false });
+            var rt = Tools(rawPage); Read(rt, rawPage); Normalize(rt, rawPage); Equal(0, rawPage.Revision);
+        });
+        Test("code spacing follows cross-frame groups and detects corrupted readback and cancellation", () =>
+        {
+            var s = Snapshot(Boxes(Box("A", 100, Paragraph("a", "正文<br><br>"), SpacingBox("code")), Box("B", 300, Paragraph("b", "第二框"))));
+            var t = Tools(s); Read(t, s); Normalize(t, s);
+            var id = s.Blocks.Single(b => b.ObjectId == "a").Id; var target = s.Blocks.Single(b => b.ObjectId == "b").Id;
+            Move(t, s, new[] { id }, target, "after"); Normalize(t, s);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(2, r.OutlineUndo.Count); Equal(r.OutlineUndo[0].Group, r.OutlineUndo[1].Group);
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+            var corrupted = Snapshot(Page(Paragraph("a", "正文<br><br>"), SpacingBox("code"))); var ct = Tools(corrupted); Read(ct, corrupted); Normalize(ct, corrupted);
+            var broken = new FakePage(corrupted.Page) { AfterSave = () => { } };
+            broken.AfterSave = () => AgentCommitter.Find(broken.Page, "a").Element(One + "T").Value = "正文<br><br>";
+            Equal("CommitOutcomeUnknown", new AgentCommitter(broken).Commit(corrupted, CancellationToken.None).Status);
+            var cancelled = new FakePage(corrupted.Page); var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+            try { new AgentCommitter(cancelled).Commit(corrupted, cancellation.Token); } catch (OperationCanceledException) { }
+            Equal(0, cancelled.Writes);
+        });
+        Test("code spacing tool reports meaningful steps and exposes capability even without current blanks", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文"), SpacingBox("code"))); var t = Tools(s);
+            True(t.Has("normalize_code_spacing")); True(!t.Has("remove_blank_lines"));
+            var overview = AgentChatClient.Parse(Json(Invoke(t, "get_page_overview", new { })));
+            Equal(true, AiClient.Get(overview, "code_spacing"));
+            // 没有可删的空行时不注册 remove_blank_lines，概览也不能说它可用。
+            Equal(false, AiClient.Get(overview, "blank_lines"));
+            True(AgentRunner.SystemPrompt(t).Contains("只处理交界处"));
+            Equal(("规范化代码框间隔 · 删除 2 个空段落、3 个段内空行，补入 1 行", AgentStepState.Done), AgentTools.DescribeStep("normalize_code_spacing", "{}",
+                "{\"ok\":true,\"removed_paragraphs\":2,\"removed_soft_lines\":3,\"inserted_paragraphs\":1,\"skipped\":[]}"));
+        });
+        Test("code spacing verifies native empty-T normalization without ignoring blank font changes", () =>
+        {
+            foreach (var changeFont in new[] { false, true })
+            {
+                var s = Snapshot(Page(Paragraph("a", "正文"), SpacingBox("code"))); var t = Tools(s); Read(t, s); Normalize(t, s);
+                var api = new FakePage(s.Page);
+                api.AfterSave = () =>
+                {
+                    var blank = api.Page.Descendants(One + "OE").Single(e => ((string)e.Attribute("objectID") ?? "").StartsWith("new-", StringComparison.Ordinal));
+                    blank.Element(One + "T").ReplaceNodes(new XCData(""));
+                    if (changeFont) blank.SetAttributeValue("style", "font-family:Arial;font-size:40pt;color:#222222");
+                };
+                var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+                Equal(changeFont ? "PartiallyApplied" : "Verified", r.Status); Equal(changeFont ? 0 : 1, r.InsertedBlankLines);
+                Equal(changeFont ? 1 : 0, r.Unverified);
+            }
+        });
+        Test("code spacing verifies normalized existing soft blanks and restores them without overwriting later edits", () =>
+        {
+            foreach (var nativeBlank in new[] { "", " ", "&nbsp;" })
+            foreach (var laterEdit in new[] { false, true })
+            {
+                var s = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e", "&nbsp;<br>&nbsp;<br>&nbsp;"), SpacingBox("code")));
+                var t = Tools(s); Read(t, s); Equal(2, AiClient.Get(Normalize(t, s), "removed_soft_lines"));
+                var api = new FakePage(s.Page);
+                api.AfterSave = () => AgentCommitter.Find(api.Page, "e").Element(One + "T").ReplaceNodes(new XCData(nativeBlank));
+                var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                Equal("Verified", r.Status); Equal(2, r.RemovedSoftLines); Equal(1, r.OutlineUndo.Count);
+                var after = Snapshot(api.Page); foreach (var b in after.Blocks) b.Read = true;
+                True(XNode.DeepEquals(after.Layout, AgentCodeSpacing.Build(after).Layout));
+                api.AfterSave = null;
+                if (laterEdit) AgentCommitter.Find(api.Page, "a").Element(One + "T").Value = "用户后来编辑";
+                var writes = api.Writes; var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
+                if (laterEdit)
+                {
+                    True(undo.Conflicts > 0); Equal(writes, api.Writes);
+                    Equal("用户后来编辑", AgentCode.PlainText(AgentCommitter.Find(api.Page, "a")));
+                }
+                else
+                {
+                    Equal("Verified", undo.Status);
+                    Equal("\u00a0\n\u00a0\n\u00a0", new AgentRichText(AgentCommitter.Find(api.Page, "e")).Text);
+                }
+            }
+        });
+        Test("code spacing rejects extra soft lines, text, links, missing T and unreadable HTML in blank readback", () =>
+        {
+            foreach (var existing in new[] { false, true })
+            foreach (var html in new[] { "&nbsp;<br>", "&nbsp;<br><br>", "回读产生正文", "<a href='https://example.com' style='color:#222222'>&nbsp;</a>", "<b>未闭合", null })
+            {
+                var s = Snapshot(existing ? Page(Paragraph("a", "正文"), Paragraph("e", "&nbsp;<br>&nbsp;<br>&nbsp;"), SpacingBox("code")) :
+                    Page(Paragraph("a", "正文"), SpacingBox("code")));
+                var t = Tools(s); Read(t, s); Normalize(t, s);
+                var api = new FakePage(s.Page);
+                api.AfterSave = () =>
+                {
+                    var blank = existing ? AgentCommitter.Find(api.Page, "e") : api.Page.Descendants(One + "OE")
+                        .Single(e => ((string)e.Attribute("objectID") ?? "").StartsWith("new-", StringComparison.Ordinal));
+                    if (html == null) blank.Elements(One + "T").Remove();
+                    else blank.Element(One + "T").ReplaceNodes(new XCData(html));
+                };
+                var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+                Equal(1, api.Writes); Equal("CommitOutcomeUnknown", r.Status);
+                Equal(0, r.RemovedSoftLines); Equal(0, r.InsertedBlankLines); Equal(0, r.OutlineUndo.Count);
+            }
+        });
+        Test("code spacing still verifies the appearance of normalized existing blanks", () =>
+        {
+            var changes = new Action<XElement>[]
+            {
+                e => e.SetAttributeValue("style", "font-family:Arial;font-size:11pt;color:#222222"),
+                e => e.SetAttributeValue("style", "font-family:Calibri;font-size:40pt;color:#222222"),
+                e => e.SetAttributeValue("style", "font-family:Calibri;font-size:11pt;color:#FF0000"),
+                e => e.SetAttributeValue("alignment", "right"),
+                e => e.SetAttributeValue("spaceAfter", "20")
+            };
+            foreach (var change in changes)
+            {
+                var blank = Paragraph("e", "&nbsp;<br>&nbsp;<br>&nbsp;"); blank.SetAttributeValue("style", "font-family:Calibri;font-size:11pt;color:#222222");
+                var s = Snapshot(Page(Paragraph("a", "正文"), blank, SpacingBox("code"))); var t = Tools(s); Read(t, s); Normalize(t, s);
+                var api = new FakePage(s.Page);
+                api.AfterSave = () => { var e = AgentCommitter.Find(api.Page, "e"); e.Element(One + "T").ReplaceNodes(new XCData("")); change(e); };
+                var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+                Equal("PartiallyApplied", r.Status); Equal(1, r.Unverified); Equal(0, r.RemovedSoftLines);
+            }
+        });
+        Test("code spacing normalization does not exempt untouched or linked blank paragraphs", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e", "&nbsp;<br>&nbsp;<br>&nbsp;"), SpacingBox("code"),
+                Paragraph("gap", ""), Paragraph("b", "结尾"), Paragraph("untouched", "&nbsp;")));
+            var t = Tools(s); Read(t, s); Normalize(t, s);
+            var api = new FakePage(s.Page);
+            api.AfterSave = () => { foreach (var id in new[] { "e", "untouched" }) AgentCommitter.Find(api.Page, id).Element(One + "T").ReplaceNodes(new XCData("")); };
+            var r = new AgentCommitter(api).Commit(s, CancellationToken.None);
+            Equal("CommitOutcomeUnknown", r.Status); Equal(0, r.RemovedSoftLines); Equal(0, r.OutlineUndo.Count);
+            var linked = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e", "<a href='https://example.com'>&nbsp;</a><br>&nbsp;"), SpacingBox("code")));
+            var lt = Tools(linked); Read(lt, linked); Normalize(lt, linked);
+            var linkApi = new FakePage(linked.Page);
+            linkApi.AfterSave = () => AgentCommitter.Find(linkApi.Page, "e").Element(One + "T").ReplaceNodes(new XCData(""));
+            Equal("CommitOutcomeUnknown", new AgentCommitter(linkApi).Commit(linked, CancellationToken.None).Status);
+            var styled = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e", "&nbsp;"))); var st = Tools(styled); Read(st, styled); Style(st, styled);
+            var styleApi = new FakePage(styled.Page);
+            styleApi.AfterSave = () => AgentCommitter.Find(styleApi.Page, "e").Element(One + "T").ReplaceNodes(new XCData(""));
+            Equal("CommitOutcomeUnknown", new AgentCommitter(styleApi).Commit(styled, CancellationToken.None).Status);
+        });
+        Test("blank format projection preserves soft-line counts while tolerating single-line whitespace normalization", () =>
+        {
+            string Format(string html) { var page = Page(Paragraph("e", html)); return AgentPageSnapshot.BlankFormat(AgentCommitter.Find(page, "e"), page); }
+            var expected = Format("&nbsp;");
+            foreach (var html in new[] { "", " ", "&nbsp;" }) Equal(expected, Format(html));
+            foreach (var html in new[] { "&nbsp;<br>", "&nbsp;<br><br>" }) True(expected != Format(html));
+        });
+        Test("code spacing trims survive the appearance-only heading fallback", () =>
+        {
+            var parent = Paragraph("a", "<br><br>父标题"); parent.Add(new XElement(One + "OEChildren", Paragraph("b", "子段正文")));
+            var s = Snapshot(Page(SpacingBox("code"), parent)); var t = Tools(s); Read(t, s); Normalize(t, s);
+            var id = s.Blocks.Single(b => b.ObjectId == "a").Id;
+            True(Json(Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { id }, preset_id = "heading1" })).Contains("\"appearance_only\":[\"" + id + "\"]"));
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var child = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page);
+            var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(1, r.Applied); Equal(1, r.RemovedSoftLines);
+            Equal("\n父标题", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+            Equal(child, AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+            Equal("\n\n父标题", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+        });
+        Test("structural tools after code spacing revert it so moved text and removed blanks stay unchanged", () =>
+        {
+            // 段内删行和补入的空段一起撤回；移走的段落不再挨着代码框，保持原样。
+            var s = Snapshot(Page(Paragraph("a", "正文<br><br><br>"), SpacingBox("code"), Paragraph("b", "结尾"), Paragraph("c", "别处")));
+            var api = new FakePage(s.Page); var t = new AgentTools(s, new AgentCommitter(api), CancellationToken.None); Read(t, s); Normalize(t, s);
+            Equal(1, s.Inserted.Count);
+            Move(t, s, new[] { s.Blocks.Single(b => b.ObjectId == "a").Id }, s.Blocks.Single(b => b.ObjectId == "c").Id, "after");
+            Equal(0, s.Inserted.Count); Equal(0, s.Layout.Descendants(One + "OE").Sum(AgentCodeSpacing.TrimCount));
+            True(Json(Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision })).Contains("normalize_code_spacing"));
+            Normalize(t, s); Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal("Verified", t.Report.Status); Equal(0, t.Report.RemovedSoftLines); Equal(1, t.Report.InsertedBlankLines); Equal(1, t.Report.Moved);
+            Equal("#||结尾|别处|正文", SpacingTexts(api.Page)); Equal("正文\n\n\n", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
+            // 删掉的空段也恢复：移走正文后，代码框前的空行在文本框开头，不再处理。
+            var blanks = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e1", ""), Paragraph("e2", ""), SpacingBox("code"), Paragraph("b", "结尾")));
+            var blankApi = new FakePage(blanks.Page); var bt = new AgentTools(blanks, new AgentCommitter(blankApi), CancellationToken.None); Read(bt, blanks);
+            Equal(1, AiClient.Get(Normalize(bt, blanks), "removed_paragraphs")); True(AgentCommitter.Find(blanks.Layout, "e2") == null);
+            Move(bt, blanks, new[] { blanks.Blocks.Single(b => b.ObjectId == "a").Id }, blanks.Blocks.Single(b => b.ObjectId == "b").Id, "after");
+            True(AgentCommitter.Find(blanks.Layout, "e2") != null);
+            Normalize(bt, blanks); Invoke(bt, "finish_edit", new { snapshot_id = blanks.SnapshotId, draft_revision = blanks.Revision });
+            Equal("Verified", bt.Report.Status); Equal(0, bt.Report.Removed);
+            True(AgentCommitter.Find(blankApi.Page, "e1") != null && AgentCommitter.Find(blankApi.Page, "e2") != null);
+        });
+        Test("structural calls without changes or with errors keep the code spacing draft", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e1", ""), Paragraph("e2", ""), SpacingBox("code"), Paragraph("b", "结尾")));
+            var t = Tools(s); Read(t, s); Normalize(t, s);
+            var layout = new XElement(s.Layout); var revision = s.Revision; var changes = s.LayoutChanges.Count;
+            var a = s.Blocks.Single(b => b.ObjectId == "a").Id;
+            True(Json(Cleanup(t, s, a)).Contains("\"noop\":[\"" + a + "\"]"));
+            True(XNode.DeepEquals(layout, s.Layout)); Equal(revision, s.Revision); Equal(1, s.Inserted.Count); Equal(changes, s.LayoutChanges.Count);
+            Throws(() => Move(t, s, new[] { a }, "missing", "after"));
+            True(XNode.DeepEquals(layout, s.Layout)); Equal(revision, s.Revision); Equal(1, s.Inserted.Count); Equal(changes, s.LayoutChanges.Count);
+            True((bool)AiClient.Get(Normalize(t, s), "noop"));
+            Equal("Verified", new AgentCommitter(new FakePage(s.Page)).Commit(s, CancellationToken.None).Status);
+        });
+        Test("final-round finish renormalizes code spacing instead of discarding the task", () =>
+        {
+            var s = Snapshot(Page(Paragraph("a", "正文<br><br><br>"), SpacingBox("code"), Paragraph("b", "结尾"), Paragraph("c", "别处")));
+            var api = new FakePage(s.Page); var t = new AgentTools(s, new AgentCommitter(api), CancellationToken.None); Read(t, s); Normalize(t, s);
+            Move(t, s, new[] { s.Blocks.Single(b => b.ObjectId == "a").Id }, s.Blocks.Single(b => b.ObjectId == "c").Id, "after");
+            t.AllowIncompleteFinish = true;
+            Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+            Equal("Verified", t.Report.Status); Equal(1, t.Report.InsertedBlankLines); Equal(0, t.Report.RemovedSoftLines); Equal(1, t.Report.Moved);
+            Equal("#||结尾|别处|正文", SpacingTexts(api.Page));
+        });
+        Test("code spacing does not report settled boundaries or unconverted code next to a code box", () =>
+        {
+            var page = Page(Paragraph("a", "正文"), Paragraph("e", ""), SpacingBox("code"), Paragraph("e2", ""), Paragraph("b", "结尾"));
+            var selected = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "a", "e", "code1", "code3" }, new AgentOptions());
+            var t = Tools(selected); Read(t, selected); var result = Json(Normalize(t, selected));
+            True(result.Contains("\"skipped\":[]") && result.Contains("\"noop\":true"));
+            var raw = Paragraph("raw", "print(1)"); raw.SetAttributeValue("style", "font-family:Consolas");
+            var code = Snapshot(Page(Paragraph("a", "正文"), Paragraph("e", ""), SpacingBox("code"), raw));
+            var ct = Tools(code); Read(ct, code); True(Json(Normalize(ct, code)).Contains("\"skipped\":[]"));
+            // 选区外的文字紧贴代码框时仍须说明。
+            var tight = new AgentPageSnapshot(Page(Paragraph("a", "正文"), Paragraph("e", ""), SpacingBox("code"), Paragraph("b", "结尾")).ToString(),
+                new HashSet<string> { "a", "e", "code1", "code3" }, new AgentOptions());
+            var tt = Tools(tight); Read(tt, tight); True(Json(Normalize(tt, tight)).Contains("outside_selection"));
+        });
         Test("remove_blank_lines collapses runs and edges, verifies and undo restores the blank lines", () =>
         {
             var s = Snapshot(Page(Paragraph("e1", ""), Paragraph("a", "第一段"), Paragraph("e2", ""), Paragraph("e3", ""), Paragraph("b", "第二段"), Paragraph("e4", "")));
@@ -2685,6 +3069,18 @@ internal static class Program
     }
     private static object Code(AgentTools tools, AgentPageSnapshot s, string language, params string[] ids) =>
         Invoke(tools, "highlight_code", new { snapshot_id = s.SnapshotId, block_ids = ids, language });
+    private static object Normalize(AgentTools tools, AgentPageSnapshot s) => AgentChatClient.Parse(Json(Invoke(tools, "normalize_code_spacing", new { snapshot_id = s.SnapshotId })));
+    private static XElement SpacingBox(string id)
+    {
+        var lines = new[] { "x = 1", "&nbsp;", "y = 2" }.Select((text, i) => new XElement(One + "OE",
+            new XAttribute("objectID", id + (i + 1)), new XAttribute("style", "font-family:Consolas;font-size:10pt"), new XElement(One + "T", new XCData(text))));
+        return new XElement(One + "OE", new XAttribute("objectID", id + "Wrapper"), new XElement(One + "Table", new XAttribute("objectID", id),
+            new XAttribute("bordersVisible", "true"), new XAttribute("hasHeaderRow", "false"),
+            new XElement(One + "Columns", new XElement(One + "Column", new XAttribute("index", 0), new XAttribute("width", 300))),
+            new XElement(One + "Row", new XElement(One + "Cell", new XElement(One + "OEChildren", lines)))));
+    }
+    private static string SpacingTexts(XElement page) => string.Join("|", page.Element(One + "Outline").Element(One + "OEChildren").Elements(One + "OE")
+        .Select(oe => oe.Element(One + "Table") != null ? "#" : AgentCode.PlainText(oe)));
     private static AgentPageSnapshot CodePrepared() { var s = Snapshot(CodePage()); var t = Tools(s); Read(t, s); Code(t, s, "python", "p2", "p3", "p4"); return s; }
     private static void Conflict(Action<XElement> mutate)
     {

@@ -49,6 +49,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int TextTables;
         /// <summary>结构改动：删掉的空行、移动、调整缩进和插入的段落数，合并掉的文本框数。</summary>
         internal int Removed, Moved, Indented, Inserted, Merged;
+        internal int RemovedSoftLines, InsertedBlankLines;
+        internal object[] SpacingSkipped = new object[0];
         /// <summary>整框写入的文本框，含合并删掉的（撤销时是整框恢复、重建的文本框数）。</summary>
         internal int Outlines;
         /// <summary>合并后没能删掉、留着一行空白的文本框。</summary>
@@ -69,9 +71,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal void ClearUndo() { Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
         internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, markdown_marks = MarkdownMarks, code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
             removed = Removed, moved = Moved, indented = Indented, inserted = Inserted, merged = Merged,
+            removed_soft_lines = RemovedSoftLines, inserted_blank_lines = InsertedBlankLines, spacing_skipped = SpacingSkipped,
             skipped_conflict = ConflictIds, unverified = Unverified, unread_count = UnreadCount, protected_count = Protected, appearance_only = AppearanceOnly, message = Message };
         /// <summary>结果消息里的结构改动部分。</summary>
-        internal string LayoutSummary => (Removed > 0 ? $"删除空行 {Removed} 行；" : "") + (Moved > 0 ? $"移动 {Moved} 段；" : "") +
+        internal string LayoutSummary => (Removed > 0 ? $"删除空行 {Removed} 行；" : "") +
+            (RemovedSoftLines > 0 ? $"删除段内空行 {RemovedSoftLines} 行；" : "") + (InsertedBlankLines > 0 ? $"补空行 {InsertedBlankLines} 行；" : "") + (Moved > 0 ? $"移动 {Moved} 段；" : "") +
             (Indented > 0 ? $"调整缩进 {Indented} 段；" : "") + (Inserted > 0 ? $"插入 {Inserted} 段；" : "") + (Merged > 0 ? $"合并文本框 {Merged} 个；" : "") +
             (Leftover > 0 ? $"{Leftover} 个文本框合并后没能删掉，留下一行空白；" : "");
     }
@@ -316,7 +320,10 @@ namespace OneNoteCodeHelper.Services.Agent
                     }
                     // 原页面所有文字、链接、段落顺序必须保留，包括没有交给模型的对象。
                     formatted.UnionWith(planned.Select(p => p.Block.ObjectId));
-                    if (!ContentPreserved(page, actual, known, formatted) || !UntouchedPreserved(untouched, actual))
+                    // 只有本次专用工具补入、或删段内空行后剩下的单行空段落，允许 OneNote 回存为空 T。
+                    // 按期望节点记录，身份、层级和位置仍由内容核验先行检查。
+                    var spacingBlanks = new HashSet<XElement>(edits.SelectMany(e => e.BlankLines.Concat(e.SoftLines.Select(s => s.Node))).Where(IsNormalizableBlank));
+                    if (!ContentPreserved(page, actual, known, formatted, spacingBlanks) || !UntouchedPreserved(untouched, actual))
                     {
                         report.Status = "CommitOutcomeUnknown";
                         AddInLog.Info(VerificationDiagnostic("page", snapshot.PageId, "content_or_untouched_mismatch"));
@@ -477,6 +484,8 @@ namespace OneNoteCodeHelper.Services.Agent
             internal List<XElement> Styles = new List<XElement>();
             internal List<XElement> Tags = new List<XElement>();
             internal readonly List<(AgentBlock Block, XElement Node)> Changed = new List<(AgentBlock, XElement)>();
+            internal readonly List<(XElement Node, int Lines)> SoftLines = new List<(XElement, int)>();
+            internal readonly HashSet<XElement> BlankLines = new HashSet<XElement>();
             internal readonly List<(XElement Box, AgentCodeConversion Conversion)> Boxes = new List<(XElement, AgentCodeConversion)>();
             /// <summary>改了外观的表格和它在写入内容里的元素；跨框移过来的表格没有原 ID，按位置核对。</summary>
             internal readonly List<(AgentTable Table, XElement Target)> Tables = new List<(AgentTable, XElement)>();
@@ -495,12 +504,22 @@ namespace OneNoteCodeHelper.Services.Agent
             var id = (string)current.Attribute("objectID");
             var edit = new OutlineEdit { Id = id, Before = new XElement(current), Styles = AgentLayout.Styles(current, page), Tags = AgentLayout.Tags(current, page) };
             var written = Outline(draft, id);
+            foreach (var inserted in snapshot.LayoutChanges.Where(c => c.Kind == "inserted_blank").SelectMany(c => c.Ids).Distinct())
+                if (AgentLayout.Find(written, inserted) is XElement blank) edit.BlankLines.Add(blank);
+            var converted = new HashSet<string>(snapshot.CodeConversions.SelectMany(c => c.Blocks).Select(b => b.Id));
+            foreach (var node in written.Descendants(One + "OE").Where(AgentCodeSpacing.HasTrim).Where(n => !converted.Contains(AgentLayout.KeyOf(n) ?? "")))
+            {
+                edit.SoftLines.Add((node, AgentCodeSpacing.TrimCount(node)));
+                if ((string)node.Attribute("objectID") is string objectId) formatted.Add(objectId);
+            }
             foreach (var block in snapshot.Blocks.Where(b => b.Changed))
             {
                 var node = AgentLayout.Find(written, block.Id);
                 if (node == null) continue;
-                // 只有 fix_text、strip_markdown 改过文字的段落可以改文字。
-                if (!block.TextEdited && new AgentRichText(node).Signature(draft, false) != new AgentRichText(block.Original).Signature(snapshot.Page, false))
+                // fix_text、strip_markdown 的文字草稿，以及已记录的完整空白行删除，才允许正文变化。
+                var unchangedText = new XElement(block.Original);
+                if (!block.TextEdited && block.Conversion == null) AgentCodeSpacing.Apply(unchangedText, node);
+                if (!block.TextEdited && new AgentRichText(node).Signature(draft, false) != new AgentRichText(unchangedText).Signature(snapshot.Page, false))
                     throw new AiException("格式修改改变了正文或链接，已阻止写入。");
                 edit.Changed.Add((block, node));
                 formatted.Add(block.ObjectId);
@@ -624,10 +643,12 @@ namespace OneNoteCodeHelper.Services.Agent
             foreach (var line in edit.Delete ? Enumerable.Empty<XElement>() : edit.Written.Descendants(One + "OE").Where(e => e.Elements(One + "T").Any() && !boxLines.Contains(e)))
             {
                 string expected;
-                try { expected = AgentPageSnapshot.SemanticFormat(line, page); } catch (Exception) { continue; }
+                var blankLine = edit.BlankLines.Contains(line) || edit.SoftLines.Any(s => s.Node == line) && string.IsNullOrWhiteSpace(new AgentRichText(line).Text);
+                try { expected = blankLine ? AgentPageSnapshot.BlankFormat(line, page) : AgentPageSnapshot.SemanticFormat(line, page); } catch (Exception) { continue; }
                 try
                 {
-                    if (AgentPageSnapshot.SemanticFormat(actualLines[expectedLines.IndexOf(line)], actual) != expected)
+                    var written = actualLines[expectedLines.IndexOf(line)];
+                    if ((blankLine ? AgentPageSnapshot.BlankFormat(written, actual) : AgentPageSnapshot.SemanticFormat(written, actual)) != expected)
                     {
                         failed.Add(line);
                         AddInLog.Info(VerificationDiagnostic("outline_paragraph", (string)line.Attribute("objectID") ?? AgentLayout.KeyOf(line), "semantic_format_mismatch"));
@@ -665,6 +686,8 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             string[] Ids(string kind) => edit.Changes.Where(c => c.Kind == kind).SelectMany(c => c.Ids).Distinct().ToArray();
             report.Removed += Ids("removed").Length;
+            report.RemovedSoftLines += edit.SoftLines.Where(s => !failed.Contains(s.Node)).Sum(s => s.Lines);
+            report.InsertedBlankLines += edit.BlankLines.Count(b => !failed.Contains(b));
             report.MarkdownMarks += Ids("markdown").Length;
             report.Moved += Ids("moved").Length;
             report.Indented += Ids("indented").Length;
@@ -746,8 +769,15 @@ namespace OneNoteCodeHelper.Services.Agent
         private static string UntouchedFormat(IEnumerable<XElement> paragraphs, XElement page) =>
             string.Join("\n", paragraphs.Select(oe => AgentPageSnapshot.SemanticFormat(oe, page)));
 
+        private static bool IsNormalizableBlank(XElement oe)
+        {
+            try { return new AgentRichText(oe).IsSingleBlank; }
+            catch (Exception ex) when (ex is AiException || ex is System.Xml.XmlException || ex is ArgumentException) { return false; }
+        }
+
         /// <param name="formatted">本次写入格式的段落。它们的列表和标记已按语义核验，这里不再逐字比 XML（OneNote 会补上字号、编号文字、时间）。</param>
-        private static bool ContentPreserved(XElement expected, XElement actual, ISet<string> known, ISet<string> formatted)
+        /// <param name="spacingBlanks">本次代码框间隔调整得到的单行空段落；只允许无链接、无换行的空白与空 T 等价，外观另行核验。</param>
+        private static bool ContentPreserved(XElement expected, XElement actual, ISet<string> known, ISet<string> formatted, ISet<XElement> spacingBlanks)
         {
             if (Topology(expected, known) != Topology(actual, known)) return false;
             var before = expected.Descendants(One + "OE").ToList();
@@ -757,8 +787,12 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 if (StableIdentity(before[i], known) != StableIdentity(after[i], known)) return false;
                 if (before[i].Ancestors(One + "OE").Count() != after[i].Ancestors(One + "OE").Count()) return false;
+                if (spacingBlanks.Contains(before[i]))
+                {
+                    if (!IsNormalizableBlank(after[i])) return false;
+                }
                 // 新建的代码行和还原的段落只比文字：OneNote 会改写代码行的 span 和硬空格，还原段落的格式另行核验。
-                if (before[i].Elements(One + "T").Any() && !known.Contains((string)before[i].Attribute("objectID") ?? ""))
+                else if (before[i].Elements(One + "T").Any() && !known.Contains((string)before[i].Attribute("objectID") ?? ""))
                 {
                     if (AgentCode.PlainText(before[i]) != AgentCode.PlainText(after[i])) return false;
                 }
