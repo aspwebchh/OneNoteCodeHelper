@@ -15,7 +15,7 @@ using OneNoteCodeHelper.Highlighting.Themes;
 using OneNoteCodeHelper.Services;
 using OneNoteCodeHelper.Services.Agent;
 
-internal static class Program
+internal static partial class Program
 {
     private static readonly XNamespace One = OneNoteApi.One;
     private static int _passed, _failed;
@@ -3190,6 +3190,7 @@ internal static class Program
         });
         ReviewRegressions();
         ClearFormatTests();
+        ClearFormatRegressionTests();
         Console.WriteLine($"Agent: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
     }
@@ -3717,7 +3718,7 @@ internal static class Program
             changed.AfterSave = () =>
             {
                 foreach (var oe in changed.Page.Descendants(One + "OE").Where(e => ((string)e.Attribute("objectID") ?? "").StartsWith("new-", StringComparison.Ordinal) && e.Elements(One + "T").Any()))
-                    oe.SetAttributeValue("style", "font-family:Consolas;font-size:10pt");
+                    oe.Element(One + "T").SetAttributeValue("style", "font-family:Consolas;font-size:10pt");
             };
             var report = new AgentCommitter(changed).Commit(other, CancellationToken.None);
             Equal("PartiallyApplied", report.Status); Equal(0, report.Unwrapped); True(report.Unverified > 0);
@@ -4264,8 +4265,9 @@ internal static class Program
     private sealed class ClearScriptClient : IAgentChatClient
     {
         private readonly AgentPageSnapshot _s; private int _turn;
+        private readonly bool _keepLinks;
         internal bool SawTools;
-        internal ClearScriptClient(AgentPageSnapshot s) { _s = s; }
+        internal ClearScriptClient(AgentPageSnapshot s, bool keepLinks = false) { _s = s; _keepLinks = keepLinks; }
         public Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
             var defined = Json(tools);
@@ -4274,8 +4276,8 @@ internal static class Program
             switch (_turn++)
             {
                 case 0: name = "read_blocks"; args = new { snapshot_id = _s.SnapshotId, block_ids = _s.Blocks.Where(b => b.Editable || b.CodeCandidate).Select(b => b.Id).ToArray() }; break;
-                case 1: name = "clear_format"; args = new { snapshot_id = _s.SnapshotId, block_ids = _s.Blocks.Select(b => b.Id).ToArray() }; break;
-                case 2: name = "unwrap_code"; args = new { snapshot_id = _s.SnapshotId, table_ids = new[] { "t1" } }; break;
+                case 1: name = "clear_format"; args = new { snapshot_id = _s.SnapshotId, block_ids = _s.Blocks.Select(b => b.Id).ToArray(), links = !_keepLinks }; break;
+                case 2: name = "unwrap_code"; args = new { snapshot_id = _s.SnapshotId, table_ids = new[] { "t1" }, links = !_keepLinks }; break;
                 case 3: name = "set_table_style"; args = new { snapshot_id = _s.SnapshotId, table_ids = new[] { "t2" }, style = new { borders = true, header_row = false, cell_shading = "none" } }; break;
                 default: name = "finish_edit"; args = new { snapshot_id = _s.SnapshotId, draft_revision = _s.Revision }; break;
             }

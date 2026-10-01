@@ -29,7 +29,7 @@ namespace OneNoteCodeHelper.Services.Agent
             "（包括 reason 为 empty、protected_code、unhighlighted_code 的段落），不要用 set_paragraph_style、set_text_style 逐项还原；" +
             "用户要求保留列表、标记或链接时把 lists、tags、links 对应设为 false。用户没有另外要求时，清除格式后不要再把代码转换为代码框，也不要再设置样式。" +
             "用户没有要求清除格式时不要调用。";
-        internal const string UnwrapPrompt = "用户明确要求去掉代码框、把代码变回普通文字时，用 unwrap_code 拆开代码框；用户没有要求时不要拆。";
+        internal const string UnwrapPrompt = "用户明确要求去掉代码框、把代码变回普通文字时，用 unwrap_code 拆开代码框；用户没有要求时不要拆。用户要求保留链接时传 links=false。";
 
         /// <summary>提供 strip_markdown 时追加；后面接着用的工具按实际提供的提，见 <see cref="SystemPrompt"/>。</summary>
         internal const string MarkdownPrompt = "用户要求去掉 Markdown 格式、把 Markdown 整理成普通笔记时，用 strip_markdown 一次处理完整读取的段落（可以整页一起传），" +
@@ -81,7 +81,8 @@ namespace OneNoteCodeHelper.Services.Agent
             if (tools.Has("clear_format"))
             {
                 prompt.Append(ClearFormatPrompt);
-                if (tools.Has("unwrap_code")) prompt.Append("清除全部格式时，页面上的代码框（tables 里 reason 为 highlighted_code）也用 unwrap_code 拆成正文段落，用户要求保留代码框时不拆。");
+                if (tools.Has("unwrap_code")) prompt.Append("清除全部格式时，页面上的代码框（tables 里 reason 为 highlighted_code）也用 unwrap_code 拆成正文段落，用户要求保留代码框时不拆；" +
+                    "用户要求保留链接时，clear_format 和 unwrap_code 都传 links=false。");
                 if (tools.Has("set_table_style")) prompt.Append("普通表格用 set_table_style 恢复默认外观：borders 为 true、header_row 为 false、cell_shading 为 none，外观相同的表格一次调用。");
             }
             if (tools.Has("unwrap_code")) prompt.Append(UnwrapPrompt);

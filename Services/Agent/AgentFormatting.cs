@@ -229,8 +229,10 @@ namespace OneNoteCodeHelper.Services.Agent
         /// 清除格式：去掉加粗、斜体、下划线、删除线、上下标、颜色、高亮、字体和字号，文字、硬空格和段内换行不变。
         /// keepLinks 时链接只留地址，否则连链接一起去掉。emoji、符号字体保留，和 <see cref="Rewrite"/> 一样，去掉会显示成方框。
         /// </summary>
-        internal void ClearInline(bool keepLinks)
+        internal void ClearInline(bool keepLinks, XElement context = null)
         {
+            var runs = (context ?? _oe).Elements(OneNoteApi.One + "T").ToList();
+            var page = (context ?? _oe).AncestorsAndSelf().Last();
             foreach (var p in _pieces)
             {
                 var path = new List<XElement>();
@@ -239,6 +241,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 // 实际生效的是最内层的字体；保留原写法（大小写、引号），只判断时规范化。
                 var font = p.Path.SelectMany(tag => ((string)tag.Attribute("style") ?? "").Split(';'))
                     .LastOrDefault(item => item.IndexOf(':') > 0 && item.Substring(0, item.IndexOf(':')).Trim().Equals("font-family", StringComparison.OrdinalIgnoreCase));
+                if (font == null && Css.Effective(runs[p.Run], page).TryGetValue("font-family", out var inherited)) font = "font-family:" + inherited;
                 var name = font == null ? "" : Css.Normalize(font.Substring(font.IndexOf(':') + 1));
                 if (name.Contains("emoji") || name.Contains("symbol")) path.Add(new XElement("span", new XAttribute("style", font.Trim())));
                 p.Path = path;
@@ -361,6 +364,13 @@ namespace OneNoteCodeHelper.Services.Agent
                     result.Append((int)ch).Append(':').Append(link.Length).Append(':').Append(link)
                     .Append(':').Append(style.Length).Append(':').Append(style).Append(';');
             }
+            // 空 T 没有字符可投影，代码空行又会把硬空格回存成空 T；仍须检查它们的有效格式。
+            if (includeStyles && (skipWhitespace ? string.IsNullOrWhiteSpace(Text) : Text.Length == 0))
+            {
+                var styles = BlankStyles(page).Select(Css.Write).ToList();
+                result.Append("|empty_styles=");
+                foreach (var style in styles.Where((s, i) => i == 0 || s != styles[i - 1])) result.Append(style.Length).Append(':').Append(style);
+            }
             return result.ToString();
         }
 
@@ -431,7 +441,13 @@ namespace OneNoteCodeHelper.Services.Agent
             foreach (var item in (value ?? "").Split(';'))
             {
                 var colon = item.IndexOf(':');
-                if (colon > 0) result[item.Substring(0, colon).Trim().ToLowerInvariant()] = Normalize(item.Substring(colon + 1));
+                if (colon > 0)
+                {
+                    var key = item.Substring(0, colon).Trim().ToLowerInvariant();
+                    // OneNote 的高亮在 HTML 里有 background 和 background-color 两种写法。
+                    if (key == "background") key = "background-color";
+                    result[key] = key == "background-color" ? Background(item.Substring(colon + 1)) : Normalize(item.Substring(colon + 1));
+                }
             }
             return result;
         }
@@ -451,9 +467,19 @@ namespace OneNoteCodeHelper.Services.Agent
         internal static void Merge(IDictionary<string, string> target, IDictionary<string, string> source)
         { foreach (var item in source) target[item.Key] = item.Value; }
 
+        private static string Background(string value)
+        {
+            var normalized = Normalize(value);
+            switch (normalized.Replace(" ", ""))
+            {
+                case "": case "none": case "automatic": case "transparent": case "rgba(0,0,0,0)": return "transparent";
+                default: return normalized;
+            }
+        }
+
         internal static Dictionary<string, string> Effective(XElement node, XElement page)
         {
-            var result = Read("font-weight:normal;font-style:normal;text-decoration:none;vertical-align:baseline");
+            var result = Read("font-weight:normal;font-style:normal;text-decoration:none;vertical-align:baseline;background-color:transparent");
             foreach (var e in node.AncestorsAndSelf().Reverse())
             {
                 var index = (string)e.Attribute("quickStyleIndex");
@@ -464,18 +490,29 @@ namespace OneNoteCodeHelper.Services.Agent
                     Set(result, "font-size", (string)definition.Attribute("fontSize") + "pt");
                     Set(result, "color", (string)definition.Attribute("fontColor"));
                     Merge(result, Emphasis(definition));
+                    result["vertical-align"] = (string)definition.Attribute("superscript") == "true" ? "super" :
+                        (string)definition.Attribute("subscript") == "true" ? "sub" : "baseline";
+                    result["background-color"] = Background((string)definition.Attribute("highlightColor") ?? "automatic");
                 }
                 Merge(result, Read((string)e.Attribute("style")));
             }
             return result;
         }
-        /// <summary>QuickStyleDef 决定的加粗、斜体、下划线；没写的按 false。</summary>
-        internal static Dictionary<string, string> Emphasis(XElement definition) => new Dictionary<string, string>
+        /// <summary>QuickStyleDef 决定的加粗、斜体、下划线和删除线；没写的按 false。</summary>
+        internal static Dictionary<string, string> Emphasis(XElement definition)
         {
-            ["font-weight"] = (string)definition.Attribute("bold") == "true" ? "bold" : "normal",
-            ["font-style"] = (string)definition.Attribute("italic") == "true" ? "italic" : "normal",
-            ["text-decoration"] = (string)definition.Attribute("underline") == "true" ? "underline" : "none"
-        };
+            var decoration = string.Join(" ", new[]
+            {
+                (string)definition.Attribute("underline") == "true" ? "underline" : null,
+                (string)definition.Attribute("strikethrough") == "true" ? "line-through" : null
+            }.Where(v => v != null));
+            return new Dictionary<string, string>
+            {
+                ["font-weight"] = (string)definition.Attribute("bold") == "true" ? "bold" : "normal",
+                ["font-style"] = (string)definition.Attribute("italic") == "true" ? "italic" : "normal",
+                ["text-decoration"] = decoration.Length > 0 ? decoration : "none"
+            };
+        }
         private static void Set(IDictionary<string, string> css, string key, string value)
         { if (!string.IsNullOrEmpty(value)) css[key] = Normalize(value); }
     }
@@ -485,6 +522,19 @@ namespace OneNoteCodeHelper.Services.Agent
         internal static readonly string[] Ids = { "page_title", "heading1", "heading2", "body", "quote" };
         internal static readonly string[] Colors = { "#1F4E79", "#365F91", "#222222", "#666666" };
         internal static readonly string[] Fonts = { "Microsoft YaHei", "Calibri", "Arial" };
+
+        /// <summary>
+        /// 清除格式专用：在本段文字上显式覆盖继承格式，不改变下级段落。ClearInline 已把需保留的 emoji、符号字体移进 span。
+        /// 与普通套预设分开，避免改变 set_paragraph_style 保留局部强调的行为；空 T 也要写入重置值。
+        /// </summary>
+        internal static void ResetBodyText(XElement oe, AgentOptions options)
+        {
+            var reset = Css.Read("font-weight:normal;font-style:normal;text-decoration:none;vertical-align:baseline;background-color:transparent");
+            reset["font-family"] = options.FontFamily;
+            reset["font-size"] = "11pt";
+            reset["color"] = Colors[2];
+            foreach (var t in oe.Elements(OneNoteApi.One + "T")) t.SetAttributeValue("style", Css.Write(reset));
+        }
 
         internal static XElement Definition(string role, AgentOptions options)
         {

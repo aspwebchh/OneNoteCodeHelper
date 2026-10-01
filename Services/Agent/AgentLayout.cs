@@ -19,6 +19,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal string[] Ids;
         /// <summary>unwrapped：拆开的代码框的短 ID（t1…），Ids 是拆出来的新段落 u1…。</summary>
         internal string TableId;
+        /// <summary>unwrapped：拆框时删除的链接数，对应整组代码行核验通过后才计入结果。</summary>
+        internal int LinksRemoved;
     }
 
     /// <summary>insert_blocks 新插入的段落，短 ID 为 n1、n2…</summary>
@@ -213,17 +215,18 @@ namespace OneNoteCodeHelper.Services.Agent
         /// unwrap_code：把代码框（外层 OE）换成正文段落，每个代码行一段。代码行复制后去掉 ID、清除行内格式、套正文预设，
         /// 文字、硬空格和段内换行原样保留；代码框留白用的段前段后间距一并去掉。调用方已校验代码框只有平铺的文字段落。
         /// </summary>
-        internal static List<XElement> Unwrap(XElement wrapper, Func<string> nextId, AgentOptions options, XElement styles)
+        internal static List<XElement> Unwrap(XElement wrapper, Func<string> nextId, AgentOptions options, XElement styles, bool removeLinks = true)
         {
             var lines = wrapper.Element(One + "Table").Element(One + "Row").Element(One + "Cell").Element(One + "OEChildren").Elements(One + "OE").Select(line =>
             {
                 var oe = new XElement(line);
+                new AgentRichText(oe).ClearInline(!removeLinks, line);
                 AgentCode.StripIdentity(oe);
                 foreach (var a in oe.Attributes().Where(a => a.Name.Namespace == Key.Namespace || new[] { "style", "quickStyleIndex", "spaceBefore", "spaceAfter" }.Contains(a.Name.LocalName)).ToList())
                     a.Remove();
-                new AgentRichText(oe).ClearInline(false);
                 ParagraphStyles.Apply(oe, "body", new Dictionary<string, object>(), options, false);
                 if (options.EnableNativeHeadings) oe.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(styles, ParagraphStyles.Definition("body", options)));
+                ParagraphStyles.ResetBodyText(oe, options);
                 oe.SetAttributeValue(Key, nextId());
                 return oe;
             }).ToList();

@@ -322,9 +322,11 @@ namespace OneNoteCodeHelper.Services.Agent
                 var tables = AgentSchema.Array(AgentSchema.Str());
                 tables.MaxItems = MaxUnwrapPerCall;
                 unwrap.Properties["table_ids"] = tables;
+                unwrap.Properties["links"] = new AgentSchema { Type = "boolean" };
                 unwrap.Required = new[] { "snapshot_id", "table_ids" };
                 Register("unwrap_code", "把已有代码框（get_page_overview 的 tables 里 reason 为 highlighted_code 的表格）拆成正文段落：去掉代码框和语法颜色，" +
-                    "每个代码行一段，文字、缩进和空行不变，改成正文样式。拆出来的段落 ID 为 u1、u2…，本次任务内不能再修改或移动。", unwrap, UnwrapCode);
+                    "每个代码行一段，文字、缩进和空行不变，改成正文样式。links 默认 true 去掉链接，用户要求保留链接时设为 false。" +
+                    "拆出来的段落 ID 为 u1、u2…，本次任务内不能再修改或移动。", unwrap, UnwrapCode);
             }
             Register("get_pending_changes", "检查草稿修订号、改动和尚未读取的段落；next_read_block_ids 是下一批可完整读取的段落（最多 100 段）。", SnapshotOnly(), Pending);
             var finish = SnapshotOnly();
@@ -464,6 +466,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 case "unwrap_code":
                     detail = AiClient.Get(outcome, "unwrapped") is IList boxes ? $"{boxes.Count} 个代码框" :
                         AiClient.Get(args, "table_ids") is IList boxIds ? $"{boxIds.Count} 个代码框" : null;
+                    if (AiClient.Get(outcome, "links_removed") is int unwrappedLinks && unwrappedLinks > 0) detail = JoinDetail(detail, $"去掉链接 {unwrappedLinks} 处");
                     break;
                 case "set_list":
                     detail = JoinDetail(ListName(AiClient.Get(args, "list") as string), CountOf(args, "block_ids"));
@@ -730,7 +733,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// 原生样式会影响未指定的下级段落时，只设置本段外观并保留原有样式引用；做不到和原生样式看起来一样时整次调用拒绝，没有副作用。
         /// </summary>
         private (List<string> Changed, List<string> Noop, string[] AppearanceOnly) ApplyPreset(Dictionary<AgentBlock, XElement> drafts, Func<AgentBlock, string> presetOf,
-            IDictionary<string, object> overrides, bool removeLinks = false)
+            IDictionary<string, object> overrides, bool removeLinks = false, bool clearFormat = false)
         {
             var blocks = drafts.Keys.ToList();
             var styles = new XElement(_snapshot.DraftStyles);
@@ -743,6 +746,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 ParagraphStyles.Apply(drafts[b], preset, overrides, _snapshot.Options, current.Elements(OneNoteApi.One + "OEChildren").Any());
                 if (_snapshot.Options.EnableNativeHeadings && preset != "page_title")
                     drafts[b].SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(styles, ParagraphStyles.Definition(preset, _snapshot.Options)));
+                if (clearFormat) ParagraphStyles.ResetBodyText(drafts[b], _snapshot.Options);
             }
             var after = _snapshot.CreateDraftPage(formats: drafts, styles: styles);
             var targeted = new HashSet<string>(blocks.Select(b => b.Id));
@@ -758,7 +762,8 @@ namespace OneNoteCodeHelper.Services.Agent
                 var native = new AgentRichText(target).Signature(after, true);
                 var draft = drafts[b];
                 foreach (var name in new[] { "style", "quickStyleIndex" }) draft.SetAttributeValue(name, (string)b.Draft.Attribute(name));
-                ParagraphStyles.PinEmphasis(draft, ParagraphStyles.Definition(presetOf(b), _snapshot.Options));
+                if (clearFormat) ParagraphStyles.ResetBodyText(draft, _snapshot.Options);
+                else ParagraphStyles.PinEmphasis(draft, ParagraphStyles.Definition(presetOf(b), _snapshot.Options));
                 AgentPageSnapshot.CopyFormat(draft, target);
                 // 格式草稿带的是未截取的正文，按结构草稿的记录重新去掉代码框间隔删除的空白行。
                 AgentCodeSpacing.Apply(target);
@@ -825,6 +830,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var drafts = new Dictionary<AgentBlock, XElement>();
             var titles = new HashSet<AgentBlock>();
             var skipped = new List<(string Id, string Reason)>();
+            var context = _snapshot.CreateDraftPage();
             var allowed = new[] { "T", "Meta", "List", "Tag", "OEChildren" };
             foreach (var id in Ids(args, "block_ids"))
             {
@@ -840,7 +846,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (reason != null) { skipped.Add((id, reason)); continue; }
                 if ((b.Editable || b.CodeCandidate) && !b.Read) throw new AiException("请先完整读取目标段落。");
                 var draft = new XElement(b.Draft);
-                new AgentRichText(draft).ClearInline(!links);
+                new AgentRichText(draft).ClearInline(!links, AgentLayout.Find(context, b.Id));
                 // 段落 style 里的加粗、背景色等同样是格式；预设只覆盖字体、字号和颜色，先整个去掉。
                 // 有下级段落时它们会跟着变，由 ApplyPreset 的继承检查回退成只设本段外观。
                 draft.SetAttributeValue("style", null);
@@ -854,7 +860,7 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             if (drafts.Count == 0) throw new AiException("目标段落都受到保护或已删除：" + string.Join("、", skipped.Select(s => $"{s.Id}（{s.Reason}）")) + "。" +
                 (skipped.Any(s => s.Reason == "highlighted_code") ? "代码框要用 unwrap_code 拆开。" : ""));
-            var (changed, noop, appearanceOnly) = ApplyPreset(drafts, b => titles.Contains(b) ? null : "body", new Dictionary<string, object>(), removeLinks: links);
+            var (changed, noop, appearanceOnly) = ApplyPreset(drafts, b => titles.Contains(b) ? null : "body", new Dictionary<string, object>(), removeLinks: links, clearFormat: true);
             // 开关关闭的列表、标记照旧保留，如实告诉模型。
             var kept = new[] { ("lists", Option("lists") && !lists), ("tags", Option("tags") && !tags) }.Where(k => k.Item2).Select(k => k.Item1).ToArray();
             return new { ok = true, draft_revision = _snapshot.Revision, changed, noop, appearance_only = appearanceOnly,
@@ -1229,6 +1235,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// </summary>
         private object UnwrapCode(IDictionary<string, object> args)
         {
+            var links = !args.TryGetValue("links", out var removeLinks) || (bool)removeLinks;
             var ids = ((IList)args["table_ids"]).Cast<string>().ToList();
             if (ids.Distinct().Count() != ids.Count) throw new AiException("目标表格重复。");
             var candidate = new XElement(_snapshot.Layout);
@@ -1262,9 +1269,10 @@ namespace OneNoteCodeHelper.Services.Agent
                     catch (Exception ex) when (ex is System.Xml.XmlException || ex is AiException || ex is ArgumentException)
                     { throw new AiException($"代码框 {id} 里有无法解析的内容，不能拆开。"); }
                 }
-                var created = AgentLayout.Unwrap(wrapper, () => "u" + ++serial, _snapshot.Options, styles);
+                var linksRemoved = links ? lines.Sum(line => new AgentRichText(line).LinkCount) : 0;
+                var created = AgentLayout.Unwrap(wrapper, () => "u" + ++serial, _snapshot.Options, styles, links);
                 changes.Add(new AgentLayoutChange { Kind = "unwrapped", OutlineId = (string)outline.Attribute("objectID"), TableId = id,
-                    Ids = created.Select(AgentLayout.KeyOf).ToArray() });
+                    Ids = created.Select(AgentLayout.KeyOf).ToArray(), LinksRemoved = linksRemoved });
             }
             if (changes.Count > 0)
             {
@@ -1272,7 +1280,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 _snapshot.DraftStyles.ReplaceNodes(styles.Elements().Select(e => new XElement(e)));
             }
             return new { ok = true, draft_revision = _snapshot.Revision,
-                unwrapped = changes.Select(c => new { table_id = c.TableId, block_ids = c.Ids }).ToArray(), noop = noop.ToArray() };
+                unwrapped = changes.Select(c => new { table_id = c.TableId, block_ids = c.Ids }).ToArray(), noop = noop.ToArray(), links_removed = changes.Sum(c => c.LinksRemoved) };
         }
 
         private object RemoveBlankLines(IDictionary<string, object> args)
@@ -1600,7 +1608,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 inserted = _snapshot.Inserted.Where(i => present.Contains(i.Id)).Select(i => new { id = i.Id, text = i.Text }).ToArray(),
                 merged = _snapshot.LayoutChanges.Where(c => c.Kind == "merged").Select(c => new { from = c.From, into = c.OutlineId }).ToArray(),
                 unwrapped_code = _snapshot.LayoutChanges.Where(c => c.Kind == "unwrapped").Select(c => new { table_id = c.TableId, block_ids = c.Ids }).ToArray() },
-                links_removed = _snapshot.Blocks.Sum(b => b.LinksRemoved),
+                links_removed = _snapshot.Blocks.Sum(b => b.LinksRemoved) + _snapshot.LayoutChanges.Where(c => c.Kind == "unwrapped").Sum(c => c.LinksRemoved),
                 unconverted_code = _snapshot.Blocks.Where(b => b.CodeCandidate && b.Conversion == null).Select(b => b.Id).ToArray(),
                 tables_changed = _snapshot.Tables.Where(t => t.Changed).Select(t => t.Id).ToArray(),
                 protected_count = _snapshot.Blocks.Count(b => !b.Editable && b.Conversion == null) };

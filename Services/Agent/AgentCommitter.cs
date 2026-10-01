@@ -503,7 +503,7 @@ namespace OneNoteCodeHelper.Services.Agent
             internal readonly List<(XElement Node, int Lines)> SoftLines = new List<(XElement, int)>();
             internal readonly HashSet<XElement> BlankLines = new HashSet<XElement>();
             /// <summary>unwrap_code 拆出来的段落，每个代码框一组：OneNote 会改写代码行的硬空格，格式按 <see cref="AgentPageSnapshot.CodeLineFormat"/> 核验。</summary>
-            internal readonly List<List<XElement>> Unwrapped = new List<List<XElement>>();
+            internal readonly List<(List<XElement> Lines, int LinksRemoved)> Unwrapped = new List<(List<XElement>, int)>();
             internal readonly List<(XElement Box, AgentCodeConversion Conversion)> Boxes = new List<(XElement, AgentCodeConversion)>();
             /// <summary>改了外观的表格和它在写入内容里的元素；跨框移过来的表格没有原 ID，按位置核对。</summary>
             internal readonly List<(AgentTable Table, XElement Target)> Tables = new List<(AgentTable, XElement)>();
@@ -527,7 +527,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (AgentLayout.Find(written, inserted) is XElement blank) edit.BlankLines.Add(blank);
             // 私有 ID 在写入前去掉，先按 ID 记下拆出来的段落。拆完又被合并的文本框带着它们到了别的框，按实际位置找。
             foreach (var change in snapshot.LayoutChanges.Where(c => c.Kind == "unwrapped"))
-                if (change.Ids.Select(u => AgentLayout.Find(written, u)).Where(line => line != null).ToList() is var lines && lines.Count > 0) edit.Unwrapped.Add(lines);
+                if (change.Ids.Select(u => AgentLayout.Find(written, u)).Where(line => line != null).ToList() is var lines && lines.Count > 0) edit.Unwrapped.Add((lines, change.LinksRemoved));
             var converted = new HashSet<string>(snapshot.CodeConversions.SelectMany(c => c.Blocks).Select(b => b.Id));
             foreach (var node in written.Descendants(One + "OE").Where(AgentCodeSpacing.HasTrim).Where(n => !converted.Contains(AgentLayout.KeyOf(n) ?? "")))
             {
@@ -663,7 +663,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var fixesBefore = report.TextFixes.Count;
             var boxLines = new HashSet<XElement>(edit.Boxes.SelectMany(b => b.Box.Descendants(One + "OE")));
             // 拆出来的代码行、重建的代码框（撤销拆框、跨框搬来的代码框没有原 ID）：OneNote 会改写代码行的硬空格，格式跳过空白比较，文字已由内容核验核对。
-            var codeLines = new HashSet<XElement>(edit.Unwrapped.SelectMany(lines => lines).Concat(edit.Written.Descendants(One + "Table")
+            var codeLines = new HashSet<XElement>(edit.Unwrapped.SelectMany(u => u.Lines).Concat(edit.Written.Descendants(One + "Table")
                 .Where(t => t.Attribute("objectID") == null && AgentPageSnapshot.IsCodeBox(t, page)).SelectMany(t => t.Descendants(One + "OE"))));
             var failed = new HashSet<XElement>();
             // 合并删掉的文本框不在期望页面里，没有要按位置核对的段落。
@@ -698,7 +698,11 @@ namespace OneNoteCodeHelper.Services.Agent
                 report.LinksRemoved += block.LinksRemoved;
                 if (block.AppearanceOnly) report.AppearanceOnly.Add(block.Id);
             }
-            report.Unwrapped += edit.Unwrapped.Count(lines => !lines.Any(failed.Contains));
+            foreach (var unwrapped in edit.Unwrapped.Where(u => !u.Lines.Any(failed.Contains)))
+            {
+                report.Unwrapped++;
+                report.LinksRemoved += unwrapped.LinksRemoved;
+            }
             foreach (var (box, conversion) in edit.Boxes)
             {
                 if (!ConversionWritten(box, actualLines[expectedLines.IndexOf(box)], conversion, page, actual))
