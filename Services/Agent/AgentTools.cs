@@ -245,7 +245,10 @@ namespace OneNoteCodeHelper.Services.Agent
                     "但表格单元格里的段落只能在同一个单元格里移动，也不能把文本框移空。", move, MoveBlocks);
                 if (snapshot.EditableOutlines.Count > 1)
                     Register("merge_outlines", "把一个文本框的全部内容（段落、表格、图片、空行）按原来的顺序移到另一个文本框里目标段落的前面或后面，成为目标的同级段落，" +
-                        "再删掉空了的源文本框。source_id 是源文本框的 container_id（见 get_page_overview 的 outlines）。",
+                        "再删掉空了的源文本框。source_id 是源文本框的 container_id（见 get_page_overview 的 outlines）。" +
+                        "结果里的 mergeable_left 是能在目标框内至少一个合法位置继续合并的文本框数（mergeable_outline_ids 列出它们），已核验选区、格式和转换限制。" +
+                        "用户要求合并全部文本框时继续处理这些框；为 0 表示当前目标框已无合法合并来源，受保护或不满足限制的框保留并说明原因。" +
+                        "某个位置失败时按错误选择其他合法位置，不要重复相同的失败调用。",
                         AgentSchema.Obj(new Dictionary<string, AgentSchema>
                         {
                             ["snapshot_id"] = AgentSchema.Str(), ["source_id"] = AgentSchema.Str(), ["target_id"] = AgentSchema.Str(), ["position"] = AgentSchema.Str("before", "after")
@@ -465,6 +468,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     break;
                 case "merge_outlines":
                     detail = AiClient.Get(outcome, "moved") is IList merged ? $"{merged.Count} 段" : null;
+                    if (AiClient.Get(outcome, "mergeable_left") is int left && left > 0) detail = JoinDetail(detail, $"还剩 {left} 个");
                     break;
             }
             var text = detail == null ? DisplayName(name) : DisplayName(name) + " · " + detail;
@@ -1179,21 +1183,100 @@ namespace OneNoteCodeHelper.Services.Agent
         private object MergeOutlines(IDictionary<string, object> args)
         {
             var sourceId = (string)args["source_id"];
-            var candidate = new XElement(_snapshot.Layout);
+            var prepared = PrepareMerge(_snapshot.Layout, sourceId, (string)args["target_id"], (string)args["position"] == "before");
+            // 在发布前完成只读预检：取消或非预期异常不能留下已发布的部分草稿。
+            var left = MergeableOutlines(prepared.Layout, prepared.Into);
+            PublishLayout(prepared.Layout, new[] { new AgentLayoutChange { Kind = "merged", OutlineId = prepared.Into, From = sourceId, Ids = prepared.Moved } });
+            return new { ok = true, draft_revision = _snapshot.Revision, merged = sourceId, into = prepared.Into, moved = prepared.Moved,
+                mergeable_left = left.Length, mergeable_outline_ids = left };
+        }
+
+        /// <summary>实际合并与剩余计数共用的准备：只修改布局副本，核验全部不变量，不发布草稿。</summary>
+        private (XElement Layout, string Into, string[] Moved) PrepareMerge(XElement layout, string sourceId, string targetId, bool before,
+            Action<string> formatMismatch = null)
+        {
+            _cancellation.ThrowIfCancellationRequested();
+            var candidate = new XElement(layout);
             var source = candidate.Elements(OneNoteApi.One + "Outline").FirstOrDefault(o => (string)o.Attribute("objectID") == sourceId);
             if (source == null) throw new AiException("源文本框不存在或已经合并。");
             if (!_snapshot.EditableOutlines.Contains(sourceId)) throw new AiException("源文本框受到保护，不能调整结构。");
-            var target = Node(candidate, (string)args["target_id"], out _);
+            var target = Node(candidate, targetId, out _);
             if (target.Ancestors(OneNoteApi.One + "Outline").First() == source) throw new AiException("目标段落不能在源文本框里。");
             if (PageEditor.TextBlockOf(target).Name != OneNoteApi.One + "Outline") throw new AiException("目标段落不能在表格单元格里。");
-            // 只处理选中范围时，没选中的段落不在快照里，不能跟着搬走。
-            if (source.Descendants(OneNoteApi.One + "OE").Any(e => e.Elements(OneNoteApi.One + "T").Any() && AgentLayout.KeyOf(e) == null))
-                throw new AiException("源文本框里有没选中的段落，不能整体合并。");
+            if (HasUnselected(source)) throw new AiException("源文本框里有没选中的段落，不能整体合并。");
             var moved = source.Descendants(OneNoteApi.One + "OE").Select(AgentLayout.KeyOf).Where(k => k != null).ToArray();
             var into = OutlineOf(target);
-            AgentLayout.Merge(source, target, (string)args["position"] == "before");
-            PublishLayout(candidate, new[] { new AgentLayoutChange { Kind = "merged", OutlineId = into, From = sourceId, Ids = moved } });
-            return new { ok = true, draft_revision = _snapshot.Revision, merged = sourceId, into, moved };
+            AgentLayout.Merge(source, target, before);
+            _snapshot.CheckLayout(candidate, formatMismatch);
+            _cancellation.ThrowIfCancellationRequested();
+            return (candidate, into, moved);
+        }
+
+        /// <summary>只处理选中范围时，没选中的段落不在快照里，不能跟着整框搬走。</summary>
+        private static bool HasUnselected(XElement outline) =>
+            outline.Descendants(OneNoteApi.One + "OE").Any(e => e.Elements(OneNoteApi.One + "T").Any() && AgentLayout.KeyOf(e) == null);
+
+        /// <summary>按页面顺序列出还能并进 into 的文本框；目标框内任一合法段落的前后通过实际合并校验才计入。</summary>
+        private string[] MergeableOutlines(XElement layout, string into)
+        {
+            _cancellation.ThrowIfCancellationRequested();
+            // 必须取完整格式草稿：待应用的父段格式、QuickStyleDef 也影响新位置的继承环境。
+            var draft = _snapshot.CreateDraftPage(layout);
+            var draftNodes = draft.Descendants(OneNoteApi.One + "OE").Where(e => AgentLayout.KeyOf(e) != null).ToDictionary(AgentLayout.KeyOf);
+            var targets = new List<(string Id, string InheritedStyle)>();
+            var targetParents = new HashSet<XElement>();
+            var destination = layout.Elements(OneNoteApi.One + "Outline").First(o => (string)o.Attribute("objectID") == into);
+            foreach (var id in destination.Descendants(OneNoteApi.One + "OE").Select(AgentLayout.KeyOf).Where(id => id != null))
+            {
+                _cancellation.ThrowIfCancellationRequested();
+                try
+                {
+                    var node = Node(layout, id, out _);
+                    // 同一父节点下的合法目标都不在转换范围内；整框插到其前后具有相同的祖先和继承环境。
+                    // 每个父节点只预检一组代表位置，避免样式不兼容时把一整框的兄弟段落反复核验。
+                    if (PageEditor.TextBlockOf(node).Name == OneNoteApi.One + "Outline" && targetParents.Add(node.Parent))
+                        targets.Add((id, Css.Write(Css.Effective(draftNodes[id].Parent, draft))));
+                }
+                catch (AiException) { /* 已转换的段落或代码框不能作为目标。 */ }
+            }
+            var left = new List<string>();
+            foreach (var source in layout.Elements(OneNoteApi.One + "Outline"))
+            {
+                _cancellation.ThrowIfCancellationRequested();
+                var id = (string)source.Attribute("objectID");
+                if (id == null || id == into || !_snapshot.EditableOutlines.Contains(id) || HasUnselected(source)) continue;
+                if (CanMerge(source)) left.Add(id);
+            }
+            return left.ToArray();
+
+            bool CanMerge(XElement source)
+            {
+                var sourceId = (string)source.Attribute("objectID");
+                var sourceBlocks = new HashSet<string>(source.Descendants(OneNoteApi.One + "OE").Select(AgentLayout.KeyOf).Where(id => id != null));
+                var rejectedStyles = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var target in targets)
+                {
+                    _cancellation.ThrowIfCancellationRequested();
+                    if (rejectedStyles.Contains(target.InheritedStyle)) continue;
+                    foreach (var before in new[] { true, false })
+                    {
+                        _cancellation.ThrowIfCancellationRequested();
+                        string mismatch = null;
+                        try { PrepareMerge(layout, sourceId, target.Id, before, id => mismatch = id); return true; }
+                        catch (AiException)
+                        {
+                            // 只复用已由完整检查确认的源段格式失败。相同继承环境下源段的字符格式必然相同；
+                            // 选区、转换和其他段落的失败不能据此跳过位置，成功候选仍走完整检查。
+                            if (mismatch != null && sourceBlocks.Contains(mismatch))
+                            {
+                                rejectedStyles.Add(target.InheritedStyle);
+                                break;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
         }
 
         private static readonly char[] Breaks = { '\n', '\r', '\t' };
@@ -1275,6 +1358,7 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             if (XNode.DeepEquals(candidate, _snapshot.Layout)) return false;
             _snapshot.CheckLayout(candidate);
+            _cancellation.ThrowIfCancellationRequested();
             _snapshot.Layout = candidate;
             _snapshot.LayoutChanges.AddRange(changes);
             _snapshot.Revision++;

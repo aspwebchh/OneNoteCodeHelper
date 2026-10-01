@@ -422,7 +422,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// 结构操作的两条不变量，candidate 是改好的结构草稿：已排入的代码框和表格转换仍然连续、内容不变；
         /// 已有段落的格式不变（挂到带样式的段落下面会继承它的样式，这种调整不做）。
         /// </summary>
-        internal void CheckLayout(XElement candidate)
+        internal void CheckLayout(XElement candidate, Action<string> formatMismatch = null)
         {
             // 比较选区外对象的祖先链和相对顺序，而不是绝对序号：在它前面插入选中段落不算越界。
             // 无文字的 OE（表格、图片包装）也参与，不能借合并文本框搬走未选中的对象；整体选中的表格、图片属于选区，可以带着走。
@@ -447,7 +447,11 @@ namespace OneNoteCodeHelper.Services.Agent
                 try { expected = SemanticFormat(left, before); } catch (Exception) { continue; }
                 string actual;
                 try { actual = SemanticFormat(right, after); } catch (Exception) { actual = null; }
-                if (expected != actual) throw new AiException($"这样调整会改变段落 {b.Id} 的格式（会继承上级段落或文本框的样式），没有应用。");
+                if (expected != actual)
+                {
+                    formatMismatch?.Invoke(b.Id);
+                    throw new AiException($"这样调整会改变段落 {b.Id} 的格式（会继承上级段落或文本框的样式），没有应用。");
+                }
             }
         }
 

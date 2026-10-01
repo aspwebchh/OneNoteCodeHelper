@@ -2704,11 +2704,17 @@ internal static class Program
             Rejects("页面标题", () => Merge(t, s, "B", "p1", "after"));
             Rejects("单元格", () => Merge(t, s, "B", "p3", "after"));
             Equal(0, s.Revision);
-            Merge(t, s, "B", "p2", "after");
+            // 受保护的 C 不算还能合并的文本框。
+            True(Json(Merge(t, s, "B", "p2", "after")).Contains("\"mergeable_left\":0"));
             Rejects("已经合并", () => Merge(t, s, "B", "p2", "after"));
             var selected = new AgentPageSnapshot(TwoBoxes().ToString(), new HashSet<string> { "a1", "b1" }, new AgentOptions());
             var st = Tools(selected); Read(st, selected);
             Rejects("没选中", () => Merge(st, selected, "B", "p1", "after"));
+            // 只选中了一部分段落的 C 不能整体合并，也不计入。
+            var partial = new AgentPageSnapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("b", "乙")),
+                Box("C", 500, Paragraph("c", "丙"), Paragraph("c2", "丙二"))).ToString(), new HashSet<string> { "a", "b", "c" }, new AgentOptions());
+            var pt = Tools(partial); Read(pt, partial);
+            True(Json(Merge(pt, partial, "B", "p1", "after")).Contains("\"mergeable_left\":0"));
         });
         Test("changes follow paragraphs into the merged box: text tables, table looks, styles and list removal", () =>
         {
@@ -2726,6 +2732,262 @@ internal static class Program
             var tables = api.Page.Descendants(One + "Table").ToList();
             Equal(2, tables.Count); True(tables.All(x => x.Ancestors(One + "Outline").Single().Attribute("objectID").Value == "A"));
             True(!TableLook.Flag(tables[1], "bordersVisible")); Equal("none", AgentMarks.ListKind(api.Page.Descendants(One + "OE").First(e => AgentCode.PlainText(e) == "列表项")));
+        });
+        Test("remaining merges exclude unselected images and carry selected images with or without selected text", () =>
+        {
+            foreach (var withText in new[] { false, true }) foreach (var selectedImage in new[] { false, true })
+            {
+                var image = Image("img", "cb");
+                if (selectedImage) image.Element(One + "Image").SetAttributeValue("selected", "all");
+                var source = Box("C", 500, withText ? new[] { Paragraph("c", "丙"), image } : new[] { image });
+                var selection = new HashSet<string> { "a", "b" }; if (withText) selection.Add("c");
+                var s = new AgentPageSnapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("b", "乙")), source).ToString(), selection, new AgentOptions());
+                var api = new FakePage(s.Page); api.Binary["cb"] = "IMAGEDATA";
+                var c = new AgentCommitter(api); var t = new AgentTools(s, c, CancellationToken.None); Read(t, s);
+                var originalPage = s.Page.ToString(); var originalSource = s.Layout.Elements(One + "Outline").Single(o => (string)o.Attribute("objectID") == "C").ToString();
+                RemainingMerges(Merge(t, s, "B", "p1", "after"), selectedImage ? "C" : "");
+                Equal(1, s.Revision); Equal(1, s.LayoutChanges.Count); Equal(0, s.Inserted.Count); Equal(0, api.Writes);
+                Equal(originalPage, s.Page.ToString()); Equal(originalSource, s.Layout.Elements(One + "Outline").Single(o => (string)o.Attribute("objectID") == "C").ToString());
+                if (!selectedImage)
+                {
+                    var layout = s.Layout.ToString(); Rejects("选区", () => Merge(t, s, "C", "p1", "after"));
+                    Equal(layout, s.Layout.ToString()); Equal(1, s.Revision); Equal(1, s.LayoutChanges.Count); Equal(0, api.Writes);
+                }
+                else
+                {
+                    RemainingMerges(Merge(t, s, "C", "p1", "after"), "");
+                    var report = c.Commit(s, CancellationToken.None);
+                    Equal("Verified", report.Status); Equal(2, report.Merged); Equal(1, api.Writes); Equal(3, report.OutlineUndo.Count);
+                    Equal("IMAGEDATA", ImageData(api, api.Page)); Equal("Verified", c.Undo(s.PageId, report, s.Options, CancellationToken.None).Status);
+                    Equal(3, api.Page.Elements(One + "Outline").Count()); Equal("IMAGEDATA", ImageData(api, api.Page));
+                }
+            }
+        });
+        Test("remaining merges exclude incompatible inherited styles and honor pending compatible formatting", () =>
+        {
+            foreach (var compatible in new[] { false, true })
+            {
+                var source = Box("C", 500, Paragraph("c", "丙")); source.SetAttributeValue("style", "font-size:30pt");
+                var s = Snapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("b", "乙")), source));
+                var t = Tools(s); Read(t, s);
+                if (compatible) Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p3" }, preset_id = "body" });
+                var revision = s.Revision; var format = s.Blocks.Single(b => b.Id == "p3").Draft.ToString(); var styles = s.DraftStyles.ToString();
+                RemainingMerges(Merge(t, s, "B", "p1", "after"), compatible ? "C" : "");
+                Equal(revision + 1, s.Revision); Equal(1, s.LayoutChanges.Count); Equal(format, s.Blocks.Single(b => b.Id == "p3").Draft.ToString()); Equal(styles, s.DraftStyles.ToString());
+                if (compatible)
+                {
+                    RemainingMerges(Merge(t, s, "C", "p1", "after"), "");
+                    var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+                    Equal("Verified", r.Status); Equal(2, r.Merged); Equal(1, r.Applied); Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status);
+                    Equal("甲|乙|丙", Texts(api.Page));
+                }
+                else
+                {
+                    var layout = s.Layout.ToString(); Rejects("格式", () => Merge(t, s, "C", "p1", "after"));
+                    Equal(layout, s.Layout.ToString()); Equal(revision + 1, s.Revision); Equal(1, s.LayoutChanges.Count);
+                }
+            }
+        });
+        Test("remaining merges search other positions when the current nested target would change formatting", () =>
+        {
+            var parent = Paragraph("a", "标题"); parent.SetAttributeValue("style", "font-size:30pt");
+            parent.Add(new XElement(One + "OEChildren", Paragraph("child", "子段")));
+            var b = Paragraph("b", "乙"); b.SetAttributeValue("style", "font-size:30pt");
+            var s = Snapshot(Boxes(Box("A", 100, parent), Box("B", 300, b), Box("C", 500, Paragraph("c", "丙"))));
+            var t = Tools(s); Read(t, s);
+            RemainingMerges(Merge(t, s, "B", "p2", "after"), "C");
+            var layout = s.Layout.ToString(); Rejects("格式", () => Merge(t, s, "C", "p2", "after"));
+            Equal(layout, s.Layout.ToString()); Equal(1, s.Revision); Equal(1, s.LayoutChanges.Count);
+            RemainingMerges(Merge(t, s, "C", "p1", "before"), "");
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal("丙|标题|子段|乙", Texts(api.Page));
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal("标题|子段|乙|丙", Texts(api.Page));
+            // 根级和第一个嵌套位置都不兼容，仍须继续找到另一个父段下的合法位置。
+            var heading = Paragraph("h", "标题"); heading.Add(new XElement(One + "OEChildren", Paragraph("hc", "标题下")));
+            var body = Paragraph("body", "正文"); body.SetAttributeValue("style", "font-size:11pt"); body.Add(new XElement(One + "OEChildren", Paragraph("bc", "正文下")));
+            var destination = Box("A", 100, heading, body); destination.SetAttributeValue("style", "font-size:30pt");
+            var source = Box("C", 500, Paragraph("c", "丙")); source.SetAttributeValue("style", "font-size:11pt");
+            var nested = Snapshot(Boxes(destination, Box("B", 300, new XElement(b)), source)); var nt = Tools(nested); Read(nt, nested);
+            RemainingMerges(Merge(nt, nested, "B", "p2", "after"), "C");
+            Rejects("格式", () => Merge(nt, nested, "C", "p1", "before")); Rejects("格式", () => Merge(nt, nested, "C", "p2", "after"));
+            RemainingMerges(Merge(nt, nested, "C", "p4", "before"), ""); Equal(2, nested.Revision); Equal(2, nested.LayoutChanges.Count);
+            var nestedApi = new FakePage(nested.Page); var nc = new AgentCommitter(nestedApi); var nr = nc.Commit(nested, CancellationToken.None);
+            Equal("Verified", nr.Status); Equal("Verified", nc.Undo(nested.PageId, nr, nested.Options, CancellationToken.None).Status);
+        });
+        Test("remaining merges carry a fully selected table and skip converted paragraphs as target positions", () =>
+        {
+            var grid = GridPage().Element(One + "Outline").Element(One + "OEChildren").Element(One + "OE");
+            var s = new AgentPageSnapshot(Boxes(Box("A", 100, Paragraph("a1", "名称\t值"), Paragraph("a2", "甲\t乙"), Paragraph("a3", "目标")),
+                Box("B", 300, Paragraph("b", "正文")), Box("C", 500, grid)).ToString(), new HashSet<string> { "a1", "a2", "a3", "b", "h1", "h2", "d1", "d2" }, new AgentOptions());
+            var t = Tools(s); Read(t, s); Table(t, s, "tab", "p1", "p2");
+            var conversion = s.CodeConversions.Single(); var styles = s.DraftStyles.ToString();
+            RemainingMerges(Merge(t, s, "B", "p3", "after"), "C");
+            Equal(1, s.LayoutChanges.Count); Equal(1, s.CodeConversions.Count); True(ReferenceEquals(conversion, s.CodeConversions.Single())); Equal(styles, s.DraftStyles.ToString());
+            RemainingMerges(Merge(t, s, "C", "p3", "after"), "");
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
+            Equal("Verified", r.Status); Equal(2, r.Merged); Equal(1, r.TextTables); Equal(2, api.Page.Descendants(One + "Table").Count());
+            Equal("Verified", c.Undo(s.PageId, r, s.Options, CancellationToken.None).Status); Equal(3, api.Page.Elements(One + "Outline").Count());
+        });
+        Test("remaining merge preflight handles a thousand paragraphs and leaves a cancelled merge unpublished", () =>
+        {
+            XElement LargePage() => Boxes(Enumerable.Range(0, 20).Select(box => Box("box" + box, box * 100,
+                Enumerable.Range(0, 50).Select(i => Paragraph("line" + (box * 50 + i), "合成正文 " + i)).ToArray())).ToArray());
+            var s = Snapshot(LargePage()); var t = Tools(s);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            RemainingMerges(Merge(t, s, "box1", "p1", "after"), string.Join(",", Enumerable.Range(2, 18).Select(i => "box" + i)));
+            watch.Stop(); Console.WriteLine($"Merge preflight: 1000 paragraphs, 20 boxes, {watch.ElapsedMilliseconds} ms");
+            True(watch.Elapsed < TimeSpan.FromSeconds(10)); Equal(1, s.Revision); Equal(1, s.LayoutChanges.Count); Equal(19, s.Layout.Elements(One + "Outline").Count());
+            var cancelled = Snapshot(LargePage()); var api = new FakePage(cancelled.Page); var layout = cancelled.Layout.ToString();
+            using (var cancel = new CancellationTokenSource())
+            {
+                var ct = new AgentTools(cancelled, new AgentCommitter(api), cancel.Token);
+                cancel.CancelAfter(1); watch.Restart();
+                Throws<OperationCanceledException>(() => Merge(ct, cancelled, "box1", "p1", "after"));
+                watch.Stop(); True(watch.Elapsed < TimeSpan.FromSeconds(5));
+                Equal(layout, cancelled.Layout.ToString()); Equal(0, cancelled.Revision); Equal(0, cancelled.LayoutChanges.Count); Equal(0, api.Writes);
+            }
+        });
+        Test("remaining merge preflight rejects incompatible sources without repeating a thousand sibling positions", () =>
+        {
+            var source = Box("C", 500, Paragraph("c", "不兼容")); source.SetAttributeValue("style", "font-size:30pt");
+            var s = Snapshot(Boxes(Box("A", 100, Enumerable.Range(0, 997).Select(i => Paragraph("a" + i, "合成正文 " + i)).ToArray()),
+                Box("B", 300, Paragraph("b", "已合并")), source, Box("D", 700, Paragraph("d", "兼容"))));
+            var t = Tools(s); var watch = System.Diagnostics.Stopwatch.StartNew();
+            RemainingMerges(Merge(t, s, "B", "p1", "after"), "D");
+            watch.Stop(); Console.WriteLine($"Merge preflight: 1000 paragraphs, incompatible source, {watch.ElapsedMilliseconds} ms");
+            True(watch.Elapsed < TimeSpan.FromSeconds(5)); Equal(1, s.Revision); Equal(1, s.LayoutChanges.Count);
+            Rejects("格式", () => Merge(t, s, "C", "p1", "after"));
+            RemainingMerges(Merge(t, s, "D", "p1", "after"), ""); Equal(2, s.Revision); Equal(2, s.LayoutChanges.Count);
+        });
+        Test("remaining merge preflight reuses format rejection across 300 nested parents", () =>
+        {
+            var s = Snapshot(NestedMergePage(300)); var t = Tools(s);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            RemainingMerges(Merge(t, s, "C", "p1", "after"), "");
+            watch.Stop(); Console.WriteLine($"Merge preflight: 602 paragraphs, 300 nested parents, {watch.ElapsedMilliseconds} ms");
+            True(watch.Elapsed < TimeSpan.FromSeconds(5)); Equal(1, s.Revision); Equal(1, s.LayoutChanges.Count);
+            // C 是与目标兼容的本次合并；剩余 B 的 30pt 继承样式在所有位置都不兼容。
+            Rejects("格式", () => Merge(t, s, "B", "p1", "after"));
+            var cancelled = Snapshot(NestedMergePage(300)); var api = new FakePage(cancelled.Page);
+            var prepare = Tools(cancelled);
+            Invoke(prepare, "read_blocks", new { snapshot_id = cancelled.SnapshotId, block_ids = new[] { "p1" } });
+            Invoke(prepare, "set_text_style", new { snapshot_id = cancelled.SnapshotId,
+                targets = new[] { new { block_id = "p1", quote = "父段", occurrence = 1, style = new { bold = true } } } });
+            var state = MergeDraftState(cancelled);
+            using (var cancel = new CancellationTokenSource())
+            {
+                var ct = new AgentTools(cancelled, new AgentCommitter(api), cancel.Token);
+                cancel.CancelAfter(1);
+                Throws<OperationCanceledException>(() => Merge(ct, cancelled, "C", "p1", "after"));
+                Equal(state, MergeDraftState(cancelled)); Equal(0, api.Writes);
+            }
+        });
+        Test("remaining merge format cache distinguishes QuickStyles, inline overrides and source boxes", () =>
+        {
+            XElement Parent(string id, string style = null)
+            {
+                var p = Paragraph(id, "父段"); p.SetAttributeValue("style", style);
+                p.Add(new XElement(One + "OEChildren", Paragraph(id + "c", "子段"))); return p;
+            }
+            var same = Parent("same", "font-size:30.0pt");
+            var legal = Parent("legal"); legal.SetAttributeValue("quickStyleIndex", "2");
+            var destination = Box("A", 100, Parent("first"), same, legal); destination.SetAttributeValue("quickStyleIndex", "1");
+            var source = Box("C", 500, Paragraph("c", "丙")); source.SetAttributeValue("style", "font-size:11pt");
+            var incompatible = Box("D", 700, Paragraph("d", "丁")); incompatible.SetAttributeValue("style", "font-size:14pt");
+            var inline = Box("E", 900, Paragraph("e", "<b><span style='font-size:11pt'>行内</span></b>")); inline.SetAttributeValue("style", "font-size:14pt");
+            var b = Paragraph("b", "乙"); b.SetAttributeValue("style", "font-size:30pt");
+            var page = Boxes(destination, Box("B", 300, b), source, incompatible, inline);
+            page.AddFirst(new XElement(One + "QuickStyleDef", new XAttribute("index", "1"), new XAttribute("name", "h1"), new XAttribute("fontSize", "30")),
+                new XElement(One + "QuickStyleDef", new XAttribute("index", "2"), new XAttribute("name", "p"), new XAttribute("fontSize", "11")));
+            var s = Snapshot(page); var t = Tools(s); Read(t, s);
+            RemainingMerges(Merge(t, s, "B", "p1", "after"), "C,E");
+            Equal("C,E", FullRemainingMerges(t, s, "A"));
+            var state = MergeDraftState(s); Rejects("格式", () => Merge(t, s, "C", "p2", "before")); Equal(state, MergeDraftState(s));
+            RemainingMerges(Merge(t, s, "C", s.Blocks.Single(x => x.ObjectId == "legalc").Id, "after"), "E");
+            RemainingMerges(Merge(t, s, "E", "p1", "before"), "");
+            var api = new FakePage(s.Page); var committer = new AgentCommitter(api); var report = committer.Commit(s, CancellationToken.None);
+            Equal("Verified", report.Status); Equal(3, report.Merged); Equal(1, api.Writes); Equal(4, report.OutlineUndo.Count);
+            Equal("Verified", committer.Undo(s.PageId, report, s.Options, CancellationToken.None).Status);
+            Equal(5, api.Page.Elements(One + "Outline").Count()); Equal(Texts(page), Texts(api.Page));
+        });
+        Test("remaining merge cache uses pending parent formatting and newly added style definitions", () =>
+        {
+            var parent = Paragraph("legal", "正文父段");
+            var child = Paragraph("child", "子段"); child.SetAttributeValue("style", "font-family:Microsoft YaHei;font-size:11pt;color:automatic");
+            parent.Add(new XElement(One + "OEChildren", child));
+            var first = Paragraph("first", "第一个父段"); first.Add(new XElement(One + "OEChildren", Paragraph("firstc", "子段")));
+            var destination = Box("A", 100, first, parent); destination.SetAttributeValue("style", "font-size:30pt");
+            var source = Box("C", 500, Paragraph("c", "丙")); source.SetAttributeValue("style", "font-family:Microsoft YaHei;font-size:11pt;color:automatic");
+            var b = Paragraph("b", "乙"); b.SetAttributeValue("style", "font-size:30pt");
+            var d = Paragraph("d", "丁"); d.SetAttributeValue("style", "font-size:30pt");
+            var page = Boxes(destination, Box("B", 300, b), source, Box("D", 700, d));
+            var s = Snapshot(page); var t = Tools(s); Read(t, s);
+            RemainingMerges(Merge(t, s, "B", "p1", "after"), "D");
+            var parentBlock = s.Blocks.Single(x => x.ObjectId == "legal");
+            Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { parentBlock.Id }, preset_id = "body" });
+            True(!parentBlock.AppearanceOnly); True(s.DraftStyles.Elements().Any());
+            True(AgentLayout.Find(s.Layout, parentBlock.Id).Attribute("quickStyleIndex") == null);
+            var format = parentBlock.Draft.ToString(); var styles = s.DraftStyles.ToString();
+            RemainingMerges(Merge(t, s, "D", "p1", "after"), "C");
+            Equal("C", FullRemainingMerges(t, s, "A")); Equal(format, parentBlock.Draft.ToString()); Equal(styles, s.DraftStyles.ToString());
+            RemainingMerges(Merge(t, s, "C", s.Blocks.Single(x => x.ObjectId == "child").Id, "after"), "");
+            var api = new FakePage(s.Page); var committer = new AgentCommitter(api); var report = committer.Commit(s, CancellationToken.None);
+            Equal("Verified", report.Status); Equal(3, report.Merged); Equal(1, report.Applied);
+            Equal("Verified", committer.Undo(s.PageId, report, s.Options, CancellationToken.None).Status); Equal(Texts(page), Texts(api.Page));
+        });
+        Test("cached remaining merges agree with exhaustive checks for selection, images, tables and conversions", () =>
+        {
+            foreach (var selected in new[] { false, true }) foreach (var selectedImage in new[] { false, true })
+            foreach (var selectedTable in new[] { false, true }) foreach (var conversion in new[] { "none", "code", "table" })
+            {
+                XElement Parent(string id, string style = null)
+                {
+                    var p = Paragraph(id, "父段"); p.SetAttributeValue("style", style);
+                    p.Add(new XElement(One + "OEChildren", Paragraph(id + "c", "子段"))); return p;
+                }
+                var destination = Box("A", 100, Parent("a"), Parent("a2"), Parent("legal", "font-size:11pt"),
+                    Paragraph("line1", "x\t1"), Paragraph("line2", "y\t2")); destination.SetAttributeValue("style", "font-size:30pt");
+                var b = Paragraph("b", "乙"); b.SetAttributeValue("style", "font-size:30pt");
+                var image = Image("img", "cb"); if (selectedImage) image.Element(One + "Image").SetAttributeValue("selected", "all");
+                var c = Box("C", 500, Paragraph("c", "丙"), image); c.SetAttributeValue("style", "font-size:11pt");
+                var d = Box("D", 700, GridPage().Element(One + "Outline").Element(One + "OEChildren").Element(One + "OE")); d.SetAttributeValue("style", "font-size:11pt");
+                var e = Box("E", 900, Paragraph("e", "不兼容")); e.SetAttributeValue("style", "font-size:14pt");
+                var f = Box("F", 1100, Paragraph("f", "兼容")); f.SetAttributeValue("style", "font-size:30pt");
+                var page = Boxes(destination, Box("B", 300, b), c, d, e, f);
+                var selection = selected ? new HashSet<string>(page.Descendants(One + "OE").Where(x => x.Elements(One + "T").Any()).Select(x => (string)x.Attribute("objectID"))) : null;
+                if (selected && !selectedTable) selection.Remove("h2");
+                var s = new AgentPageSnapshot(page.ToString(), selection, new AgentOptions()); var t = Tools(s); Read(t, s);
+                var lines = new[] { "line1", "line2" }.Select(id => s.Blocks.Single(x => x.ObjectId == id).Id).ToArray();
+                if (conversion == "code") Code(t, s, "python", lines);
+                if (conversion == "table") Table(t, s, "tab", lines);
+                var result = Merge(t, s, "B", "p1", "after");
+                var state = MergeDraftState(s);
+                var expected = (!selected || selectedImage ? "C," : "") + (!selected || selectedTable ? "D," : "") + "F";
+                Equal(expected, FullRemainingMerges(t, s, "A")); RemainingMerges(result, expected); Equal(state, MergeDraftState(s));
+            }
+        });
+        Test("layout diagnostics report only format failures and unexpected preflight errors leave drafts unpublished", () =>
+        {
+            var s = Snapshot(NestedMergePage(2)); var candidate = new XElement(s.Layout); string mismatch = null;
+            AgentLayout.Merge(candidate.Elements(One + "Outline").Single(x => (string)x.Attribute("objectID") == "B"), AgentLayout.Find(candidate, "p1"), true);
+            var state = MergeDraftState(s);
+            Rejects("格式", () => s.CheckLayout(candidate, id => mismatch = id)); Equal(s.Blocks.Single(x => x.ObjectId == "b").Id, mismatch);
+            Equal(state, MergeDraftState(s));
+            var page = Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Image("img", "cb")));
+            var selected = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "a" }, new AgentOptions());
+            candidate = new XElement(selected.Layout); mismatch = null;
+            AgentLayout.Merge(candidate.Elements(One + "Outline").Last(), AgentLayout.Find(candidate, "p1"), true);
+            Rejects("选区", () => selected.CheckLayout(candidate, id => mismatch = id)); Equal(null, mismatch);
+            var converted = Snapshot(Boxes(Box("A", 100, Paragraph("a", "x\t1"), Paragraph("a2", "y\t2")), Box("B", 300, Paragraph("b", "乙"))));
+            var ct = Tools(converted); Read(ct, converted); Table(ct, converted, "tab", "p1", "p2");
+            candidate = new XElement(converted.Layout); mismatch = null;
+            AgentLayout.Merge(candidate.Elements(One + "Outline").Last(), AgentLayout.Find(candidate, "p2"), true);
+            Rejects("转换", () => converted.CheckLayout(candidate, id => mismatch = id)); Equal(null, mismatch);
+            // 故意损坏私有短 ID，模拟准备成功后的非预期预检异常；原有草稿必须完整保留。
+            var broken = Snapshot(NestedMergePage(2)); var api = new FakePage(broken.Page); var t = new AgentTools(broken, new AgentCommitter(api), CancellationToken.None);
+            AgentLayout.Find(broken.Layout, broken.Blocks.Single(x => x.ObjectId == "b").Id).SetAttributeValue(AgentLayout.Key, "p1");
+            state = MergeDraftState(broken);
+            Throws<ArgumentException>(() => Merge(t, broken, "C", "p1", "after")); Equal(state, MergeDraftState(broken)); Equal(0, api.Writes);
         });
         Test("a user edit in either linked box skips the whole group; undo skips a group edited afterwards", () =>
         {
@@ -2762,13 +3024,18 @@ internal static class Program
             var off = Tools(new AgentPageSnapshot(TwoBoxes().ToString(), null, new AgentOptions { EnableMoves = false }));
             True(!Json(off.Definitions).Contains("merge_outlines")); True(!Json(off.Definitions).Contains("move_blocks")); True(!AgentRunner.SystemPrompt(off).Contains("merge_outlines"));
             Equal(("合并文本框 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"]}"));
+            Equal(("合并文本框 · 2 段 · 还剩 1 个", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"],\"mergeable_left\":1}"));
+            Equal(("合并文本框 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"],\"mergeable_left\":0}"));
+            var definitions = Json(Tools(Snapshot(TwoBoxes())).Definitions);
+            True(definitions.Contains("至少一个合法位置")); True(definitions.Contains("受保护或不满足限制的框保留")); True(definitions.Contains("不要重复相同的失败调用"));
         });
         Test("three boxes merge into one with a blank line at each seam; undo rebuilds all three", () =>
         {
             var s = Snapshot(Boxes(Box("A", 100, Paragraph("a", "甲")), Box("B", 300, Paragraph("b", "乙")), Box("C", 500, Paragraph("c", "丙"))));
             var t = Tools(s); Read(t, s);
             // p1 甲；p2 乙；p3 丙
-            Merge(t, s, "B", "p1", "after"); Merge(t, s, "C", "p2", "after");
+            True(Json(Merge(t, s, "B", "p1", "after")).Contains("\"mergeable_left\":1,\"mergeable_outline_ids\":[\"C\"]"));
+            True(Json(Merge(t, s, "C", "p2", "after")).Contains("\"mergeable_left\":0,\"mergeable_outline_ids\":[]"));
             foreach (var target in new[] { "p2", "p3" })
                 Invoke(t, "insert_blocks", new { snapshot_id = s.SnapshotId, target_id = target, position = "before", paragraphs = new object[] { new { blank = true } } });
             var api = new FakePage(s.Page); var c = new AgentCommitter(api); var r = c.Commit(s, CancellationToken.None);
@@ -3228,6 +3495,49 @@ internal static class Program
         api.Binary.TryGetValue((string)page.Descendants(One + "Image").Single().Element(One + "CallbackID").Attribute("callbackID"), out var data) ? data : null;
     private static object Merge(AgentTools tools, AgentPageSnapshot s, string source, string target, string position) =>
         Invoke(tools, "merge_outlines", new { snapshot_id = s.SnapshotId, source_id = source, target_id = target, position });
+    private static void RemainingMerges(object result, string expected)
+    {
+        var ids = (string[])ToolField(result, "mergeable_outline_ids");
+        Equal(expected, string.Join(",", ids)); Equal(ids.Length, (int)ToolField(result, "mergeable_left"));
+    }
+    private static XElement NestedMergePage(int parents)
+    {
+        var source = Box("B", 300, Paragraph("b", "不兼容")); source.SetAttributeValue("style", "font-size:30pt");
+        return Boxes(Box("A", 100, Enumerable.Range(0, parents).Select(i =>
+        {
+            var p = Paragraph("parent" + i, "父段 " + i);
+            p.Add(new XElement(One + "OEChildren", Paragraph("child" + i, "子段"))); return p;
+        }).ToArray()), source, Box("C", 500, Paragraph("c", "本次合并")));
+    }
+    /// <summary>独立于缓存逐一尝试所有段落的前后；只调用完整准备，不发布草稿。</summary>
+    private static string FullRemainingMerges(AgentTools tools, AgentPageSnapshot snapshot, string into)
+    {
+        var prepare = typeof(AgentTools).GetMethod("PrepareMerge", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var targets = snapshot.Layout.Elements(One + "Outline").Single(o => (string)o.Attribute("objectID") == into)
+            .Descendants(One + "OE").Select(AgentLayout.KeyOf).Where(id => id != null).ToArray();
+        return string.Join(",", snapshot.Layout.Elements(One + "Outline").Select(o => (string)o.Attribute("objectID"))
+            .Where(id => id != null && id != into && CanMerge(id)));
+        bool CanMerge(string source)
+        {
+            foreach (var target in targets) foreach (var before in new[] { true, false })
+            {
+                try { prepare.Invoke(tools, new object[] { snapshot.Layout, source, target, before, null }); return true; }
+                catch (System.Reflection.TargetInvocationException ex) when (ex.InnerException is AiException) { }
+            }
+            return false;
+        }
+    }
+    private static string MergeDraftState(AgentPageSnapshot snapshot) => Json(new
+    {
+        page = snapshot.Page.ToString(), layout = snapshot.Layout.ToString(), revision = snapshot.Revision,
+        styles = snapshot.DraftStyles.ToString(), tags = snapshot.DraftTags.ToString(), frozen = snapshot.Frozen, spacing = snapshot.CodeSpacingRequested,
+        blocks = snapshot.Blocks.Select(b => new { id = b.Id, draft = b.Draft.ToString(), fixes = b.TextFixes.ToArray(), marks = b.MarkdownMarks,
+            appearance = b.AppearanceOnly, read = b.Read }).ToArray(),
+        inserted = snapshot.Inserted.Select(i => new { id = i.Id, outline = i.OutlineId, text = i.Text }).ToArray(),
+        changes = snapshot.LayoutChanges.Select(c => new { kind = c.Kind, outline = c.OutlineId, from = c.From, ids = c.Ids }).ToArray(),
+        conversions = snapshot.CodeConversions.Select(c => new { ids = c.Blocks.Select(b => b.Id).ToArray(), code = c.Code, table = c.Table.ToString(),
+            textTable = c.TextTable }).ToArray()
+    });
     private static object Move(AgentTools tools, AgentPageSnapshot s, string[] ids, string target, string position) =>
         Invoke(tools, "move_blocks", new { snapshot_id = s.SnapshotId, block_ids = ids, target_id = target, position });
     private static object Indent(AgentTools tools, AgentPageSnapshot s, string direction, params string[] ids) =>
@@ -3406,7 +3716,7 @@ internal static class Program
                 if (below != null) below.AddBeforeSelf(new XElement(c));
                 else if (current == null) Page.Add(new XElement(c)); else current.ReplaceWith(new XElement(c));
                 var written = Page.Elements(c.Name).FirstOrDefault(e => (string)e.Attribute("objectID") == (string)c.Attribute("objectID"));
-                if (!KeepEmptyOutlines && c.Name == One + "Outline" && written != null && written.Descendants(One + "OE").Count() == 1 && AgentCode.PlainText(written.Descendants(One + "OE").Single()) == "")
+                if (!KeepEmptyOutlines && c.Name == One + "Outline" && written != null && written.Descendants(One + "OE").Count() == 1 && BlankLines.IsBlankLine(written.Descendants(One + "OE").Single()))
                     written.Remove();
             }
             Writes++; Page.SetAttributeValue("lastModifiedTime", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));

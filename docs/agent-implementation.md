@@ -36,7 +36,7 @@
 | `normalize_code_spacing` | `snapshot_id`；仅规范化已有或待转换代码框与文字的交界，空段落和文字首尾的 Shift+Enter 空行合计一行，多删少补。代码内部、文字之间、代码之间和文本框首尾不处理；各普通单元格独立计算。删除受 `EnableBlankLineRemoval` 控制，补入受 `EnableInsert` 和现有插入配额控制，两者都关闭时不注册。返回 `removed_paragraphs`、`removed_soft_lines`、`inserted_paragraphs`、`noop`、`skipped` 和修订号。先转换代码、完成结构操作，最后调用；之后再调用结构工具、`highlight_code`、`text_to_table` 或 `strip_markdown` 时先撤回已做的间隔调整。提交前复核，间隔不符时要求重新规范化，最后一轮则按当前草稿自动重新规范化后提交 |
 | `set_indent` | `snapshot_id`、`block_ids`、`direction`（in/out）；in 挂到前一个兄弟段落下，out 移到上级之后、原来排在后面的兄弟段落改挂到它下面，上下顺序不变。上级也在列表里的段落跟着上级走。`EnableIndent=false` 时不注册 |
 | `move_blocks` | `snapshot_id`、`block_ids`、`target_id`、`position`（before/after）；连同下级段落按原顺序移到目标前后，成为目标的同级段落。可以移到另一个文本框，单元格里的段落只能在同一单元格里移动，不能把文本框移空。`EnableMoves=false` 时不注册 |
-| `merge_outlines` | `snapshot_id`、`source_id`（源文本框的 container_id）、`target_id`、`position`；源文本框的全部顶层段落（含表格、图片、空行）按顺序移到目标前后，提交时删掉源文本框。目标不能在源文本框或单元格里；只处理选区时源文本框里的文字段落必须都在选区内。`EnableMoves=false` 或可调整结构的文本框少于两个时不注册 |
+| `merge_outlines` | `snapshot_id`、`source_id`（源文本框的 container_id）、`target_id`、`position`；源文本框的全部顶层段落（含表格、图片、空行）按顺序移到目标前后，提交时删掉源文本框。目标不能在源文本框或单元格里；只处理选区时源文本框里的文字段落必须都在选区内，未选中的图片等对象也不能跟着搬走。结果另给 `mergeable_left` 和 `mergeable_outline_ids`：按页面顺序列出在本次合并后的草稿中，能在目标框内至少一个合法段落的前后继续合并的文本框；实际合并与计数共用选区、格式继承和转换校验。预检只操作副本，在发布本次合并前完成，取消或非预期异常不发布草稿。计数为 0 只表示目标框已无合法合并来源，受保护或不满足限制的框保留并说明原因；某个位置失败时选择其他合法位置，不重复相同的失败调用。`EnableMoves=false` 或可调整结构的文本框少于两个时不注册 |
 | `insert_blocks` | `snapshot_id`、`target_id`、`position`、`paragraphs`（1–20 项，每项 `text` ≤500 字、`preset_id` 为 heading1/heading2/body/quote、可选 `list`；空行项只写 `blank: true`）；纯文字按 HTML 转义，每个任务最多 50 段、5000 字（空行计入段数、不计字数），新段落短 ID 为 n1…。空行用 `AgentLayout.NewBlankLine` 建立（和代码框间隔补的空行相同：正文外观、零段前后间距、`&nbsp;` 占位），记为 `inserted_blank`，提交时按空行核验并计入 `inserted_blank_lines`；结果另给 `blank_lines`，概况里插入的空行带 `blank: true`。`EnableInsert=false` 时不注册 |
 | `text_to_table` | `snapshot_id`、`block_ids`（≤200），`delimiter` 和 `rows` 二选一，可选 `header_row`、`borders`（默认 true）、`header_shading` 和 `header`（首行前新增的列名，每项 ≤30 字）；最多 10 列、100 行。**delimiter**（tab/pipe/space/none，none 为整行一格）、可选 `lines_per_row`（1–10，每条记录占的行数，空行不算；大于 1 时每几行合成一行，记录中非末行的行尾冒号去掉）：每行文字一行（段内 `<br>` 切开的也各成一行），至少分出 2 列；space 按连续空白（含 `&nbsp;`、全角空格）拆分。**rows**（每行 ≤10 格、每格 ≤500 字，空字符串为空单元格，不能含换行）：模型逐格给出切分结果，`BuildFromRows` 把各段文字用 `\n` 连起来按顺序定位每格（空白彼此等价，换行除外），单元格按定位到的范围从原段落截取；原文里没进单元格的字只能是空白和 `\t | ｜ : ： , ， ; ； 、 =`，或去掉这些后与该列 `header` 相同的标签，否则报「没有按顺序找到」或「没有放进任何单元格」。各行按最多的列数补空单元格，header 少了补空、多了加列；返回 `padded_rows`（补了空单元格的行数）。`EnableTextTables=false` 时不注册 |
 | `get_pending_changes` | `snapshot_id`；返回草稿修订号、修改段落 ID、已排的文字修正、未完整读取的可编辑段落 ID、已排入的代码框和表格转换、结构改动（删除、移动、缩进、插入）、尚未转换的等宽代码及保护计数 |
@@ -143,6 +143,8 @@
 
 - **联动组**：跨框的改动记下源文本框 `AgentLayoutChange.From`，`AgentPageSnapshot.LayoutGroups` 按 (OutlineId, From) 并查集分组。
   提交时组内每个文本框的整框指纹都和快照一致才整组替换，有一个不一致就整组按冲突跳过（框里的格式修改照旧逐项补丁提交）；撤销按 `Group` 整组恢复或整组跳过。
+- **剩余合并预检**：每个源框仅在本次调用内复用已经过完整检查确认的源段格式失败，按目标父节点的有效 CSS 区分继承环境；CSS 来自首次合并后的完整格式草稿，包含待应用的格式和样式定义。
+  相同环境不再反复复制、核验整页；选区、转换及其他段落的失败仍逐位置检查，成功候选和实际合并始终使用完整核验。预检完成前不发布草稿，取消或非预期异常保留原草稿。
 - **按实际位置取改动**：`AgentBlock.ContainerId` 等是快照时的位置，整框替换改为按结构草稿里的实际位置取格式草稿、转换和表格外观，整次提交共用一份草稿页面；
   「原来有没有列表」和「对象原来在哪个文本框」按写入前的整页判断。补丁模式仍用快照时的位置，回退时段落就在原处。
 - **跨框的对象去掉 ID**：OneNote 把移到另一个文本框的对象一律按新对象建立，`AgentLayout.StripForeign` 事先去掉原来不在这个框里的对象的 ID，
