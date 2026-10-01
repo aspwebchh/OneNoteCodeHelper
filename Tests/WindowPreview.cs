@@ -15,7 +15,7 @@ internal static class WindowPreview
     // 只渲染内存中的窗口内容，不启动 OneNote、不调用接口、不显示原生窗口。
     // 出几张图：Agent 自定义排版、选了第一个文字功能；模拟处理中：Agent 第 3 轮（前两轮摘录留着）、Agent 刚开始还没有输出、
     // 文字功能（思考框占满）、思考内容超出思考框（滚到最下面、顶上渐隐）；Agent 做完（步骤和结果）。都按窗口默认大小渲染，几张应一样高。
-    // 另外是 AI 配置窗口的四页，以及配置文件读不了、保存前校验不过时的样子。
+    // 另外是 AI 配置窗口的四页，以及配置文件读不了、保存前校验不过时的样子；最后是插入代码窗口，空的和填好代码的各一张。
     internal static int Render(string directory)
     {
         Directory.CreateDirectory(directory);
@@ -53,7 +53,59 @@ internal static class WindowPreview
             "<Function name='" + AiConfigStore.AgentFunctionName + "'><Prompt>p</Prompt></Function></Functions></AiConfig>"));
         RenderSettings(directory, "ai-settings-errors.png", invalid, new XmlException("根级别上的数据无效。 第 1 行，位置 1。"),
             window => window.TryBuildConfig(out _));
+
+        RenderInsert(directory, "insert-code-window.png", new AddInSettings(), null);
+        // 有一行很长、行数超出一屏：代码框和预览两个方向都出滚动条。
+        RenderInsert(directory, "insert-code-window-filled.png", new AddInSettings { LanguageId = "python" }, window =>
+        {
+            window.CodeBox.Text = InsertSample;
+            window.UpdatePreview();
+        });
         return 0;
+    }
+
+    private const string InsertSample =
+        "import json\n" +
+        "from pathlib import Path\n" +
+        "\n" +
+        "\n" +
+        "# 读取配置文件，缺省时用内置的默认值\n" +
+        "DEFAULTS = {\"theme\": \"light\", \"font\": \"Consolas\", \"size\": 10.5, \"borders\": True, \"language\": \"auto\", \"tab_width\": 4}\n" +
+        "\n" +
+        "\n" +
+        "def load_settings(path: Path) -> dict:\n" +
+        "    \"\"\"读出设置；文件不存在或格式不对时返回默认值。\"\"\"\n" +
+        "    if not path.exists():\n" +
+        "        return dict(DEFAULTS)\n" +
+        "    try:\n" +
+        "        data = json.loads(path.read_text(encoding=\"utf-8\"))\n" +
+        "    except (OSError, ValueError):\n" +
+        "        return dict(DEFAULTS)\n" +
+        "    return {**DEFAULTS, **data}\n" +
+        "\n" +
+        "\n" +
+        "class Highlighter:\n" +
+        "    def __init__(self, settings: dict):\n" +
+        "        self.settings = settings\n" +
+        "        self.count = 0\n" +
+        "\n" +
+        "    def render(self, code: str) -> str:\n" +
+        "        self.count += 1\n" +
+        "        lines = code.splitlines()\n" +
+        "        return \"\\n\".join(f\"{i + 1:>4}  {line}\" for i, line in enumerate(lines))\n" +
+        "\n" +
+        "\n" +
+        "if __name__ == \"__main__\":\n" +
+        "    settings = load_settings(Path(\"settings.json\"))\n" +
+        "    print(Highlighter(settings).render(\"print('你好')\"))\n";
+
+    /// <summary>插入代码窗口。插入之前不会用到 PageEditor，传一个连不上 OneNote 的就行。</summary>
+    private static void RenderInsert(string directory, string fileName, AddInSettings settings, Action<InsertCodeWindow> setup)
+    {
+        var window = new InsertCodeWindow(new PageEditor(null), settings, IntPtr.Zero);
+        setup?.Invoke(window);
+        Snap(window, directory, fileName);
+        window.Close();
     }
 
     /// <summary>

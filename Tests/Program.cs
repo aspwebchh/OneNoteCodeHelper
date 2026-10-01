@@ -1254,6 +1254,21 @@ internal static class Program
             True(window.SettingsIcon.Source != null);
             window.Close();
         });
+        Test("Insert code window has its header icon and previews the pasted code", () =>
+        {
+            var window = new OneNoteCodeHelper.Views.InsertCodeWindow(new PageEditor(null), new AddInSettings { LanguageId = "python" }, IntPtr.Zero);
+            try
+            {
+                True(window.AppIcon.Source != null);
+                True(!window.InsertButton.IsEnabled);
+                window.CodeBox.Text = "def f():\n    return 1";
+                window.UpdatePreview();
+                True(window.Preview.Document != null);
+                True(window.InsertButton.IsEnabled);
+                Equal("2 行，将按 Python 高亮。", window.StatusText.Text);
+            }
+            finally { window.Close(); }
+        });
         Test("code classification: plain text, unhighlighted code, code box and inline code", () =>
         {
             var mono = Paragraph("m", "int x = 1;"); mono.SetAttributeValue("style", "font-family:Consolas");

@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using OneNoteCodeHelper.Highlighting;
 using OneNoteCodeHelper.Highlighting.Themes;
@@ -85,14 +86,28 @@ namespace OneNoteCodeHelper.Views
             FontSizeBox.ItemsSource = AddInSettings.FontSizePresets.Select(AddInSettings.FormatFontSize).ToList();
             FontSizeBox.Text = AddInSettings.FormatFontSize(Settings.FontSize);
 
+            // 屏幕太矮时收一收，代码框和预览跟着变矮。
+            var limit = SystemParameters.WorkArea.Height - 16;
+            if (Height > limit) Height = Math.Max(MinHeight, limit);
+
+            AppIcon.Source = WindowIcons.Load("HighlightSelection");
+            // 不设的话标题栏上是宿主进程（dllhost）的图标。
+            if (AppIcon.Source != null) Icon = AppIcon.Source;
+
             // 认 OneNote 主窗口做属主，免得窗口跑到 OneNote 后面去。
             // 位置自己算：WPF 的 CenterOwner 对 OneNote 这种非 WPF 属主算不准，见 NativeMethods.CenterOver。
             // SourceInitialized 时 WPF 已按 CenterScreen 摆好、窗口还没显示，这时挪不会闪；
             // 没有属主或挪失败时就停在 CenterScreen 的位置。
+            var interop = new WindowInteropHelper(this);
+            if (ownerHandle != IntPtr.Zero) interop.Owner = ownerHandle;
+            SourceInitialized += (_, __) =>
+            {
+                // 标题栏刷成窗口底色，和下面连成一整块（Windows 11 才有效果）。
+                NativeMethods.TrySetCaptionColor(interop.Handle, ((SolidColorBrush)Background).Color);
+                if (ownerHandle != IntPtr.Zero) NativeMethods.CenterOver(interop.Handle, ownerHandle);
+            };
             if (ownerHandle != IntPtr.Zero)
             {
-                var interop = new WindowInteropHelper(this) { Owner = ownerHandle };
-                SourceInitialized += (_, __) => NativeMethods.CenterOver(interop.Handle, ownerHandle);
                 Closing += (_, e) => { if (!e.Cancel) NativeMethods.ReturnForeground(interop.Handle, ownerHandle); };
             }
 
@@ -228,8 +243,9 @@ namespace OneNoteCodeHelper.Views
         /// <summary>
         /// 刷新预览。自动识别放到后台线程做，识别完再回到界面线程画，
         /// 这样哪怕碰上识别很慢的输入，窗口也还能打字、能关。
+        /// internal 是为了离屏预览（Tests/WindowPreview.cs）能填好代码直接出图，不用等计时器。
         /// </summary>
-        private void UpdatePreview()
+        internal void UpdatePreview()
         {
             _previewTimer.Stop();
             var version = ++_previewVersion;
