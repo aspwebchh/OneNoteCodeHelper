@@ -26,6 +26,8 @@ internal static partial class Program
     {
         if (args.Length > 0 && args[0] == "--probe") return Probe.Run(args.Skip(1).ToArray());
         if (args.Length == 2 && args[0] == "--probe-code-spacing") return CodeSpacingProbe.Run(args[1]);
+        if (args.Length == 2 && args[0] == "--probe-clear-format") return ClearFormatProbe.Run(args[1]);
+        if (args.Length == 3 && args[0] == "--compare-formats") return ClearFormatProbe.Compare(args[1], args[2]);
         if (args.Length == 2 && args[0] == "--render-ui") return WindowPreview.Render(args[1]);
         if (args.Length == 2 && args[0] == "--inspect-fixture")
         {
