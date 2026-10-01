@@ -45,12 +45,19 @@ namespace OneNoteCodeHelper.Services.Agent
         internal static void Apply(XElement oe, XElement record = null)
         {
             record = record ?? oe;
-            var leading = Count(record, Leading); var trailing = Count(record, Trailing);
-            if (leading == 0 && trailing == 0) return;
+            if (TrimCount(record) == 0) return;
             var rich = new AgentRichText(oe);
-            var start = Prefix(rich.Text, leading); var end = Suffix(rich.Text, trailing);
-            if (start > end) throw new AiException("代码框间隔的段内空行记录已失效，请重新规范化间隔。");
+            var (start, end) = Visible(rich.Text, record);
             rich.Keep(start, end - start);
+        }
+
+        /// <summary>按 record 上的删行记录截取后留下的范围 [Start, End)，即模型读到的文字；没有记录时是全文。</summary>
+        internal static (int Start, int End) Visible(string text, XElement record)
+        {
+            if (record == null || TrimCount(record) == 0) return (0, text.Length);
+            var start = Prefix(text, Count(record, Leading)); var end = Suffix(text, Count(record, Trailing));
+            if (start > end) throw new AiException("代码框间隔的段内空行记录已失效，请重新规范化间隔。");
+            return (start, end);
         }
 
         private static int Prefix(string text, int count)
@@ -181,9 +188,9 @@ namespace OneNoteCodeHelper.Services.Agent
                     bool Settled(Item edge) => EdgeLines(edge.Text, edge == right) + blankLines == 1 && blanks.All(b => PlainBlank(b) && IdentityKnown(b, page));
                     if (!(left.Kind == "code" && right.Kind == "text" || left.Kind == "text" && right.Kind == "code"))
                     {
-                        // 未转换的等宽代码与代码框之间不处理；已经隔一行的边界不必说明。
+                        // 未转换的等宽代码、已排入的表格转换与代码框之间不处理，和已有表格一样不说明；已经隔一行的边界也不必说明。
                         var protectedText = left.Kind == "code" && right.Kind == "other" ? right : right.Kind == "code" && left.Kind == "other" ? left : null;
-                        if (protectedText != null && protectedText.Node.Elements(One + "T").Any() && !protectedText.Monospace &&
+                        if (protectedText != null && protectedText.Conversion == null && protectedText.Node.Elements(One + "T").Any() && !protectedText.Monospace &&
                             !(protectedText.Text != null && Settled(protectedText)))
                             result.Skipped.Add(new Skip { TextId = protectedText.Id, CodeId = (left.Kind == "code" ? left : right).Id,
                                 Reason = snapshot.InSelection(protectedText.Node) ? "protected_text" : "outside_selection" });

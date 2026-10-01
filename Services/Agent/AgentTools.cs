@@ -567,7 +567,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 {
                     var id = (string)o.Attribute("objectID") ?? "";
                     var inside = items.Where(x => x.Node.Ancestors(OneNoteApi.One + "Outline").FirstOrDefault() == o).ToList();
-                    var first = inside.Select(x => x.Block == null ? x.New.Text : x.Block.Editable || x.Block.CodeCandidate ? x.Block.CurrentText : null)
+                    var first = inside.Select(x => x.Block == null ? x.New.Text : x.Block.Editable || x.Block.CodeCandidate ? VisibleText(x.Block) : null)
                         .FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
                     return new { container_id = id, structure = _snapshot.EditableOutlines.Contains(id), blocks = inside.Count,
                         summary = first?.Substring(0, Math.Min(40, first.Length)) };
@@ -579,7 +579,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     : new { id = x.Id, container_id = ContainerOf(x.Node), parent_id = ParentKey(x.Node), depth = x.Node.Ancestors(OneNoteApi.One + "OE").Count(),
                         table_id = x.Block.TableId, editable = x.Block.Editable, reason = x.Block.ProtectedReason,
                         list = AgentMarks.ListKind(x.Block.Draft), tags = AgentMarks.Describe(x.Block.Draft, _snapshot.DraftTags),
-                        summary = x.Block.Editable || x.Block.CodeCandidate ? x.Block.CurrentText.Substring(0, Math.Min(80, x.Block.CurrentText.Length)) : null }).ToArray(),
+                        summary = x.Block.Editable || x.Block.CodeCandidate ? Summary(VisibleText(x.Block)) : null }).ToArray(),
                 // 表格和图片数量有限，不分页。
                 tables = _snapshot.Tables.Select(t => new { id = t.Id, container_id = ContainerOf(LayoutObject(t.ObjectId), t.ContainerId), rows = t.Rows, columns = t.Columns,
                     borders = t.Draft.Borders, header_row = t.Draft.HeaderRow, header_shading = t.Draft.ShadingName,
@@ -720,7 +720,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (!drafts.TryGetValue(b, out var draft)) drafts[b] = draft = new XElement(b.Draft);
                 var rich = new AgentRichText(draft);
                 var quote = (string)item["quote"];
-                var start = Locate(rich.Text, quote, Convert.ToInt32(item["occurrence"]));
+                var start = LocateVisible(b, rich.Text, quote, Convert.ToInt32(item["occurrence"]));
                 var css = new Dictionary<string, string>();
                 foreach (var style in (IDictionary<string, object>)item["style"])
                 {
@@ -836,6 +836,26 @@ namespace OneNoteCodeHelper.Services.Agent
             return start;
         }
 
+        /// <summary>
+        /// 在模型读到的文字里定位，返回草稿全文中的位置。代码框间隔删掉的首尾空白行仍在草稿里、提交时才截掉，
+        /// 不能参与出现序号的计数，也不能被改成非空白（否则删行记录失效）。
+        /// </summary>
+        private int LocateVisible(AgentBlock b, string text, string quote, int occurrence)
+        {
+            var (from, to) = AgentCodeSpacing.Visible(text, AgentLayout.Find(_snapshot.Layout, b.Id));
+            return from + Locate(text.Substring(from, to - from), quote, occurrence);
+        }
+
+        private static string Summary(string text) => text.Substring(0, Math.Min(80, text.Length));
+
+        /// <summary>草稿文字去掉代码框间隔删掉的首尾空白行，和 read_blocks 返回的一致。</summary>
+        private string VisibleText(AgentBlock b)
+        {
+            var text = b.CurrentText;
+            var (from, to) = AgentCodeSpacing.Visible(text, AgentLayout.Find(_snapshot.Layout, b.Id));
+            return text.Substring(from, to - from);
+        }
+
         private static readonly char[] LineBreaks = { '\n', '\r' };
 
         /// <summary>
@@ -855,7 +875,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 if (quote.IndexOfAny(LineBreaks) >= 0 || replacement.IndexOfAny(LineBreaks) >= 0) throw new AiException("修正的文字不能包含换行。");
                 if (!drafts.TryGetValue(b, out var draft)) { drafts[b] = draft = new XElement(b.Draft); fixes[b] = new List<string>(); }
                 var text = new AgentRichText(draft).Text;
-                var start = Locate(text, quote, Convert.ToInt32(item["occurrence"]));
+                var start = LocateVisible(b, text, quote, Convert.ToInt32(item["occurrence"]));
                 new AgentRichText(draft).Replace(start, quote.Length, replacement);
                 if (new AgentRichText(draft).Text != text.Substring(0, start) + replacement + text.Substring(start + quote.Length))
                     throw new AiException("修正后的文字与预期不一致。");
@@ -865,7 +885,7 @@ namespace OneNoteCodeHelper.Services.Agent
             foreach (var pair in drafts) { pair.Key.Draft = pair.Value; pair.Key.TextFixes.AddRange(fixes[pair.Key]); }
             _snapshot.Revision++;
             return new { ok = true, draft_revision = _snapshot.Revision, changed = drafts.Keys.Select(b => b.Id).ToArray(),
-                blocks = drafts.Keys.Select(b => new { id = b.Id, text = b.CurrentText }).ToArray() };
+                blocks = drafts.Keys.Select(b => new { id = b.Id, text = VisibleText(b) }).ToArray() };
         }
 
         /// <summary>转换或删掉的段落不再逐段写回；需要保留的草稿须先存入转换记录。</summary>

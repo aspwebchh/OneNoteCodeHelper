@@ -2087,6 +2087,40 @@ internal static class Program
             var tight = new AgentPageSnapshot(Page(Paragraph("a", "正文"), Paragraph("e", ""), SpacingBox("code"), Paragraph("b", "结尾")).ToString(),
                 new HashSet<string> { "a", "e", "code1", "code3" }, new AgentOptions());
             var tt = Tools(tight); Read(tt, tight); True(Json(Normalize(tt, tight)).Contains("outside_selection"));
+            // 已排入的表格转换和已有表格一样不算文字，不报跳过。
+            var grid = Snapshot(Page(Paragraph("t1", "a\tb"), Paragraph("t2", "c\td"), SpacingBox("code"), Paragraph("b", "结尾")));
+            var gt = Tools(grid); Read(gt, grid);
+            Invoke(gt, "text_to_table", new { snapshot_id = grid.SnapshotId, block_ids = grid.Blocks.Where(b => b.ObjectId == "t1" || b.ObjectId == "t2").Select(b => b.Id).ToArray(), delimiter = "tab" });
+            var gridResult = Normalize(gt, grid); True(Json(gridResult).Contains("\"skipped\":[]")); Equal(1, AiClient.Get(gridResult, "inserted_paragraphs"));
+        });
+        Test("text tools after code spacing count occurrences in the visible text and keep trim records valid", () =>
+        {
+            foreach (var occurrence in new[] { 1, 2 })
+            {
+                var s = Snapshot(Page(SpacingBox("code"), Paragraph("b", "&nbsp;<br>&nbsp;<br>正文&nbsp;结尾")));
+                var api = new FakePage(s.Page); var t = new AgentTools(s, new AgentCommitter(api), CancellationToken.None); Read(t, s);
+                Equal(1, AiClient.Get(Normalize(t, s), "removed_soft_lines"));
+                var id = s.Blocks.Single(b => b.ObjectId == "b").Id;
+                // 第 1 处是可见的那行空白，不是已删掉的首行；第 2 处在正文中间。
+                var expected = occurrence == 1 ? "X\n正文 结尾" : " \n正文，结尾";
+                var fixedResult = Json(Invoke(t, "fix_text", new { snapshot_id = s.SnapshotId, fixes = new[] { new { block_id = id, quote = " ", occurrence, replacement = occurrence == 1 ? "X" : "，" } } }));
+                True(fixedResult.Contains(Json(expected)));
+                True(Json(Invoke(t, "read_blocks", new { snapshot_id = s.SnapshotId, block_ids = new[] { id } })).Contains(Json(expected)));
+                Equal(expected, new AgentRichText(AgentCommitter.Find(s.CreateDraftPage(), "b")).Text);
+                // 可见首行不再是空白时要补一行空段落；正文中间的修改不影响间隔。
+                var renormalized = Normalize(t, s); Equal(occurrence == 1 ? 1 : 0, AiClient.Get(renormalized, "inserted_paragraphs"));
+                Invoke(t, "finish_edit", new { snapshot_id = s.SnapshotId, draft_revision = s.Revision });
+                Equal("Verified", t.Report.Status); Equal(1, t.Report.TextFixes.Count);
+                Equal(expected, new AgentRichText(AgentCommitter.Find(api.Page, "b")).Text);
+            }
+            var styled = Snapshot(Page(SpacingBox("code"), Paragraph("b", "&nbsp;<br>&nbsp;<br>正文&nbsp;结尾")));
+            var styleApi = new FakePage(styled.Page); var st = new AgentTools(styled, new AgentCommitter(styleApi), CancellationToken.None); Read(st, styled); Normalize(st, styled);
+            var block = styled.Blocks.Single(b => b.ObjectId == "b");
+            Invoke(st, "set_text_style", new { snapshot_id = styled.SnapshotId, targets = new[] { new { block_id = block.Id, quote = " ", occurrence = 2, style = new { bold = true } } } });
+            var html = string.Concat(block.Draft.Elements(One + "T").Select(x => x.Value));
+            True(html.IndexOf("bold", StringComparison.Ordinal) > html.IndexOf("正文", StringComparison.Ordinal));
+            Invoke(st, "finish_edit", new { snapshot_id = styled.SnapshotId, draft_revision = styled.Revision });
+            Equal("Verified", st.Report.Status); Equal(1, st.Report.RemovedSoftLines);
         });
         Test("remove_blank_lines collapses runs and edges, verifies and undo restores the blank lines", () =>
         {
