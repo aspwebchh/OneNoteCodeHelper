@@ -18,6 +18,7 @@
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File uninstall.ps1 -Force -NoRestart
 #>
+#requires -Version 5.1
 [CmdletBinding()]
 param(
     [switch] $Force,

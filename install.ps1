@@ -34,6 +34,7 @@
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
 #>
+#requires -Version 5.1
 [CmdletBinding()]
 param(
     [ValidateSet('Debug', 'Release')]

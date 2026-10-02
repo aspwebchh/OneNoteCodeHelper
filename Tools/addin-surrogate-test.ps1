@@ -1,11 +1,18 @@
 ﻿# 使用模拟进程验证卸载清理逻辑；不会操作真实进程或注册表。
 $ErrorActionPreference = 'Stop'
 
-foreach ($scriptPath in @(
+$powerShellVersion = $PSVersionTable.PSVersion.ToString()
+$scriptPaths = @(
     (Join-Path $PSScriptRoot '..\install.ps1'),
+    (Join-Path $PSScriptRoot '..\uninstall.ps1'),
+    (Join-Path $PSScriptRoot 'register.ps1'),
+    (Join-Path $PSScriptRoot 'unregister.ps1'),
     (Join-Path $PSScriptRoot 'addin-surrogate.ps1'),
+    (Join-Path $PSScriptRoot 'probe-com.ps1'),
     $PSCommandPath
-)) {
+)
+foreach ($scriptPath in $scriptPaths) {
+    $scriptPath = [IO.Path]::GetFullPath($scriptPath)
     $bytes = [IO.File]::ReadAllBytes($scriptPath)
     if ($bytes.Length -lt 3 -or $bytes[0] -ne 239 -or $bytes[1] -ne 187 -or $bytes[2] -ne 191) {
         throw "$scriptPath 缺少 UTF-8 BOM。"
@@ -16,9 +23,14 @@ foreach ($scriptPath in @(
     [System.Management.Automation.Language.Parser]::ParseFile(
         $scriptPath, [ref] $tokens, [ref] $parseErrors) | Out-Null
     if ($parseErrors.Count -gt 0) {
-        throw "$scriptPath 在 PowerShell 5.1 中解析失败：$($parseErrors[0].Message)"
+        $parseError = $parseErrors[0]
+        throw ('{0}:{1}:{2} 在 PowerShell {3} 中解析失败：{4}' -f
+            $scriptPath, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber,
+            $powerShellVersion, $parseError.Message)
     }
 }
+
+Write-Host "脚本 BOM 与语法检查通过（PowerShell $powerShellVersion，共 $($scriptPaths.Count) 个文件）。" -ForegroundColor Green
 
 . (Join-Path $PSScriptRoot 'addin-surrogate.ps1')
 

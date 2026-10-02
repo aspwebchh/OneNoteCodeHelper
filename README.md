@@ -250,14 +250,22 @@ HTTP 失败不会提交草稿；日志只记录状态和已识别的错误类别
 
 ## 构建与安装
 
-根目录的 `install.ps1` 一步搞定「关闭 OneNote → 构建 → 写注册表 → 重开 OneNote」：
+安装和卸载脚本支持 **Windows PowerShell 5.1** 和 **Windows 上的 PowerShell 7.x**，最低版本为 5.1。
+脚本保留 UTF-8 BOM，以便 Windows PowerShell 正确解析中文。
 
-```
+根目录的 `install.ps1` 一步搞定「关闭 OneNote → 构建 → 写注册表 → 重开 OneNote」，任选一种命令运行：
+
+```powershell
+# Windows PowerShell 5.1
 powershell -ExecutionPolicy Bypass -File install.ps1
+
+# PowerShell 7.x（需已安装）
+pwsh -ExecutionPolicy Bypass -File install.ps1
 ```
 
 **需要管理员权限**，脚本会自己弹 UAC 提权（原因见下面「踩过的坑」：COM 类必须注册到 HKLM）。
-提权后会开一个新的 PowerShell 窗口执行，窗口会留着让你看结果。
+提权后会开一个新的 Windows PowerShell 窗口执行，窗口会留着让你看结果；从 `pwsh` 启动时也一样。
+COM 自检同样使用 Windows PowerShell。
 
 改了代码要重装，同一条命令再跑一遍即可。常用参数：
 
@@ -269,10 +277,14 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 | `-Force` | OneNote 不肯退出时强制结束进程。默认只礼貌请求，失败就停下来，免得丢掉未保存内容 |
 | `-NoRestart` | 完成后不自动重开 OneNote |
 
-卸载时运行根目录的 `uninstall.ps1`，会自动提权并关闭 OneNote：
+卸载时运行根目录的 `uninstall.ps1`，会自动提权并关闭 OneNote，任选一种命令：
 
-```
+```powershell
+# Windows PowerShell 5.1
 powershell -ExecutionPolicy Bypass -File uninstall.ps1
+
+# PowerShell 7.x（需已安装）
+pwsh -ExecutionPolicy Bypass -File uninstall.ps1
 ```
 
 卸载脚本也支持 `-Force` 和 `-NoRestart`。关闭 OneNote 后，脚本会等待本插件的
@@ -355,6 +367,7 @@ Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-sa
 Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出解析、配置保存；加 -Live 用本机配置真调一次接口
 Tools/highlight-selection-test.ps1  「高亮选中」回归测试：认选区、缩进的段落、换成代码框
 Tools/agent-test.ps1        Agent 离线回归，不调用真实接口或 OneNote
+Tools/addin-surrogate-test.ps1  安装/卸载脚本的编码、语法和代理进程清理离线回归
 Tools/agent-format-probe.ps1  显式创建专用测试分区和测试页，验证真实 OneNote 格式往返
 Tests/                    独立签名的 net48 测试程序及页面/HTTP 模拟器
 ```
@@ -370,6 +383,16 @@ powershell -ExecutionPolicy Bypass -File Tools\agent-test.ps1
 ```
 
 这些回归不需要运行中的 OneNote，也不使用真实 API Key。脚本支持 `-DllPath` 指定待测 DLL。
+
+安装/卸载脚本的编码、语法与代理进程清理逻辑可在两个版本下分别离线验证，无需构建：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File Tools\addin-surrogate-test.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File Tools\addin-surrogate-test.ps1
+```
+
+该检查只解析安装、卸载及辅助脚本，并使用模拟进程验证清理逻辑，不执行真实安装、卸载或 COM 注册。
+
 需要验证 Office 回存时，先构建并运行 Agent 离线测试，再**单独**执行：
 
 ```powershell
