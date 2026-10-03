@@ -252,7 +252,11 @@ namespace OneNoteCodeHelper.Services.Mcp
                 var page = ReadCurrentPage();
                 var selection = scope == "selection" ? AgentPageSnapshot.SelectedIds(page) : null;
                 if (selection != null && selection.Count == 0) throw new McpFault("selection_empty", "没有选中段落，请在 OneNote 中选择段落后重试。");
+                // 和 Agent 窗口一致：选区里的空行也算进范围，删空行和代码框转换都要用到。
+                selection?.UnionWith(PageEditor.FindSelectedBlankLines(page));
                 var options = AgentOptions.Parse(new XElement("Agent", _options().ToElements()));
+                try { AgentTools.UseInstalledFont(options); }
+                catch (AiException ex) { throw new McpFault("font_unavailable", ex.Message); }
                 var snapshot = new AgentPageSnapshot(page.ToString(), selection, options);
                 linked.Token.ThrowIfCancellationRequested();
                 var source = new CancellationTokenSource(TimeSpan.FromSeconds(options.TimeoutSeconds));

@@ -189,6 +189,57 @@ internal static partial class Program
             using (var stream = new MemoryStream(new byte[] { 0, 0, 0, 0 })) Throws<InvalidDataException>(() => McpProtocol.ReadAsync(stream, CancellationToken.None).GetAwaiter().GetResult());
             using (var stream = new MemoryStream(new byte[] { 3, 0, 0, 0, 1 })) Throws<EndOfStreamException>(() => McpProtocol.ReadAsync(stream, CancellationToken.None).GetAwaiter().GetResult());
         });
+        Test("MCP selection includes blank lines between selected paragraphs like the Agent window", () =>
+        {
+            var a = Paragraph("a", "第一段"); a.SetAttributeValue("selected", "all");
+            var c = Paragraph("c", "第三段"); c.SetAttributeValue("selected", "all");
+            using (var s = McpService(new FakePage(Page(a, Paragraph("b", ""), c, Paragraph("d", "范围外")))))
+            {
+                var overview = McpCall(s, "get_page_overview", new { snapshot_id = McpBegin(s, "selection") });
+                Equal(3, overview["total"]);
+                True(((IList)overview["blocks"]).Cast<object>().Any(b => (string)Map(b)["reason"] == "empty"));
+            }
+        });
+        Test("pipe host keeps serving past 16 connections, waits at the limit and recovers", () =>
+        {
+            using (var s = McpService(new FakePage(Page(Paragraph("a", "正文")))))
+            using (var host = new McpPipeHost(s, "OneNoteCodeHelper.Test." + Guid.NewGuid().ToString("N")))
+            {
+                host.Start(); True(host.Ready.Wait(5000));
+                var name = PipeName(host);
+                var clients = new List<NamedPipeClientStream>();
+                try
+                {
+                    for (var i = 0; i < McpPipeHost.MaxConnections; i++) { var pipe = RawPipe(name); clients.Add(pipe); Equal(true, RawHello(pipe).Success); }
+                    Equal(true, McpCall(s, "get_status", new { })["connected"]);
+                    // 满额时不建新实例：新客户端等空位，服务本身照常。实例全忙时 net48 客户端报 IOException（ERROR_SEM_TIMEOUT），.NET 10 报 TimeoutException。
+                    try { RawPipe(name, 500).Dispose(); throw new Exception("Expected the full pipe host to refuse a new connection"); }
+                    catch (TimeoutException) { }
+                    catch (IOException) { }
+                    clients[0].Dispose(); clients.RemoveAt(0);
+                    using (var waiting = RawPipe(name)) Equal(true, RawHello(waiting).Success);
+                }
+                finally { foreach (var pipe in clients) pipe.Dispose(); }
+                using (var fresh = RawPipe(name)) Equal(true, RawHello(fresh).Success);
+                Equal(true, McpCall(s, "get_status", new { })["connected"]);
+            }
+        });
+        Test("pipe host drops a connection that never says hello", () =>
+        {
+            using (var s = McpService(new FakePage(Page(Paragraph("a", "正文")))))
+            using (var host = new McpPipeHost(s, "OneNoteCodeHelper.Test." + Guid.NewGuid().ToString("N")))
+            {
+                host.Start(); True(host.Ready.Wait(5000));
+                using (var silent = RawPipe(PipeName(host)))
+                {
+                    var watch = Stopwatch.StartNew();
+                    var read = silent.ReadAsync(new byte[1], 0, 1);
+                    True(read.Wait(McpProtocol.ConnectTimeoutMs + 3000)); Equal(0, read.Result);
+                    True(watch.ElapsedMilliseconds >= McpProtocol.ConnectTimeoutMs - 500);
+                }
+                using (var pipe = RawPipe(PipeName(host))) Equal(true, RawHello(pipe).Success);
+            }
+        });
         if (string.IsNullOrEmpty(executable) || !File.Exists(executable)) throw new Exception("MCP EXE 不存在，请先构建解决方案或传入 --mcp-only <exe>。");
         Test("real MCP subprocess initialize, discover all tools, Chinese, errors, edit, repeat, undo and EOF", () =>
         {
@@ -373,6 +424,22 @@ internal static partial class Program
     }
 
     private static string PipeName(McpPipeHost host) => (string)typeof(McpPipeHost).GetField("_name", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(host);
+
+    /// <summary>不经 MCP 程序、直接连插件管道的客户端。</summary>
+    private static NamedPipeClientStream RawPipe(string name, int timeout = 3000)
+    {
+        var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
+        try { pipe.Connect(timeout); return pipe; }
+        catch { pipe.Dispose(); throw; }
+    }
+
+    private static McpResponse RawHello(NamedPipeClientStream pipe)
+    {
+        var hello = new McpRequest { Method = "hello", RequestId = Guid.NewGuid().ToString("N"), ClientId = Guid.NewGuid().ToString("N"), ResumeSecret = Guid.NewGuid().ToString("N") };
+        McpProtocol.WriteAsync(pipe, McpJson.Serialize(hello), CancellationToken.None).GetAwaiter().GetResult();
+        var reply = McpProtocol.ReadAsync(pipe, CancellationToken.None).GetAwaiter().GetResult();
+        return reply == null ? null : McpJson.Deserialize<McpResponse>(reply);
+    }
 
     private sealed class McpChild : IDisposable
     {

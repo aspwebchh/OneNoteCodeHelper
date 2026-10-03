@@ -858,6 +858,13 @@ namespace OneNoteCodeHelper.Services.Agent
         }
         internal static bool FontInstalled(string name) => System.Windows.Media.Fonts.SystemFontFamilies.Any(f =>
             Css.Normalize(f.Source) == Css.Normalize(name) || f.FamilyNames.Values.Any(v => Css.Normalize(v) == Css.Normalize(name)));
+        /// <summary>配置的默认字体没安装时换成可选字体里已安装的一种。Agent 窗口和 MCP 共用。</summary>
+        internal static void UseInstalledFont(AgentOptions options)
+        {
+            if (FontInstalled(options.FontFamily)) return;
+            options.FontFamily = ParagraphStyles.Fonts.FirstOrDefault(FontInstalled)
+                ?? throw new AiException("Agent 默认字体未安装，请在 AI 配置的 Agent/FontFamily 中选择已安装字体。");
+        }
 
         private object TextStyle(IDictionary<string, object> args)
         {

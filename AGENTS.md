@@ -29,6 +29,7 @@ powershell -ExecutionPolicy Bypass -File Tools\ai-merge-test.ps1
 powershell -ExecutionPolicy Bypass -File Tools\highlight-selection-test.ps1
 ```
 
+解决方案包含 .NET 10 的 MCP 项目（`Mcp/Server`），构建整个解决方案需要 .NET 10 SDK；修改 `Mcp/` 或 `Services/Mcp/` 时另外运行 `Tools\mcp-test.ps1`。
 回归脚本默认读取 `bin\Release\net48\OneNoteCodeHelper.dll`。改动范围较小时至少运行对应脚本；修改共享渲染、页面编辑或构建配置时运行全部脚本。`ai-merge-test.ps1` 不加 `-Live`，避免真实接口调用。
 
 `install.ps1`、`uninstall.ps1` 和 `Tools/register.ps1`、`Tools/unregister.ps1` 会关闭 OneNote 或修改 COM 注册表；普通构建和验证不要运行它们。编译产物（`bin/`、`obj/`）和 PDF 文件由 `.gitignore` 排除，不要重新加入版本控制。

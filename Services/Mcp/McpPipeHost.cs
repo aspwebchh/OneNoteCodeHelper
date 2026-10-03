@@ -16,11 +16,16 @@ namespace OneNoteCodeHelper.Services.Mcp
     /// <summary>只接受同一 Windows 用户的本机连接。停止不等待 COM，已开始写入的任务由提交器核验。</summary>
     internal sealed class McpPipeHost : IDisposable
     {
+        /// <summary>同时保持的连接数（含正在等待连接的监听实例）。满额时新客户端等空位，已有连接不受影响。</summary>
+        internal const int MaxConnections = 64;
+        private const int MinRetryDelayMs = 500;
+        private const int MaxRetryDelayMs = 30000;
         private readonly McpEditService _service;
         private readonly string _name;
         private readonly CancellationTokenSource _stop = new CancellationTokenSource();
         private readonly ConcurrentDictionary<NamedPipeServerStream, byte> _pipes = new ConcurrentDictionary<NamedPipeServerStream, byte>();
         private readonly ConcurrentDictionary<string, byte> _clients = new ConcurrentDictionary<string, byte>();
+        private readonly SemaphoreSlim _slots = new SemaphoreSlim(MaxConnections, MaxConnections);
         private readonly TaskCompletionSource<bool> _ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _started;
         internal Task Ready => _ready.Task;
@@ -34,18 +39,36 @@ namespace OneNoteCodeHelper.Services.Mcp
         private async Task AcceptAsync()
         {
             var first = true;
+            var delay = MinRetryDelayMs;
             try
             {
                 while (!_stop.IsCancellationRequested)
                 {
-                    var pipe = CreatePipe(_name, first);
-                    first = false;
-                    _pipes.TryAdd(pipe, 0);
-                    if (_stop.IsCancellationRequested) { _pipes.TryRemove(pipe, out _); pipe.Dispose(); break; }
-                    _ready.TrySetResult(true);
-                    try { await pipe.WaitForConnectionAsync(_stop.Token).ConfigureAwait(false); }
-                    catch { _pipes.TryRemove(pipe, out _); pipe.Dispose(); throw; }
-                    // 读循环继续处理 cancel；页面会话自身负责串行执行。
+                    // 每个实例从创建到连接结束都占一个名额；不会去建超出系统上限的实例而失败。
+                    await _slots.WaitAsync(_stop.Token).ConfigureAwait(false);
+                    NamedPipeServerStream pipe = null;
+                    try
+                    {
+                        pipe = CreatePipe(_name, first);
+                        first = false;
+                        _pipes.TryAdd(pipe, 0);
+                        if (_stop.IsCancellationRequested) { Release(pipe); break; }
+                        _ready.TrySetResult(true);
+                        await pipe.WaitForConnectionAsync(_stop.Token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (!first && !_stop.IsCancellationRequested)
+                    {
+                        // 单个监听实例出错（比如客户端连上随即断开）不拖垮已有连接和草稿，退避后重建。
+                        // 只有第一次建管道失败（同名管道属于别的进程）才放弃。
+                        Release(pipe);
+                        AddInLog.Info("MCP pipe state=retry type=" + ex.GetType().Name);
+                        await Task.Delay(delay, _stop.Token).ConfigureAwait(false);
+                        delay = Math.Min(delay * 2, MaxRetryDelayMs);
+                        continue;
+                    }
+                    catch { Release(pipe); throw; }
+                    delay = MinRetryDelayMs;
+                    // 读循环继续处理 cancel；页面会话自身负责串行执行。名额由 ServeAsync 结束时归还。
                     _ = ServeAsync(pipe);
                 }
             }
@@ -71,12 +94,22 @@ namespace OneNoteCodeHelper.Services.Mcp
             {
                 try
                 {
-                    // 防止无握手连接占用全部服务实例。
-                    using (var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(disconnected.Token))
+                    // 防止无握手连接一直占着名额。net48 的管道读取不响应取消令牌，超时只能关掉管道，挂起的读取随即以 0 字节结束。
+                    string first;
+                    using (var helloTimeout = new CancellationTokenSource(McpProtocol.ConnectTimeoutMs))
+                    using (helloTimeout.Token.Register(pipe.Dispose))
                     {
-                        helloTimeout.CancelAfter(McpProtocol.ConnectTimeoutMs);
-                        var first = await McpProtocol.ReadAsync(pipe, helloTimeout.Token).ConfigureAwait(false);
-                        if (first == null) return;
+                        try { first = await McpProtocol.ReadAsync(pipe, CancellationToken.None).ConfigureAwait(false); }
+                        catch (Exception) when (helloTimeout.IsCancellationRequested) { first = null; }
+                        if (helloTimeout.IsCancellationRequested)
+                        {
+                            AddInLog.Info("MCP connection state=hello_timeout");
+                            return;
+                        }
+                    }
+                    if (first == null) return;
+                    // 握手的 hello、reply 限在这个块里，和下面请求处理里的同名变量隔开。
+                    {
                         var hello = McpJson.Deserialize<McpRequest>(first);
                         var reply = Response(hello);
                         try
@@ -146,10 +179,17 @@ namespace OneNoteCodeHelper.Services.Mcp
                     disconnected.Cancel();
                     // 不等任务收尾；取消令牌和完成记录仍由服务保存。
                     if (owned) { _service.DisconnectClient(client); _clients.TryRemove(client, out _); }
-                    _pipes.TryRemove(pipe, out _); pipe.Dispose();
+                    Release(pipe);
                     // writes 不能在仍有回包的任务使用时释放；SemaphoreSlim 无内核句柄。
                 }
             }
+        }
+
+        /// <summary>关掉一个实例并归还名额。实例还没建出来时 pipe 为 null，只归还名额。</summary>
+        private void Release(NamedPipeServerStream pipe)
+        {
+            if (pipe != null) { _pipes.TryRemove(pipe, out _); pipe.Dispose(); }
+            _slots.Release();
         }
 
         private McpResponse Response(McpRequest request) => new McpResponse { RequestId = request?.RequestId, InstanceId = _service.InstanceId };
@@ -192,7 +232,7 @@ namespace OneNoteCodeHelper.Services.Mcp
                 Marshal.Copy(bytes, 0, pointer, bytes.Length);
                 var attrs = new SecurityAttributes { Length = Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor = pointer };
                 // PIPE_REJECT_REMOTE_CLIENTS；第一次创建还拒绝已存在的同名管道，防止意外连到别的服务。
-                var handle = CreateNamedPipe("\\\\.\\pipe\\" + name, 0x40000003u | (first ? 0x00080000u : 0), 0x00000008u, 16, 65536, 65536, 0, ref attrs);
+                var handle = CreateNamedPipe("\\\\.\\pipe\\" + name, 0x40000003u | (first ? 0x00080000u : 0), 0x00000008u, MaxConnections, 65536, 65536, 0, ref attrs);
                 if (handle.IsInvalid) { var error = Marshal.GetLastWin32Error(); handle.Dispose(); throw new Win32Exception(error); }
                 try { return new NamedPipeServerStream(PipeDirection.InOut, true, false, handle); }
                 catch { handle.Dispose(); throw; }

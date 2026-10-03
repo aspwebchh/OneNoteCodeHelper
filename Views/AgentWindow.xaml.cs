@@ -307,9 +307,7 @@ namespace OneNoteCodeHelper.Views
                 // 当前页即使没有可编辑正文，也允许通过标题工具直接指定页面名称。
                 if (snapshot.SelectionOnly && !snapshot.Blocks.Any(b => b.Editable || b.CodeCandidate))
                     throw new AiException("目标范围没有可编辑文字，或所在文本框包含尚未启用的混合内容。");
-                if (!AgentTools.FontInstalled(config.Agent.FontFamily))
-                    config.Agent.FontFamily = ParagraphStyles.Fonts.FirstOrDefault(AgentTools.FontInstalled)
-                        ?? throw new AiException("Agent 默认字体未安装，请在 AI 配置的 Agent/FontFamily 中选择已安装字体。");
+                AgentTools.UseInstalledFont(config.Agent);
                 var runner = new AgentRunner(new AgentChatClient(config, model, effort), new AgentCommitter(_api), codeSettings);
                 return runner.RunAsync(snapshot, request, CreateProgress<AgentProgress>(ShowAgentProgress), token);
             }, "正在读取固定目标页…", false, true, report => { _report = report; ShowReport(report, false); });

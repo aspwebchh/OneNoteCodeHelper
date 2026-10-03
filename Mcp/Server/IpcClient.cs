@@ -53,7 +53,7 @@ internal sealed class IpcClient(string pipeName) : IAsyncDisposable
                 if (connection != null) Broken(connection); else pipe.Dispose();
                 if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
                 if (ex is IpcException) throw;
-                throw new IpcException("plugin_unavailable", "3 秒内未连接插件。请先打开 OneNote，确认 OneNoteCodeHelper 已加载，并检查是否为同一 Windows 用户和登录会话。");
+                throw new IpcException("plugin_unavailable", "3 秒内未连接插件。请先打开 OneNote，确认 OneNoteCodeHelper 已加载，并检查是否为同一 Windows 用户和登录会话；同时连接的 MCP 客户端达到上限时也会这样，退出不用的客户端后重试。");
             }
         }
         finally { _connectGate.Release(); }
@@ -119,11 +119,17 @@ internal sealed class IpcClient(string pipeName) : IAsyncDisposable
     private async Task WriteAsync(Connection connection, McpRequest request, CancellationToken cancellation)
     {
         await connection.Writes.WaitAsync(cancellation);
-        try { await McpProtocol.WriteAsync(connection.Pipe, JsonSerializer.Serialize(request), cancellation); }
-        catch (Exception)
+        try
         {
-            // 半帧不可恢复，也不能猜测写入结果；下一次调用只能重新连接并查询状态。
-            Broken(connection); throw new IpcException("connection_lost", "插件连接中断，当前请求结果未知；请查询编辑状态，禁止自动重发写入。");
+            // 取消只作用于排队和等待回复：还没写就取消是普通取消；开始写的帧一定写完，
+            // 免得取消拆掉整条连接，连带取消本客户端的其他草稿。
+            cancellation.ThrowIfCancellationRequested();
+            try { await McpProtocol.WriteAsync(connection.Pipe, JsonSerializer.Serialize(request), CancellationToken.None); }
+            catch (Exception)
+            {
+                // 半帧不可恢复，也不能猜测写入结果；下一次调用只能重新连接并查询状态。
+                Broken(connection); throw new IpcException("connection_lost", "插件连接中断，当前请求结果未知；请查询编辑状态，禁止自动重发写入。");
+            }
         }
         finally { connection.Writes.Release(); }
     }

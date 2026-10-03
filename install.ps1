@@ -13,7 +13,10 @@
     构建并注册哪个配置，默认 Release。
 
 .PARAMETER SkipBuild
-    跳过构建，直接注册已有的输出。
+    跳过构建，直接注册已有的输出（同时跳过 MCP 发布）。
+
+.PARAMETER SkipMcp
+    只构建插件，不发布 MCP。MCP 发布失败时也只警告，不影响插件安装。
 
 .PARAMETER Uninstall
     卸载而不是安装。
@@ -41,6 +44,7 @@ param(
     [string] $Configuration = 'Release',
 
     [switch] $SkipBuild,
+    [switch] $SkipMcp,
     [switch] $Uninstall,
     [switch] $Force,
     [switch] $NoRestart
@@ -221,7 +225,7 @@ try {
 
         $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
         if (-not $dotnet) {
-            Write-Error '找不到 dotnet 命令。请先安装 .NET 10 SDK，或用 -SkipBuild 跳过构建直接注册。'
+            Write-Error '找不到 dotnet 命令。请先安装 .NET SDK，或用 -SkipBuild 跳过构建直接注册。'
             exit 1
         }
 
@@ -241,18 +245,50 @@ try {
             }
         }
 
-        & dotnet build OneNoteCodeHelper.sln -c $Configuration --nologo -v quiet
+        # 注册只需要插件本身；MCP 项目要 .NET 10 SDK，单独在下面发布。
+        & dotnet build OneNoteCodeHelper.csproj -c $Configuration --nologo -v quiet
         if ($LASTEXITCODE -ne 0) {
             Write-Error "构建失败（退出码 $LASTEXITCODE）。"
             exit 1
         }
 
         Write-Ok '构建成功。'
-        Write-Step '发布 MCP（Windows x64，自带运行时）'
-        & (Join-Path $PSScriptRoot 'Tools\publish-mcp.ps1') -Configuration $Configuration
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "MCP 发布失败（退出码 $LASTEXITCODE）。"
-            exit 1
+
+        # MCP 是可选组件：发布不了只警告，插件照常注册，免得 OneNote 已经关了却装不上。
+        if ($SkipMcp) {
+            Write-Step '跳过 MCP 发布（-SkipMcp）'
+        }
+        else {
+            Write-Step '发布 MCP（Windows x64，自带运行时）'
+            $mcpFolder = Join-Path $PSScriptRoot "Mcp\Server\bin\$Configuration\net10.0-windows\win-x64\publish"
+            $mcpRunning = @()
+            try {
+                $mcpRunning = @(Get-Process -Name 'OneNoteCodeHelper.Mcp' -ErrorAction SilentlyContinue | Where-Object {
+                    $_.Path -and $_.Path.StartsWith($mcpFolder + '\', [StringComparison]::OrdinalIgnoreCase)
+                })
+            }
+            catch { $mcpRunning = @() }
+
+            if ($mcpRunning.Count -gt 0) {
+                Write-Warning "有 $($mcpRunning.Count) 个 MCP 进程正在使用发布目录（通常是开着的 Codex 等客户端会话），本次跳过 MCP 发布，插件照常安装。"
+                Write-Warning '退出这些客户端后重新运行本脚本即可更新 MCP。'
+            }
+            else {
+                $mcpError = $null
+                try {
+                    & (Join-Path $PSScriptRoot 'Tools\publish-mcp.ps1') -Configuration $Configuration
+                    if ($LASTEXITCODE -ne 0) { $mcpError = "退出码 $LASTEXITCODE" }
+                }
+                catch { $mcpError = $_.Exception.Message }
+
+                if ($mcpError) {
+                    Write-Warning "MCP 发布失败（$mcpError），插件照常安装。"
+                    Write-Warning 'MCP 需要 .NET 10 SDK 和可用的 NuGet 源；不需要 MCP 时可以加 -SkipMcp 跳过。'
+                }
+                else {
+                    Write-Ok 'MCP 已发布。'
+                }
+            }
         }
     }
 

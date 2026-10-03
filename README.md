@@ -251,6 +251,7 @@ HTTP 失败不会提交草稿；日志只记录状态和已识别的错误类别
 - OneNote **桌面版**（Office16 的 `ONENOTE.EXE`）。UWP 版「OneNote for Windows 10」没有 COM 接口，用不了。
 - .NET Framework 4.8 运行时（Windows 10/11 自带）。
 - 构建完整解决方案及发布包需要 .NET 10 SDK，以及 .NET Framework 4.8 参考程序集。
+  只用 `install.ps1` 从源码安装插件时，任意能构建 net48 的 .NET SDK 即可；缺少 .NET 10 SDK 只会跳过 MCP 发布。
 
 ## 构建与安装
 
@@ -277,6 +278,7 @@ COM 自检同样使用 Windows PowerShell。
 |---|---|
 | `-Configuration Debug` | 装 Debug 版（默认 Release） |
 | `-SkipBuild` | 跳过构建，直接注册已有输出 |
+| `-SkipMcp` | 只构建插件，不发布 MCP。不加时 MCP 发布失败也只警告，插件照常安装 |
 | `-Uninstall` | 卸载 |
 | `-Force` | OneNote 不肯退出时强制结束进程。默认只礼貌请求，失败就停下来，免得丢掉未保存内容 |
 | `-NoRestart` | 完成后不自动重开 OneNote |
@@ -423,7 +425,7 @@ powershell -ExecutionPolicy Bypass -File Tools\publish-mcp.ps1
 ```
 
 开发机需要 .NET 10 SDK。只交付 MCP 时复制整个 `publish` 文件夹，自带 Windows x64 运行时，不采用单文件打包或裁剪；同时交付插件和安装脚本时使用根目录的 `publish.ps1`，见上面的「发布安装包」。
-`install.ps1` 的正常构建步骤也会发布 MCP，插件 DLL 注册路径保持原样。
+`install.ps1` 的正常构建步骤也会发布 MCP，插件 DLL 注册路径保持原样；发布失败（缺 .NET 10 SDK、离线、EXE 被客户端占用）只警告，不影响插件安装。
 完整的 EXE 路径、Codex 配置示例、调用流程、错误状态和专用合成页面验收见 [本地 MCP 接入文档](docs/onenote-mcp.md)。
 
 ### 回归验证

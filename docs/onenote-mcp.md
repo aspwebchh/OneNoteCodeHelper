@@ -21,6 +21,8 @@ OneNote 桌面版 Office16
 
 管道名称是 `OneNoteCodeHelper.Mcp.<Windows 用户 SID>.<登录会话编号>`。ACL 只允许当前用户，并拒绝网络身份；原生管道使用 `PIPE_REJECT_REMOTE_CLIENTS`。MCP 客户端和 OneNote 必须使用同一用户、同一登录会话。客户端恢复凭据只存在于 MCP 进程内存，不能使用另一个 MCP 进程认领快照。
 
+每个运行中的 MCP 进程占用一条管道连接。插件同时最多保持 64 条连接；满额时新的 MCP 进程等待空位，3 秒内连不上就报 `plugin_unavailable`，已有连接和草稿不受影响，有客户端退出后即可连接。连上后 3 秒内没有完成握手的连接会被断开，不占名额。
+
 ## 构建和发布
 
 开发机需要 .NET 10 SDK，以及原插件构建所需的 .NET Framework 4.8 参考程序集。官方 C# MCP SDK 固定为 `ModelContextProtocol 2.2.0`，宿主依赖固定为 `Microsoft.Extensions.Hosting 10.0.0`。
@@ -65,7 +67,7 @@ Mcp\Server\bin\Release\net10.0-windows\win-x64\publish\OneNoteCodeHelper.Mcp.exe
 
 交付时复制整个 `publish` 文件夹。它自带 Windows x64 运行时，目标机器不需要另装 .NET 10；不能只复制 EXE。插件 DLL 仍位于 `bin\Release\net48\OneNoteCodeHelper.dll`，注册路径和 Office PIA 机制保持原样。发布产物由 `.gitignore` 排除。
 
-`install.ps1` 的正常构建流程会构建完整解决方案并发布 MCP，然后沿用原来的插件注册步骤。`-SkipBuild` 会同时跳过构建和发布。安装脚本会关闭 OneNote、修改 COM 注册，需由用户在方便时手动运行；上面的构建、发布和离线测试命令不会执行安装。
+`install.ps1` 的正常构建流程先构建插件项目，再发布 MCP，然后沿用原来的插件注册步骤。MCP 是可选组件：缺少 .NET 10 SDK、NuGet 源不可用、或发布目录里的 EXE 正被客户端（如 Codex 会话）占用时，只给警告并跳过 MCP，插件照常注册；退出客户端后重新运行即可更新 MCP。`-SkipMcp` 只构建插件、不发布 MCP；`-SkipBuild` 会同时跳过构建和发布。安装脚本会关闭 OneNote、修改 COM 注册，需由用户在方便时手动运行；上面的构建、发布和离线测试命令不会执行安装。
 
 更新前先停止连接本服务的 MCP 客户端会话，以释放发布目录中正在使用的 EXE 和 DLL；更新后重新启动客户端以刷新工具目录。
 
@@ -120,7 +122,7 @@ codex mcp add onenote_local -- 'G:\WPF\OneNoteCodeHelper\Mcp\Server\bin\Release\
 示例：把合成页面的第一段设为一级标题，其他段落不动。
 
 1. 调用 `get_current_page {}`，确认目标页。
-2. 调用 `begin_edit {"scope":"page"}`，保存返回的 `snapshot_id`（以下写作 `S`）。选中范围改用 `selection`；没有选中段落会报 `selection_empty`。
+2. 调用 `begin_edit {"scope":"page"}`，保存返回的 `snapshot_id`（以下写作 `S`）。选中范围改用 `selection`，和 Agent 窗口一样包括夹在选中段落之间的空行；没有选中段落会报 `selection_empty`。
 3. 调用 `get_page_overview {"snapshot_id":"S","offset":0}`，按 `next_offset` 翻页到末尾。页面和选区从开始时固定，切换页面或重新选择不会改变这个快照。
 4. 调用 `read_blocks {"snapshot_id":"S","block_ids":["p1","p2"]}`，每批最多 100 段，读完范围内所有可读段落。ID 来自概况和 `next_read_block_ids`，不能猜。保护段落会返回跳过原因。
 5. 调用 `set_paragraph_style {"snapshot_id":"S","block_ids":["p1"],"preset_id":"heading1"}`。此时只改草稿。
