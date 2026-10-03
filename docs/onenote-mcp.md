@@ -28,6 +28,25 @@ OneNote 桌面版 Office16
 在仓库根目录执行：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File publish.ps1
+```
+
+此命令构建完整解决方案，并在 `bin\publish\` 生成包含插件、MCP 自包含运行时、安装脚本和文档的发布目录及 ZIP。支持 Windows PowerShell 5.1 和 Windows 上的 PowerShell 7.x。
+每次输出独立目录；目录内有 `INSTALL.md`、版本及入口清单 `release-manifest.json` 和 `SHA256SUMS.txt`，ZIP 另有 `.sha256` 校验文件。
+可用 `-OutputDirectory D:\Releases` 更改发布包父目录，`-NoZip` 省略压缩；`-SkipBuild` 使用已有插件构建和 MCP 自包含输出，不调用 `dotnet`。
+
+发布包解压到固定目录后，在包根目录运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Configuration Release -SkipBuild
+```
+
+包内没有源码，安装必须加 `-SkipBuild`。目标机需要 OneNote 和 .NET Framework 4.8，无须 .NET 10 SDK 或运行时。
+安装后使用包内的 `Mcp\Server\bin\Release\net10.0-windows\win-x64\publish\OneNoteCodeHelper.Mcp.exe`，把下文 Codex 配置示例中的路径改成解压目录的实际绝对路径。
+
+只构建插件并单独发布 MCP 时执行：
+
+```powershell
 dotnet build OneNoteCodeHelper.sln -c Release
 powershell -ExecutionPolicy Bypass -File Tools\publish-mcp.ps1
 ```

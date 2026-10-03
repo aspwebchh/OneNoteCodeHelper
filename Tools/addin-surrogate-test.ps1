@@ -5,6 +5,7 @@ $powerShellVersion = $PSVersionTable.PSVersion.ToString()
 $scriptPaths = @(
     (Join-Path $PSScriptRoot '..\install.ps1'),
     (Join-Path $PSScriptRoot '..\uninstall.ps1'),
+    (Join-Path $PSScriptRoot '..\publish.ps1'),
     (Join-Path $PSScriptRoot 'register.ps1'),
     (Join-Path $PSScriptRoot 'unregister.ps1'),
     (Join-Path $PSScriptRoot 'addin-surrogate.ps1'),

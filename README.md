@@ -250,7 +250,7 @@ HTTP 失败不会提交草稿；日志只记录状态和已识别的错误类别
 
 - OneNote **桌面版**（Office16 的 `ONENOTE.EXE`）。UWP 版「OneNote for Windows 10」没有 COM 接口，用不了。
 - .NET Framework 4.8 运行时（Windows 10/11 自带）。
-- 构建需要 .NET SDK 或 VS2022。
+- 构建完整解决方案及发布包需要 .NET 10 SDK，以及 .NET Framework 4.8 参考程序集。
 
 ## 构建与安装
 
@@ -306,6 +306,38 @@ powershell -ExecutionPolicy Bypass -File Tools\unregister.ps1
 ```
 
 装好后重新打开 OneNote，「开始」选项卡末尾就有「代码高亮」组了。
+
+## 发布安装包
+
+在仓库根目录执行，支持 Windows PowerShell 5.1 和 Windows 上的 PowerShell 7.x：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File publish.ps1
+# 或
+pwsh -ExecutionPolicy Bypass -File publish.ps1
+```
+
+脚本构建 Release 解决方案，发布 Windows x64 自包含 MCP，并把插件、Office PIA、MCP 运行时、安装脚本和文档打包。
+默认输出到 `bin\publish\`，每次创建一个带版本号、UTC 时间和随机后缀的新目录，同时生成同名 ZIP 和 ZIP 的 `.sha256` 校验文件。
+目录内的 `INSTALL.md` 提供安装步骤，`release-manifest.json` 记录版本和入口路径，`SHA256SUMS.txt` 列出文件校验值。发布产物由 `.gitignore` 排除。
+发布过程只构建和打包，不运行安装或注册脚本，不关闭 OneNote。
+
+| 参数 | 作用 |
+|---|---|
+| `-Configuration Debug` | 发布 Debug 版，默认 Release |
+| `-OutputDirectory D:\Releases` | 指定发布包的父目录；相对路径按当前工作目录解释。仓库内只能输出到 `bin` 下 |
+| `-SkipBuild` | 使用已有插件构建和 MCP 自包含发布输出，不调用 `dotnet`；MCP 输出须已由 `Tools\publish-mcp.ps1` 生成 |
+| `-NoZip` | 只生成发布目录、说明和文件校验值 |
+
+交付时复制完整目录或解压 ZIP 到固定目录。在发布包根目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Configuration Release -SkipBuild
+```
+
+发布包不含源码，安装必须加 `-SkipBuild`；Debug 包改用 `-Configuration Debug`。
+目标机需要 OneNote 桌面版 Office16 和 .NET Framework 4.8，不需要 .NET 10 SDK 或运行时。安装会自动提权、关闭并重开 OneNote。
+安装后保留目录位置，COM 注册使用其中的插件 DLL 路径。MCP EXE 位于包内的 `Mcp\Server\bin\Release\net10.0-windows\win-x64\publish\`，客户端配置使用解压后的绝对路径。
 
 ## 出问题时
 
@@ -365,6 +397,7 @@ Views/
   WindowIcons.cs            窗口图标，和功能区按钮共用嵌入资源里的图片
 install.ps1                 一键构建 + 安装 / 卸载
 uninstall.ps1               一键卸载入口
+publish.ps1                 构建插件和 MCP，生成发布目录、ZIP 和 SHA256 校验文件
 Tools/register.ps1          只做注册这一步
 Tools/unregister.ps1        只做注销这一步
 Tools/detect-test.ps1       自动识别回归测试，样本在 Tools/detect-samples/<语言 id>/ 下
@@ -372,6 +405,7 @@ Tools/ai-merge-test.ps1     AI 助手回归测试：格式合并、模型输出�
 Tools/highlight-selection-test.ps1  「高亮选中」回归测试：认选区、缩进的段落、换成代码框
 Tools/agent-test.ps1        Agent 离线回归，不调用真实接口或 OneNote
 Tools/addin-surrogate-test.ps1  安装/卸载脚本的编码、语法和代理进程清理离线回归
+Tools/publish-mcp.ps1        单独发布 Windows x64 自包含 MCP，可指定输出目录
 Tools/agent-format-probe.ps1  显式创建专用测试分区和测试页，验证真实 OneNote 格式往返
 Tests/                    独立签名的 net48 测试程序及页面/HTTP 模拟器
 ```
@@ -388,7 +422,7 @@ powershell -ExecutionPolicy Bypass -File Tools\publish-mcp.ps1
 & '.\Mcp\Server\bin\Release\net10.0-windows\win-x64\publish\OneNoteCodeHelper.Mcp.exe' --doctor
 ```
 
-开发机需要 .NET 10 SDK。交付复制整个 `publish` 文件夹，自带 Windows x64 运行时，不采用单文件打包或裁剪。
+开发机需要 .NET 10 SDK。只交付 MCP 时复制整个 `publish` 文件夹，自带 Windows x64 运行时，不采用单文件打包或裁剪；同时交付插件和安装脚本时使用根目录的 `publish.ps1`，见上面的「发布安装包」。
 `install.ps1` 的正常构建步骤也会发布 MCP，插件 DLL 注册路径保持原样。
 完整的 EXE 路径、Codex 配置示例、调用流程、错误状态和专用合成页面验收见 [本地 MCP 接入文档](docs/onenote-mcp.md)。
 
