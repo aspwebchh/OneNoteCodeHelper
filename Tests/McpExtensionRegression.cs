@@ -28,8 +28,58 @@ internal static partial class Program
         private int _ids;
         internal void Add(string id, XElement page, string section = "s1")
         {
-            page.SetAttributeValue("ID", id); Pages[id] = new FakePage(page);
+            page.SetAttributeValue("ID", id); Pages[id] = new FakePage(page); Stamp(Pages[id].Page);
             Node(section).Add(new XElement(One + "Page", new XAttribute("ID", id), new XAttribute("name", (string)page.Attribute("name") ?? "测试"), new XAttribute("pageLevel", 1)));
+        }
+        /// <summary>
+        /// 按本机实测补上 OneNote 回存时自行维护的内容：页面日期、层级和语言，页面设置，作者和编辑记录，默认左对齐，
+        /// 表格开关，列表字号和标记日期，自动计算的文本框宽度，标题表情的符号字体，以及 36.0 这样的数值写法。写入只带草稿内容，回读仍会出现这些。
+        /// </summary>
+        private static void Stamp(XElement page)
+        {
+            void Default(XElement e, string name, string value) { if (e.Attribute(name) == null) e.SetAttributeValue(name, value); }
+            const string Time = "2026-09-26T00:00:00.000Z";
+            Default(page, "dateTime", Time); Default(page, "pageLevel", "1"); Default(page, "lang", "zh-CN");
+            if (page.Element(One + "PageSettings") == null)
+            {
+                var settings = new XElement(One + "PageSettings", new XAttribute("RTL", "false"), new XAttribute("color", "automatic"),
+                    new XElement(One + "PageSize", new XElement(One + "Automatic")), new XElement(One + "RuleLines", new XAttribute("visible", "false")));
+                var anchor = page.Elements().FirstOrDefault(e => e.Name == One + "Title" || e.Name == One + "Outline" || e.Name == One + "Image");
+                if (anchor != null) anchor.AddBeforeSelf(settings); else page.Add(settings);
+            }
+            foreach (var e in page.Elements(One + "Title").Concat(page.Descendants(One + "Cell"))) Default(e, "lang", "zh-CN");
+            // 标题里的表情换成符号字体。
+            foreach (var t in page.Elements(One + "Title").Descendants(One + "T").Where(t => !t.Value.Contains("Segoe UI Emoji")))
+                t.ReplaceNodes(new XCData(System.Text.RegularExpressions.Regex.Replace(t.Value, @"[\uD800-\uDBFF][\uDC00-\uDFFF]", m => "<span style='font-family:\"Segoe UI Emoji\"'>" + m.Value + "</span>")));
+            foreach (var e in page.Descendants().Where(e => e.Name == One + "OE" || e.Name == One + "Outline" || e.Name == One + "Cell"))
+            {
+                Default(e, "author", "测试者"); Default(e, "authorInitials", "测"); Default(e, "lastModifiedBy", "测试者"); Default(e, "lastModifiedByInitials", "测");
+                Default(e, "lastModifiedTime", Time);
+                if (e.Name != One + "OE") continue;
+                Default(e, "creationTime", Time); Default(e, "alignment", "left");
+                Default(e, "authorResolutionID", "<resolutionId provider=\"Windows Live\" hash=\"test\"/>"); Default(e, "lastModifiedByResolutionID", "<resolutionId provider=\"Windows Live\" hash=\"test\"/>");
+            }
+            foreach (var table in page.Descendants(One + "Table")) { Default(table, "bordersVisible", "false"); Default(table, "hasHeaderRow", "false"); Default(table, "lastModifiedTime", Time); }
+            foreach (var mark in page.Descendants(One + "Bullet").Concat(page.Descendants(One + "Number"))) Default(mark, "fontSize", "11.0");
+            foreach (var tag in page.Descendants(One + "Tag")) { Default(tag, "disabled", "false"); Default(tag, "creationDate", Time); }
+            // 带标记的段落把段落间距再写进 style 的 margin；一组编号的第一项省略默认起点 1。
+            foreach (var oe in page.Descendants(One + "OE").Where(o => o.Element(One + "Tag") != null && (o.Attribute("spaceBefore") != null || o.Attribute("spaceAfter") != null) && !((string)o.Attribute("style") ?? "").Contains("margin")))
+                oe.SetAttributeValue("style", ((string)oe.Attribute("style") is string css && css.Length > 0 ? css + ";" : "") +
+                    "margin-top:" + ((string)oe.Attribute("spaceBefore") ?? "0") + "pt;margin-bottom:" + ((string)oe.Attribute("spaceAfter") ?? "0") + "pt");
+            foreach (var number in page.Descendants(One + "Number").Where(n => (string)n.Attribute("restartNumberingAt") == "1").ToList())
+                if (number.Parent?.Parent?.ElementsBeforeSelf(One + "OE").LastOrDefault()?.Element(One + "List")?.Element(One + "Number") == null)
+                    number.SetAttributeValue("restartNumberingAt", null);
+            foreach (var outline in page.Elements(One + "Outline"))
+            {
+                var size = outline.Element(One + "Size");
+                if (size == null) { size = new XElement(One + "Size"); if (outline.Element(One + "Position") is XElement position) position.AddAfterSelf(size); else outline.AddFirst(size); }
+                // 未由用户设定的宽度由 OneNote 按内容计算，和写入时给的不同。
+                if ((string)size.Attribute("isSetByUser") != "true") size.SetAttributeValue("width", "480.25");
+                Default(size, "height", "120.5");
+            }
+            foreach (var a in page.Descendants().Where(e => e.Name == One + "Position" || e.Name == One + "Size" || e.Name == One + "Column").Attributes()
+                .Where(a => a.Name.LocalName != "z" && a.Name.LocalName != "index" && !a.Value.Contains(".") && double.TryParse(a.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out _)).ToList())
+                a.Value += ".0";
         }
         private XElement Node(string id) => Hierarchy.Descendants().First(e => (string)e.Attribute("ID") == id);
         public string GetHierarchy(string id, HierarchyScope scope)
@@ -57,13 +107,21 @@ internal static partial class Program
             var changes = XElement.Parse(xml); var id = (string)changes.Attribute("ID"); var page = Pages[id];
             page.UpdatePageContent(xml, expected);
             if (changes.Attribute("name") != null) page.Page.SetAttributeValue("name", (string)changes.Attribute("name"));
-            Node(id).SetAttributeValue("name", (string)page.Page.Attribute("name")); AfterUpdate?.Invoke();
+            Stamp(page.Page); Node(id).SetAttributeValue("name", (string)page.Page.Attribute("name")); AfterUpdate?.Invoke();
         }
         public void DeletePageContent(string page, string objectId, DateTime expected) => Pages[page].DeletePageContent(page, objectId, expected);
         public string CreatePage(string section)
         {
             if (FailCreate) throw new Exception("create failed");
-            var id = "created-" + ++_ids; var page = Page(); page.Elements(One + "Outline").Remove(); Add(id, page, section); Creates++; AfterCreate?.Invoke(); return id;
+            // 本机实测的新建空白页：PageTitle 和正文样式定义，标题 OE 引用 PageTitle，正文为空。
+            var id = "created-" + ++_ids;
+            XElement Style(string index, string name, string font, string size) => new XElement(One + "QuickStyleDef", new XAttribute("index", index), new XAttribute("name", name),
+                new XAttribute("fontColor", "automatic"), new XAttribute("highlightColor", "automatic"), new XAttribute("font", font), new XAttribute("fontSize", size),
+                new XAttribute("spaceBefore", "0.0"), new XAttribute("spaceAfter", "0.0"));
+            var page = new XElement(One + "Page", new XAttribute("name", ""), new XAttribute("lastModifiedTime", "2026-09-26T00:00:00Z"),
+                Style("0", "PageTitle", "Microsoft YaHei Light", "20.0"), Style("1", "p", "Microsoft YaHei", "11.0"),
+                new XElement(One + "Title", new XElement(One + "OE", new XAttribute("objectID", "title-" + id), new XAttribute("quickStyleIndex", "0"), new XElement(One + "T", new XCData("")))));
+            Add(id, page, section); Creates++; AfterCreate?.Invoke(); return id;
         }
         public string CreateSection(string parent, string name)
         { var id = "section-" + ++_ids; Node(parent).Add(new XElement(One + "Section", new XAttribute("ID", id), new XAttribute("name", name))); Creates++; return id; }
@@ -83,6 +141,8 @@ internal static partial class Program
     }
     private static void TestMcpExtensions(string executable)
     {
+        TestMcpObjectMarks();
+        TestMcpWriteVerification();
         Test("MCP readonly tree search stable pagination selection code and cursor isolation", () =>
         {
             var api = new FakeWorkspace(); api.Add("page", Page(Paragraph("a", "中文 <b>重点</b> <a href='https://example.com'>来源</a>"), Paragraph("b", "第二段")));
@@ -159,6 +219,25 @@ internal static partial class Program
                 Equal("NoChange", McpCall(s, "undo_edit", new { snapshot_id = append })["status"]); True(Texts(api.Pages["page"].Page).Contains("用户后续修改"));
             }
         });
+        Test("MCP content and built-in formatting rewrite text boxes that already have to-dos", () =>
+        {
+            var tagged = Paragraph("b", "已有待办"); tagged.AddFirst(Tag("0"));
+            var page = Page(Paragraph("a", "原文"), tagged); page.AddFirst(TagDef("0", 3, "待办事项"));
+            var api = new FakeWorkspace(); api.Add("page", page);
+            using (var s = WorkspaceService(api))
+            {
+                var style = McpBegin(s); McpReadAll(s, style); McpStyle(s, style);
+                Equal("Verified", McpFinish(s, style, McpRevision(s, style))["status"]);
+                var insert = McpBegin(s); McpReadAll(s, insert);
+                McpCall(s, "insert_content", new { snapshot_id = insert, target_id = "p1", position = "after", format = "markdown", content = "- [ ] 新待办\n1. 第一\n2. 第二" });
+                Equal("Verified", McpFinish(s, insert, McpRevision(s, insert))["status"]); True(Texts(api.Pages["page"].Page).Contains("第二"));
+                Equal("Verified", McpCall(s, "undo_edit", new { snapshot_id = insert })["status"]);
+                var append = McpBegin(s); McpReadAll(s, append);
+                McpCall(s, "append_content", new { snapshot_id = append, format = "markdown", content = "- [ ] 追加待办\n1. 第一" });
+                Equal("Verified", McpFinish(s, append, McpRevision(s, append))["status"]);
+                Equal("Verified", McpCall(s, "undo_edit", new { snapshot_id = append })["status"]); Equal(1, api.Pages["page"].Page.Elements(One + "Outline").Count());
+            }
+        });
         Test("MCP replace text preserves rich runs and rejects concurrent text or unsupported targets", () =>
         {
             var api = new FakeWorkspace(); api.Add("page", Page(Paragraph("a", "<b>旧结论</b> <a href='https://example.com'>链接</a>")));
@@ -203,11 +282,17 @@ internal static partial class Program
             var api = new FakeWorkspace();
             using (var s = WorkspaceService(api))
             {
-                var id = WorkspaceBegin(s); var args = new { snapshot_id = id, section_id = "s1", title = "会议😀", content = "# 结论\n- [ ] 行动", format = "markdown" };
+                var id = WorkspaceBegin(s); var args = new { snapshot_id = id, section_id = "s1", title = "会议😀", format = "markdown",
+                    content = "# 结论\n普通 **粗体** [链接](https://example.com)\n- 项目\n  - 子项\n- [ ] 行动\n1. 第一\n```csharp\n  int x = 1;\n\n```\n| 名称 | 数量 |\n| --- | --- |\n| A | 2 |" };
                 McpCall(s, "create_page", args); McpCall(s, "create_page", args); Equal(0, api.Creates);
                 Throws<McpFault>(() => McpFinish(s, id, 0));
                 var result = McpFinish(s, id, 1);
                 Equal("Verified", result["status"]); Equal(1, api.Creates); True(result["link"] != null);
+                // 标题沿用新建页的原生 PageTitle 样式，正文按内容对应样式定义。
+                var created = api.Pages[(string)result["page_id"]].Page; var titleLine = created.Element(One + "Title").Element(One + "OE");
+                Equal("会议😀", AgentCode.PlainText(titleLine)); Equal("会议😀", (string)created.Attribute("name"));
+                Equal("PageTitle", (string)created.Elements(One + "QuickStyleDef").Single(d => (string)d.Attribute("index") == (string)titleLine.Attribute("quickStyleIndex")).Attribute("name"));
+                True(Texts(created).Contains("子项")); Equal(2, created.Descendants(One + "Table").Count());
                 Equal("Verified", McpFinish(s, id, 1)["status"]); Equal(1, api.Creates);
                 Equal("Verified", McpCall(s, "undo_edit", new { snapshot_id = id })["status"]); Equal(1, api.Recycles);
                 var section = WorkspaceBegin(s); McpCall(s, "create_section", new { snapshot_id = section, parent_id = "group", name = "新分区" });
@@ -227,6 +312,31 @@ internal static partial class Program
                 var move = WorkspaceBegin(s); McpCall(s, "move_page", new { snapshot_id = move, page_id = "page", section_id = "s2" });
                 var moved = McpFinish(s, move, 1); Equal("Verified", moved["status"]); True(!api.Pages.ContainsKey("page")); Equal(true, moved["source_recycled"]);
                 var undo = McpCall(s, "undo_edit", new { snapshot_id = move }); Equal("Verified", undo["status"]); True(api.Pages.ContainsKey((string)undo["restored_page_id"])); True(!api.Pages.ContainsKey((string)moved["page_id"]));
+            }
+        });
+        Test("MCP workspace copies real page settings and verifies against OneNote-managed metadata and layout", () =>
+        {
+            var api = new FakeWorkspace(); var page = Page(Paragraph("a", "<b>正文</b>"), Listed("b", "列表", "2"));
+            page.AddFirst(TagDef("0", 3, "待办事项")); AgentCommitter.Find(page, "a").AddFirst(Tag("0"));
+            var code = CodeBlockBuilder.BuildTable("  int x = 1;", OneNoteCodeHelper.Highlighting.LanguageRegistry.Find("csharp"), OneNoteCodeHelper.Highlighting.Themes.CodeThemes.Light, new AddInSettings());
+            page.Element(One + "Outline").Element(One + "OEChildren").Add(new XElement(One + "OE", code));
+            page.Element(One + "Outline").AddBeforeSelf(new XElement(One + "PageSettings", new XAttribute("RTL", "false"), new XAttribute("color", "#FFFFE0"),
+                new XElement(One + "PageSize", new XElement(One + "Automatic")), new XElement(One + "RuleLines", new XAttribute("visible", "true"))),
+                new XElement(One + "Title", new XElement(One + "OE", new XAttribute("objectID", "title"), new XElement(One + "T", new XCData("源标题")))));
+            api.Add("page", page);
+            using (var s = WorkspaceService(api))
+            {
+                var copy = WorkspaceBegin(s); McpCall(s, "copy_page", new { snapshot_id = copy, page_id = "page", section_id = "s2" });
+                var copied = McpFinish(s, copy, 1); Equal("Verified", copied["status"]);
+                var target = api.Pages[(string)copied["page_id"]].Page;
+                Equal("true", (string)target.Element(One + "PageSettings").Element(One + "RuleLines").Attribute("visible")); Equal(Texts(api.Pages["page"].Page), Texts(target));
+                True(target.Descendants(One + "Tag").Any()); Equal(1, target.Descendants(One + "Table").Count()); Equal("源标题", AgentPageTitle.Text(target.Element(One + "Title")));
+                Equal("Verified", McpCall(s, "undo_edit", new { snapshot_id = copy })["status"]);
+                var move = WorkspaceBegin(s); McpCall(s, "move_page", new { snapshot_id = move, page_id = "page", section_id = "s2" });
+                // 用户查看源页只改变阅读状态，不算源页变化。
+                api.Pages["page"].Page.SetAttributeValue("isUnread", "true");
+                var moved = McpFinish(s, move, 1); Equal("Verified", moved["status"]); Equal(true, moved["source_recycled"]);
+                Equal("Verified", McpCall(s, "undo_edit", new { snapshot_id = move })["status"]);
             }
         });
         Test("MCP workspace refuses complex pages children changes and preserves source on failures", () =>
@@ -322,6 +432,163 @@ internal static partial class Program
                     Equal("Verified", child.Call("finish_edit", new { snapshot_id = id, draft_revision = 1 })["status"]); Equal(1, api.Creates);
                     Equal("Verified", child.Call("finish_edit", new { snapshot_id = id, draft_revision = 1 })["status"]); Equal(1, api.Creates);
                     Equal("Verified", child.Call("undo_edit", new { snapshot_id = id })["status"]);
+                }
+            }
+        });
+    }
+
+    private static XElement McpMarkedObjectPage(string kind)
+    {
+        var oe = new XElement(One + "OE", new XAttribute("objectID", "marked-object"), Tag("0"),
+            new XElement(One + "List", new XElement(One + "Number", new XAttribute("numberSequence", "0"),
+                new XAttribute("numberFormat", "##."), new XAttribute("restartNumberingAt", "1"))));
+        if (kind == "image") oe.Add(new XElement(One + "Image", new XElement(One + "CallbackID", new XAttribute("callbackID", "marked-image"))));
+        else if (kind == "table") oe.Add(new XElement(One + "Table", new XAttribute("objectID", "marked-table"),
+            new XElement(One + "Columns", new XElement(One + "Column", new XAttribute("index", "0"), new XAttribute("width", "120"))),
+            new XElement(One + "Row", new XElement(One + "Cell", new XElement(One + "OEChildren", Paragraph("cell", "单元格"))))));
+        var page = Page(oe, Paragraph("body", "正文"));
+        page.AddFirst(TagDef("0", 3, "待办事项"), TagDef("1", 13, "重要"));
+        return page;
+    }
+    private static XElement McpNonTextObject(XElement page) => page.Descendants(One + "OE").Single(e => !e.Elements(One + "T").Any());
+    private static FakeWorkspace McpMarkedObjectWorkspace(string kind)
+    {
+        var api = new FakeWorkspace(); api.Add("page", McpMarkedObjectPage(kind));
+        if (kind == "image") api.Pages["page"].Binary["marked-image"] = "AQID";
+        return api;
+    }
+    private static void TestMcpObjectMarks()
+    {
+        var kinds = new[] { "image", "table", "empty" };
+        Test("MCP write verification detects marks and lists changing on every no-text object", () =>
+        {
+            var changes = new Dictionary<string, Action<XElement>>
+            {
+                ["removed tag"] = oe => oe.Elements(One + "Tag").Remove(),
+                ["added tag"] = oe => oe.AddFirst(Tag("1")),
+                ["completed tag"] = oe => oe.Element(One + "Tag").SetAttributeValue("completed", "true"),
+                ["tag icon"] = oe => oe.Element(One + "Tag").SetAttributeValue("index", "1"),
+                ["removed list"] = oe => oe.Elements(One + "List").Remove(),
+                ["list kind"] = oe => oe.Element(One + "List").ReplaceWith(new XElement(One + "List", new XElement(One + "Bullet", new XAttribute("bullet", "2")))),
+                ["number sequence"] = oe => oe.Element(One + "List").Element(One + "Number").SetAttributeValue("numberSequence", "2"),
+                ["number format"] = oe => oe.Element(One + "List").Element(One + "Number").SetAttributeValue("numberFormat", "##)"),
+                ["number start"] = oe => oe.Element(One + "List").Element(One + "Number").SetAttributeValue("restartNumberingAt", "4")
+            };
+            foreach (var kind in kinds)
+            {
+                var page = McpMarkedObjectPage(kind); var expected = McpPageModel.WriteSignature(page);
+                foreach (var change in changes)
+                {
+                    var actual = new XElement(page); change.Value(McpNonTextObject(actual));
+                    if (expected == McpPageModel.WriteSignature(actual)) throw new Exception(kind + ": failed to detect " + change.Key);
+                }
+                var unmarked = new XElement(page); var oe = McpNonTextObject(unmarked);
+                oe.Elements(One + "Tag").Remove(); oe.Elements(One + "List").Remove();
+                var tagged = new XElement(unmarked); McpNonTextObject(tagged).AddFirst(Tag("0"));
+                True(McpPageModel.WriteSignature(unmarked) != McpPageModel.WriteSignature(tagged));
+                var listed = new XElement(unmarked); McpNonTextObject(listed).AddFirst(new XElement(One + "List", new XElement(One + "Bullet", new XAttribute("bullet", "2"))));
+                True(McpPageModel.WriteSignature(unmarked) != McpPageModel.WriteSignature(listed));
+            }
+        });
+        Test("MCP no-text marks tolerate definition renumbering timestamps and default list starts", () =>
+        {
+            foreach (var kind in kinds)
+            {
+                var expected = McpMarkedObjectPage(kind); var actual = new XElement(expected); var oe = McpNonTextObject(actual);
+                actual.Elements(One + "TagDef").Single(d => (string)d.Attribute("index") == "0").SetAttributeValue("index", "40");
+                oe.Element(One + "Tag").SetAttributeValue("index", "40");
+                oe.Element(One + "Tag").SetAttributeValue("creationDate", "2026-10-03T01:00:00Z");
+                var number = oe.Element(One + "List").Element(One + "Number");
+                number.SetAttributeValue("restartNumberingAt", null); number.SetAttributeValue("numberSequence", "00"); number.SetAttributeValue("fontSize", "11.0");
+                actual.SetAttributeValue("dateTime", "2026-10-03T01:00:00Z"); actual.SetAttributeValue("pageLevel", "1");
+                oe.SetAttributeValue("author", "测试者"); oe.SetAttributeValue("alignment", "left");
+                Equal(McpPageModel.WriteSignature(expected), McpPageModel.WriteSignature(actual));
+            }
+        });
+        Test("MCP copy move and compensation preserve image table and empty-object marks", () =>
+        {
+            foreach (var kind in kinds)
+            {
+                var api = McpMarkedObjectWorkspace(kind);
+                using (var s = WorkspaceService(api))
+                {
+                    var copy = WorkspaceBegin(s); McpCall(s, "copy_page", new { snapshot_id = copy, page_id = "page", section_id = "s2" });
+                    var copied = McpFinish(s, copy, 1); Equal("Verified", copied["status"]);
+                    CheckMarks((string)copied["page_id"]); True(api.Pages.ContainsKey("page"));
+                    Equal("Verified", McpCall(s, "undo_edit", new { snapshot_id = copy })["status"]);
+                    True(!api.Pages.ContainsKey((string)copied["page_id"]));
+                    var move = WorkspaceBegin(s); McpCall(s, "move_page", new { snapshot_id = move, page_id = "page", section_id = "s2" });
+                    var moved = McpFinish(s, move, 1); Equal("Verified", moved["status"]); Equal(true, moved["source_recycled"]);
+                    CheckMarks((string)moved["page_id"]); True(!api.Pages.ContainsKey("page"));
+                    var undo = McpCall(s, "undo_edit", new { snapshot_id = move }); Equal("Verified", undo["status"]);
+                    CheckMarks((string)undo["restored_page_id"]); True(!api.Pages.ContainsKey((string)moved["page_id"]));
+                }
+                void CheckMarks(string id)
+                {
+                    var page = XElement.Parse(api.GetPageContent(id, PageInfo.piBinaryData)); var oe = McpNonTextObject(page);
+                    Equal(1, oe.Elements(One + "Tag").Count()); Equal("false", (string)oe.Element(One + "Tag").Attribute("completed"));
+                    Equal("3", (string)AgentMarks.Definition(page, oe.Element(One + "Tag")).Attribute("symbol"));
+                    Equal("0", (string)oe.Element(One + "List").Element(One + "Number").Attribute("numberSequence"));
+                    Equal("##.", (string)oe.Element(One + "List").Element(One + "Number").Attribute("numberFormat"));
+                    if (kind == "image") Equal("AQID", page.Descendants(One + "Image").Single().Element(One + "Data").Value);
+                }
+            }
+        });
+        Test("MCP lost no-text tags freeze copy and move without recycling or replaying", () =>
+        {
+            foreach (var kind in kinds) foreach (var operation in new[] { "copy_page", "move_page" })
+            {
+                var api = McpMarkedObjectWorkspace(kind);
+                using (var s = WorkspaceService(api))
+                {
+                    var id = WorkspaceBegin(s); McpCall(s, operation, new { snapshot_id = id, page_id = "page", section_id = "s2" });
+                    api.AfterUpdate = () => McpNonTextObject(api.Pages.Single(p => p.Key != "page").Value.Page).Elements(One + "Tag").Remove();
+                    var result = McpFinish(s, id, 1); Equal("CommitOutcomeUnknown", result["status"]); Equal(false, result["source_recycled"]);
+                    Equal(0, api.Recycles); True(api.Pages.ContainsKey("page")); True(api.Pages.ContainsKey((string)result["page_id"]));
+                    Equal(1, McpNonTextObject(api.Pages["page"].Page).Elements(One + "Tag").Count());
+                    Equal(0, McpNonTextObject(api.Pages[(string)result["page_id"]].Page).Elements(One + "Tag").Count());
+                    var status = McpCall(s, "get_edit_status", new { snapshot_id = id }); Equal("CommitOutcomeUnknown", status["state"]); Equal(false, status["can_undo"]);
+                    var writes = api.Pages.Values.Sum(p => p.Writes);
+                    Equal(McpJson.Serialize(result), McpJson.Serialize(McpFinish(s, id, 1))); Equal(1, api.Creates); Equal(writes, api.Pages.Values.Sum(p => p.Writes));
+                    Throws<McpFault>(() => McpCall(s, operation, new { snapshot_id = id, page_id = "page", section_id = "s2" }));
+                    Throws<McpFault>(() => McpCall(s, "undo_edit", new { snapshot_id = id }));
+                }
+            }
+        });
+        Test("MCP move compensation keeps the target when restored no-text marks are missing", () =>
+        {
+            foreach (var kind in kinds)
+            {
+                var api = McpMarkedObjectWorkspace(kind);
+                using (var s = WorkspaceService(api))
+                {
+                    var id = WorkspaceBegin(s); McpCall(s, "move_page", new { snapshot_id = id, page_id = "page", section_id = "s2" });
+                    var moved = McpFinish(s, id, 1); Equal("Verified", moved["status"]); var target = (string)moved["page_id"];
+                    api.AfterUpdate = () => McpNonTextObject(api.Pages.Single(p => p.Key != target).Value.Page).Elements(One + "Tag").Remove();
+                    var undo = McpCall(s, "undo_edit", new { snapshot_id = id }); Equal("CommitOutcomeUnknown", undo["status"]);
+                    True(api.Pages.ContainsKey(target)); True(api.Pages.ContainsKey((string)undo["restored_page_id"])); Equal(1, api.Recycles);
+                    Equal(1, McpNonTextObject(api.Pages[target].Page).Elements(One + "Tag").Count());
+                    Equal(0, McpNonTextObject(api.Pages[(string)undo["restored_page_id"]].Page).Elements(One + "Tag").Count());
+                    Equal(false, McpCall(s, "get_edit_status", new { snapshot_id = id })["can_undo"]);
+                    var writes = api.Pages.Values.Sum(p => p.Writes);
+                    Equal(McpJson.Serialize(undo), McpJson.Serialize(McpCall(s, "undo_edit", new { snapshot_id = id })));
+                    Equal(2, api.Creates); Equal(1, api.Recycles); Equal(writes, api.Pages.Values.Sum(p => p.Writes));
+                }
+            }
+        });
+        Test("MCP move undo preserves later edits to no-text target marks", () =>
+        {
+            foreach (var kind in kinds)
+            {
+                var api = McpMarkedObjectWorkspace(kind);
+                using (var s = WorkspaceService(api))
+                {
+                    var id = WorkspaceBegin(s); McpCall(s, "move_page", new { snapshot_id = id, page_id = "page", section_id = "s2" });
+                    var moved = McpFinish(s, id, 1); Equal("Verified", moved["status"]); var target = (string)moved["page_id"];
+                    McpNonTextObject(api.Pages[target].Page).Element(One + "Tag").SetAttributeValue("completed", "true");
+                    Equal("NoChange", McpCall(s, "undo_edit", new { snapshot_id = id })["status"]);
+                    True(api.Pages.ContainsKey(target)); Equal(1, api.Creates); Equal(1, api.Recycles);
+                    Equal("true", (string)McpNonTextObject(api.Pages[target].Page).Element(One + "Tag").Attribute("completed"));
                 }
             }
         });

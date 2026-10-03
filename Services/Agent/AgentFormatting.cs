@@ -424,7 +424,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 else
                 {
                     var style = Css.Effective(runs[run], page);
-                    style.Remove("text-align"); // 和文字片段一样，段落对齐另行核验。
+                    DropParagraphStyle(style); // 和文字片段一样，段落对齐和间距另行核验。
                     styles.Add(style);
                 }
             }
@@ -446,8 +446,14 @@ namespace OneNoteCodeHelper.Services.Agent
                 Css.Merge(css, Css.Read((string)tag.Attribute("style")));
                 if (tag.Name.LocalName == "a") link = (string)tag.Attribute("href") ?? "";
             }
-            css.Remove("text-align"); // 回存时常把 alignment 冗余写进 style，单独校验段落对齐。
+            DropParagraphStyle(css);
             return css;
+        }
+
+        /// <summary>回存时常把 alignment 和段落间距（margin，16.0.20326 实测）冗余写进 style；段落对齐和间距单独校验。</summary>
+        private static void DropParagraphStyle(Dictionary<string, string> css)
+        {
+            css.Remove("text-align"); css.Remove("margin-top"); css.Remove("margin-bottom");
         }
     }
 

@@ -18,7 +18,8 @@ namespace OneNoteCodeHelper.Services.Mcp
         private readonly AgentOptions _options;
         private readonly AddInSettings _settings;
         internal string Kind, PageId, SectionId, ParentId, Name, NewId, SourceSection;
-        internal XElement Source, Desired, Written;
+        /// <summary>Expected 是最近一次写入新页面（提交或撤销恢复）的期望内容，Written 是提交后的回读；核验失败时用于诊断。</summary>
+        internal XElement Source, Desired, Expected, Written;
         internal string SourceSignature, AfterSignature, PlanJson;
         internal bool Started, RecycledSource, CreatedVerified, Undone;
         private string[] _warnings = new string[0];
@@ -114,10 +115,10 @@ namespace OneNoteCodeHelper.Services.Mcp
                 try
                 {
                     NewId = Api.CreatePage(SectionId);
-                    var fresh = _read.ReadPage(NewId); var desired = ForNewPage(NewId, fresh);
+                    var fresh = _read.ReadPage(NewId); var desired = Expected = ForNewPage(NewId, fresh);
                     try { Api.UpdatePageContent(desired.ToString(SaveOptions.DisableFormatting), AgentPageSnapshot.Modified(fresh)); } catch (Exception) { /* 写入可能成功，只回读，绝不重放。 */ }
                     Written = _read.ReadPage(NewId, PageInfo.piBinaryData);
-                    CreatedVerified = McpPageModel.Signature(desired, false) == McpPageModel.Signature(Written, false) && (string)RequireNode(NewId, "Page").Parent?.Attribute("ID") == SectionId;
+                    CreatedVerified = McpPageModel.WriteSignature(desired) == McpPageModel.WriteSignature(Written) && (string)RequireNode(NewId, "Page").Parent?.Attribute("ID") == SectionId;
                     if (!CreatedVerified) return Result("CommitOutcomeUnknown");
                     AfterSignature = McpPageModel.Signature(Written, true);
                     if (Kind == "move_page")
@@ -167,9 +168,9 @@ namespace OneNoteCodeHelper.Services.Mcp
                 {
                     if (Exists(PageId)) return Result("NoChange", "源页已恢复，撤销停止，请核对源页和目标页。");
                     RequireRecycleBin(RequireNode(SourceSection, "Section"));
-                    restored = Api.CreatePage(SourceSection); var before = _read.ReadPage(restored); var desired = ForNewPage(restored, before);
+                    restored = Api.CreatePage(SourceSection); var before = _read.ReadPage(restored); var desired = Expected = ForNewPage(restored, before);
                     Api.UpdatePageContent(desired.ToString(SaveOptions.DisableFormatting), AgentPageSnapshot.Modified(before));
-                    if (McpPageModel.Signature(desired, false) != McpPageModel.Signature(_read.ReadPage(restored, PageInfo.piBinaryData), false))
+                    if (McpPageModel.WriteSignature(desired) != McpPageModel.WriteSignature(_read.ReadPage(restored, PageInfo.piBinaryData)))
                         return new { status = "CommitOutcomeUnknown", restored_page_id = restored, message = "源位置恢复副本未核验，目标页保留。" };
                     // 恢复期间目标页可能被用户修改：重新检查再删除。
                     current = _read.ReadPage(NewId, PageInfo.piBinaryData);
@@ -186,19 +187,54 @@ namespace OneNoteCodeHelper.Services.Mcp
             source_recycled = RecycledSource, source_outcome_known = !_sourceRecycleAttempted || _sourceOutcomeKnown,
             creation_attempted = Started, link = NewId == null ? null : SafeLink(NewId), object_id_map = ObjectMap(), message };
         private string SafeLink(string id) { try { return Api.GetLink(id, null); } catch (Exception) { return null; } }
+        /// <summary>
+        /// 以 OneNote 新建的空白页为底构造写入内容：页面属性、样式和标记编号、默认页面设置及原生标题容器沿用新建页，
+        /// 草稿内容的样式和标记按定义内容对应过来（与 Agent 追加文本框相同）。复制及补偿恢复使用相同规则。
+        /// </summary>
         private XElement ForNewPage(string id, XElement fresh)
         {
-            var desired = new XElement(Desired); desired.SetAttributeValue("ID", id);
-            // 原生标题栏固定在新建页已有容器中；复制及补偿恢复使用相同规则。
-            desired.Element(One + "Title")?.SetAttributeValue("objectID", (string)fresh.Element(One + "Title")?.Attribute("objectID"));
-            desired.Element(One + "Title")?.Element(One + "OE")?.SetAttributeValue("objectID", (string)fresh.Element(One + "Title")?.Element(One + "OE")?.Attribute("objectID"));
-            return desired;
+            var page = new XElement(fresh); page.SetAttributeValue("ID", id); page.SetAttributeValue("name", (string)Desired.Attribute("name"));
+            // 修改时间、层级和阅读状态由 OneNote 维护；子页面复制后是一级页面。
+            foreach (var name in new[] { "lastModifiedTime", "pageLevel", "selected", "isUnread", "isCurrentlyViewed" }) page.SetAttributeValue(name, null);
+            var styles = Desired.Elements(One + "QuickStyleDef").ToList(); var tags = Desired.Elements(One + "TagDef").ToList();
+            if (Source != null)
+            {
+                if (Desired.Attribute("dateTime") != null) page.SetAttributeValue("dateTime", (string)Desired.Attribute("dateTime"));
+                if (Desired.Element(One + "PageSettings") is XElement settings)
+                { page.Elements(One + "PageSettings").Remove(); InsertBefore(page, new XElement(settings), "Title"); }
+                foreach (var meta in Desired.Elements(One + "Meta")) InsertBefore(page, new XElement(meta), "MediaPlaylist", "MeetingInfo", "PageSettings", "Title");
+            }
+            var wanted = Desired.Element(One + "Title"); var title = page.Element(One + "Title");
+            if (wanted != null && Source == null && title?.Element(One + "OE") is XElement line)
+            {
+                // 新建页面只换标题文字，保留新建页标题的原生样式。
+                line.Elements(One + "T").Remove(); line.Add(wanted.Descendants(One + "T").Select(t => new XElement(t)));
+            }
+            else if (wanted != null)
+            {
+                var copy = new XElement(wanted);
+                copy.SetAttributeValue("objectID", (string)title?.Attribute("objectID"));
+                copy.Element(One + "OE")?.SetAttributeValue("objectID", (string)title?.Element(One + "OE")?.Attribute("objectID"));
+                AgentPageTitle.Remap(copy, page, styles, tags); AgentPageTitle.Put(page, copy);
+            }
+            foreach (var e in Desired.Elements().Where(IsContent))
+            { var copy = new XElement(e); AgentPageTitle.Remap(copy, page, styles, tags); page.Add(copy); }
+            return page;
+        }
+        private static bool IsContent(XElement e) => new[] { "Outline", "Image", "InkDrawing", "InsertedFile", "MediaFile", "FutureObject" }.Contains(e.Name.LocalName);
+        /// <summary>按页面架构顺序插入：放在第一个 following 或正文对象之前。</summary>
+        private static void InsertBefore(XElement page, XElement item, params string[] following)
+        {
+            var anchor = page.Elements().FirstOrDefault(e => following.Contains(e.Name.LocalName) || IsContent(e));
+            if (anchor != null) anchor.AddBeforeSelf(item); else page.Add(item);
         }
         private object[] ObjectMap()
         {
             if (Source == null || Written == null || !CreatedVerified) return new object[0];
             var names = new[] { "Title", "Outline", "OE", "Table", "Row", "Cell", "Image" };
-            return Source.Descendants().Where(e => names.Contains(e.Name.LocalName)).Zip(Written.Descendants().Where(e => names.Contains(e.Name.LocalName)),
+            // 源页没有标题时，新建页自带的空标题不对应任何源对象。
+            var skipTitle = Source.Element(One + "Title") == null;
+            return Source.Descendants().Where(e => names.Contains(e.Name.LocalName)).Zip(Written.Descendants().Where(e => names.Contains(e.Name.LocalName) && !(skipTitle && e.AncestorsAndSelf(One + "Title").Any())),
                 (a, b) => (object)new { source_id = (string)a.Attribute("objectID"), object_id = (string)b.Attribute("objectID") }).ToArray();
         }
         private XElement RequireNode(string id, params string[] kinds)
@@ -222,7 +258,9 @@ namespace OneNoteCodeHelper.Services.Mcp
         private static void EnsureCopyable(XElement page)
         {
             var allowed = new HashSet<string>(new[] { "Page", "Title", "Outline", "OEChildren", "OE", "T", "Table", "Columns", "Column", "Row", "Cell", "Image", "Data", "Position", "Size", "Meta", "QuickStyleDef", "TagDef", "Tag", "List", "Bullet", "Number", "OCRData", "OCRText", "OCRToken", "PageSettings" });
-            if (page.DescendantsAndSelf().Any(e => e.Name.Namespace != One || !allowed.Contains(e.Name.LocalName))) throw new McpFault("unsupported_copy", "页面包含墨迹、附件、音视频或未支持对象，不能保真复制。");
+            // 页面设置里的纸张大小、规则线等只是页面外观，每个真实页面都有（本机实测），整体复制。
+            if (page.DescendantsAndSelf().Any(e => !e.Ancestors(One + "PageSettings").Any() && (e.Name.Namespace != One || !allowed.Contains(e.Name.LocalName))))
+                throw new McpFault("unsupported_copy", "页面包含墨迹、附件、音视频或未支持对象，不能保真复制。");
             if (page.Descendants(One + "Image").Any(i => string.IsNullOrEmpty(i.Element(One + "Data")?.Value))) throw new McpFault("image_unavailable", "图片二进制数据不完整。");
             foreach (var image in page.Descendants(One + "Image"))
                 try { if (Convert.FromBase64String(image.Element(One + "Data").Value).Length == 0) throw new FormatException(); }

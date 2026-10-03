@@ -28,6 +28,7 @@ internal static partial class Program
         if (args.Length == 2 && args[0] == "--mcp-only") return TestMcp(Path.GetFullPath(args[1]));
         if (args.Length == 2 && args[0] == "--mcp-extensions-only") { TestMcpExtensions(Path.GetFullPath(args[1])); Console.WriteLine($"MCP extensions: {_passed} passed, {_failed} failed"); return _failed == 0 ? 0 : 1; }
         if (args.Length == 2 && args[0] == "--probe-page-title") return TitleProbe.Run(args[1]);
+        if (args.Length == 2 && args[0] == "--probe-workspace") return WorkspaceProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--probe-code-spacing") return CodeSpacingProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--probe-clear-format") return ClearFormatProbe.Run(args[1]);
         if (args.Length == 3 && args[0] == "--compare-formats") return ClearFormatProbe.Compare(args[1], args[2]);
@@ -1653,6 +1654,16 @@ internal static partial class Program
             var s = Prepared(p); var api = new FakePage(s.Page);
             api.AfterSave = () => { api.Page.Element(One + "TagDef").SetAttributeValue("index", "7"); AgentCommitter.Find(api.Page, "b").Element(One + "Tag").SetAttributeValue("index", "7"); };
             Equal("Verified", new AgentCommitter(api).Commit(s, CancellationToken.None).Status);
+        });
+        Test("AI text write-back sends the page TagDefs with a text box that has to-do tags", () =>
+        {
+            var tagged = Paragraph("b", "待办事项"); tagged.AddFirst(Tag("0"));
+            var p = Page(Paragraph("a", "原文"), tagged); p.AddFirst(TagDef("0", 3, "待办事项"));
+            var api = new FakePage(p);
+            True(PageEditor.ReadAiTargets(p, "page", null, null, out var targets).Success);
+            var edit = new AiParagraphEdit(targets.Paragraphs.Single(x => x.ObjectId == "a"), "新文", new string[0]);
+            True(PageEditor.ApplyParagraphEdits(api, targets, new[] { edit }, false, out var applied, out _, out _).Success);
+            Equal(1, applied.Count); True(XElement.Parse(api.LastXml).Elements(One + "TagDef").Any()); Equal("新文|待办事项", Texts(api.Page));
         });
         Test("set_table_style changes borders, header row and shading, verifies and undo restores", () =>
         {
@@ -4105,6 +4116,10 @@ internal static partial class Program
         {
             Attempts++; True(expected != DateTime.MinValue); LastXml = xml;
             if (ConflictsRemaining-- > 0) { OnConflict?.Invoke(); throw new COMException("conflict", unchecked((int)0x80042010)); }
+            // 本机实测：Tag 的 index 只按提交 XML 里的 TagDef 解析，引用不到时整次写入被架构拒绝。
+            var submitted = XElement.Parse(xml);
+            var defined = new HashSet<string>(submitted.Elements(One + "TagDef").Select(d => (string)d.Attribute("index")));
+            if (submitted.Descendants(One + "Tag").Any(t => !defined.Contains((string)t.Attribute("index")))) throw new COMException("invalid xml", unchecked((int)0x80042001));
             var homes = AgentLayout.Homes(Page);
             foreach (var c in XElement.Parse(xml).Elements())
             {

@@ -231,7 +231,7 @@ namespace OneNoteCodeHelper.Services
             var table = CodeBlockBuilder.BuildTable(selection.Code, language, settings.Theme, settings);
             selection.ReplaceWith(table);
 
-            var changes = BuildPageChanges(pageId, selection.Outline);
+            var changes = BuildPageChanges(pageId, WithTagDefinitions(page, new[] { selection.Outline }));
             return Submit(_api, pageId, page, changes,
                 $"已按 {language.DisplayName} 高亮 {selection.Paragraphs.Count} 行所在的选区。");
         }
@@ -447,8 +447,18 @@ namespace OneNoteCodeHelper.Services
 
             // 按页面上的先后顺序回传，标题在文本框前面。
             var changed = page.Elements().Where(changedContainers.Contains).ToArray();
-            return Submit(api, pageId, page, BuildPageChanges(pageId, changed),
+            return Submit(api, pageId, page, BuildPageChanges(pageId, WithTagDefinitions(page, changed)),
                 $"AI 已修改 {applied.Count} 段，删掉 {removedBlankLines} 个空行。");
+        }
+
+        /// <summary>
+        /// TagDef 的编号只在提交的 XML 内有效：回传的内容里有标记时必须连同页面的 TagDef 一起提交，
+        /// 否则 OneNote 以 0x80042001 拒绝整次写入（16.0.20326 实测）。TagDef 按架构排在最前。
+        /// </summary>
+        internal static XElement[] WithTagDefinitions(XElement page, IEnumerable<XElement> changed)
+        {
+            var elements = changed.ToList();
+            return elements.Any(e => e.Descendants(One + "Tag").Any()) ? page.Elements(One + "TagDef").Concat(elements).ToArray() : elements.ToArray();
         }
 
         /// <summary>

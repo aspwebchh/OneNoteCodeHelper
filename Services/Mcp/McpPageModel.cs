@@ -137,40 +137,121 @@ namespace OneNoteCodeHelper.Services.Mcp
         }
 
         // 按语义核对而非原始 XML：忽略回存的 ID、时间、自动高度和定义编号；逐段检查格式、表格及二进制数据。
-        internal static string SignatureContent(XElement page, bool identity)
+        // written 用于「写入的期望页 vs 回读页」，两侧同样归一：另外忽略 OneNote 自行维护或派生的内容（作者与语言、页面日期和层级、
+        // 自动宽度、OCR），默认左对齐和已知几何、间距字段的数值写法归一。段落的样式、对齐、间距、列表和标记由 SemanticFormat 按语义比较；
+        // 代码框的行与 Agent 核验新代码框相同，只比文字并跳过空白比较格式（OneNote 会改写代码行的硬空格）；标题允许符号字体。
+        internal static string SignatureContent(XElement page, bool identity, bool written = false)
         {
             var data = new StringBuilder();
             foreach (var e in page.Descendants().Where(e => new[] { "Title", "Outline", "OE", "Table", "Row", "Cell", "Image" }.Contains(e.Name.LocalName)))
             {
                 data.Append(e.Name.LocalName).Append('/').Append(e.Ancestors().Count()).Append(':');
                 if (identity) data.Append((string)e.Attribute("objectID"));
-                if (e.Elements(One + "T").Any()) data.Append(AgentPageSnapshot.SemanticFormat(e, page));
+                if (e.Elements(One + "T").Any())
+                {
+                    if (written && e.Ancestors(One + "Table").FirstOrDefault() is XElement box && AgentPageSnapshot.IsCodeBox(box, page))
+                        data.Append(AgentCode.PlainText(e)).Append('|').Append(AgentPageSnapshot.CodeLineFormat(e, page));
+                    // OneNote 给标题里的表情等符号换成符号字体（本机实测），与设置标题的核验相同。
+                    else if (written && e.Ancestors(One + "Title").Any()) data.Append(AgentPageSnapshot.TitleFormat(e, page));
+                    else data.Append(AgentPageSnapshot.SemanticFormat(e, page));
+                }
+                // 图片、表格包装和空段落没有 T，标记和列表仍须核验；没有标记时也检查，防止回存时意外新增。
+                else if (written && e.Name == One + "OE") data.Append(AgentMarks.Projection(e, page));
+                // Agent 的通用投影只看列表种类、标记图标和完成状态；页面复制还要保留项目符号和自定义标记的完整定义。
+                if (written && e.Name == One + "OE") data.Append('|').Append(WriteMarkDetails(e, page));
                 if (e.Name == One + "Table" || e.Name == One + "Cell")
                     data.Append(TableLook.Flag(e, "bordersVisible")).Append(TableLook.Flag(e, "hasHeaderRow")).Append(TableLook.Shade((string)e.Attribute("shadingColor")));
-                if (e.Name == One + "Outline") data.Append(e.Element(One + "Position")?.ToString(SaveOptions.DisableFormatting));
-                if (e.Name == One + "Image") data.Append(e.Element(One + "Data")?.Value).Append(e.Element(One + "OCRData")?.ToString(SaveOptions.DisableFormatting));
+                if (e.Name == One + "Outline" && !written) data.Append(e.Element(One + "Position")?.ToString(SaveOptions.DisableFormatting));
+                if (e.Name == One + "Image")
+                {
+                    data.Append(e.Element(One + "Data")?.Value);
+                    if (!written) data.Append(e.Element(One + "OCRData")?.ToString(SaveOptions.DisableFormatting));
+                }
                 data.Append('\n');
             }
-            data.Append((string)page.Attribute("name"));
+            // 页面名由 OneNote 按标题文字生成；写入核验已逐段比较标题，不再比较名称。
+            if (!written) data.Append((string)page.Attribute("name"));
             // 未解析对象、页面元数据、列锁定和对象几何也参加指纹；撤销不能删掉后来加入的墨迹或附件。
             var extra = new XElement(page);
+            if (written)
+            {
+                foreach (var oe in extra.Descendants(One + "OE").Where(o => o.Elements(One + "T").Any()))
+                    foreach (var name in new[] { "style", "alignment", "spaceBefore", "spaceAfter" }) oe.SetAttributeValue(name, null);
+                // 未由用户设定的文本框宽度由 OneNote 自动计算，与未锁定的列宽同理不比较。
+                foreach (var e in extra.Descendants(One + "List").Concat(extra.Descendants(One + "Tag")).Concat(extra.Descendants(One + "OCRData"))
+                    .Concat(extra.Elements(One + "Outline").Elements(One + "Size").Where(s => (string)s.Attribute("isSetByUser") != "true")).ToList()) e.Remove();
+                foreach (var table in extra.Descendants(One + "Table")) { table.SetAttributeValue("bordersVisible", null); table.SetAttributeValue("hasHeaderRow", null); }
+                foreach (var cell in extra.Descendants(One + "Cell")) cell.SetAttributeValue("shadingColor", null);
+            }
             foreach (var e in extra.Descendants(One + "T").ToList()) e.Remove();
             foreach (var e in extra.Descendants(One + "QuickStyleDef").Concat(extra.Descendants(One + "TagDef")).ToList()) e.Remove();
             foreach (var e in extra.DescendantsAndSelf())
             {
                 foreach (var a in e.Attributes().Where(a => a.IsNamespaceDeclaration || a.Name.Namespace == AgentLayout.Key.Namespace ||
-                    new[] { "ID", "objectID", "selected", "lastModifiedTime", "creationTime", "lastModifiedBy", "author", "authorInitials", "quickStyleIndex", "index", "creationDate", "completionDate" }.Contains(a.Name.LocalName) ||
-                    e.Name == One + "Size" && a.Name.LocalName == "height" || e.Name == One + "Column" && a.Name.LocalName == "width" && (string)e.Attribute("isLocked") != "true").ToList()) a.Remove();
+                    new[] { "ID", "objectID", "selected", "lastModifiedTime", "creationTime", "lastModifiedBy", "author", "authorInitials", "quickStyleIndex", "index", "creationDate", "completionDate", "isUnread", "isCurrentlyViewed" }.Contains(a.Name.LocalName) ||
+                    e.Name == One + "Size" && a.Name.LocalName == "height" || e.Name == One + "Column" && a.Name.LocalName == "width" && (string)e.Attribute("isLocked") != "true" ||
+                    written && IsManaged(a)).ToList()) a.Remove();
                 if (e.Name == One + "Tag")
                 { var original = page.Descendants(One + "Tag").ElementAt(extra.Descendants(One + "Tag").ToList().IndexOf(e)); var definition = AgentMarks.Definition(page, original); e.SetAttributeValue("definition", definition == null ? null : AgentMarks.Signature(definition)); }
+                if (written)
+                    foreach (var a in e.Attributes().Where(a => IsNumericWriteAttribute(a) && double.TryParse(a.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out _)).ToList())
+                        a.Value = double.Parse(a.Value, NumberStyles.Float, CultureInfo.InvariantCulture).ToString("0.###", CultureInfo.InvariantCulture);
                 e.ReplaceAttributes(e.Attributes().OrderBy(a => a.Name.ToString()).ToArray());
             }
             foreach (var n in extra.DescendantNodes().OfType<XText>().Where(t => (t.Parent.HasElements || t.Parent.Name == One + "OE") && string.IsNullOrWhiteSpace(t.Value)).ToList()) n.Remove();
             data.Append(extra.ToString(SaveOptions.DisableFormatting));
             return data.ToString();
         }
+        /// <summary>复制核验的持久标记属性；定义编号、创建时间和自动字号由通用投影归一，名称保留大小写和空格。</summary>
+        private static string WriteMarkDetails(XElement oe, XElement page)
+        {
+            var details = new XElement("marks");
+            var bullet = oe.Element(One + "List")?.Element(One + "Bullet");
+            if (bullet != null) details.Add(new XElement("bullet", new XAttribute("symbol", MarkNumber((string)bullet.Attribute("bullet") ?? ""))));
+            foreach (var tag in oe.Elements(One + "Tag"))
+            {
+                var mark = new XElement("tag", new XAttribute("disabled", (string)tag.Attribute("disabled") == "true"));
+                var definition = AgentMarks.Definition(page, tag);
+                if (definition == null) mark.SetAttributeValue("missingDefinition", true);
+                else
+                {
+                    var stable = new XElement(definition); stable.SetAttributeValue("index", null);
+                    foreach (var a in stable.Attributes().Where(a => !a.IsNamespaceDeclaration && a.Name.LocalName != "name"))
+                        a.Value = a.Name.LocalName == "type" || a.Name.LocalName == "symbol" ? MarkNumber(a.Value) : a.Value.Trim().ToLowerInvariant();
+                    if (stable.Attribute("fontColor") == null) stable.SetAttributeValue("fontColor", "automatic");
+                    if (stable.Attribute("highlightColor") == null) stable.SetAttributeValue("highlightColor", "none");
+                    stable.ReplaceAttributes(stable.Attributes().Where(a => !a.IsNamespaceDeclaration).OrderBy(a => a.Name.ToString()).ToArray());
+                    mark.Add(stable);
+                }
+                details.Add(mark);
+            }
+            return details.ToString(SaveOptions.DisableFormatting);
+        }
+        private static string MarkNumber(string value) => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n)
+            ? n.ToString(CultureInfo.InvariantCulture) : value;
+
+        /// <summary>只有已知的几何和段落间距字段是数值；Meta 的名称、内容及其他字符串属性必须逐字保留。</summary>
+        private static bool IsNumericWriteAttribute(XAttribute a)
+        {
+            if (a.Name.Namespace != XNamespace.None) return false;
+            var element = a.Parent.Name; var name = a.Name.LocalName;
+            return element == One + "Position" && (name == "x" || name == "y" || name == "z") ||
+                element == One + "Size" && (name == "width" || name == "height") ||
+                element == One + "Column" && name == "width" ||
+                element == One + "OE" && (name == "spaceBefore" || name == "spaceAfter");
+        }
+        /// <summary>OneNote 回存时自行维护的属性：与 <see cref="AgentCode.StripIdentity"/> 相同的作者和编辑记录，语言、页面日期、层级和按标题生成的页面名，以及默认的左对齐。</summary>
+        private static bool IsManaged(XAttribute a)
+        {
+            var name = a.Name.LocalName;
+            return name.StartsWith("author", StringComparison.Ordinal) || name.StartsWith("lastModified", StringComparison.Ordinal) ||
+                name == "lang" || name == "dateTime" || name == "pageLevel" || name == "alignment" && a.Value == "left" || name == "name" && a.Parent?.Name == One + "Page";
+        }
         internal static string Signature(XElement page, bool identity)
         { using (var hash = SHA256.Create()) return Convert.ToBase64String(hash.ComputeHash(Encoding.UTF8.GetBytes(SignatureContent(page, identity)))); }
+        /// <summary>写入核验：按 OneNote 回存规则归一后比较期望页和回读页，不比较对象身份。</summary>
+        internal static string WriteSignature(XElement page)
+        { using (var hash = SHA256.Create()) return Convert.ToBase64String(hash.ComputeHash(Encoding.UTF8.GetBytes(SignatureContent(page, false, true)))); }
     }
     internal static class McpSetExtensions
     {

@@ -103,20 +103,23 @@ namespace OneNoteCodeHelper.Services.Agent
 
         /// <summary>
         /// 核验用的语义投影：列表看种类及编号样式、起点，标记看图标和完成状态。
-        /// OneNote 回存时补上的 fontSize、编号文字、创建时间等不参与比较，TagDef 重新编号也不影响。
+        /// OneNote 回存时补上的 fontSize、编号文字、创建时间等不参与比较，TagDef 重新编号也不影响；
+        /// 一组编号第一项的起点 1 是默认值，OneNote 回存时会省略（本机实测），按没有起点比较。
         /// </summary>
-        internal static string Projection(XElement oe, XElement page) => "list=" + ListKey(oe) + "|tags=" +
+        internal static string Projection(XElement oe, XElement page) => "list=" + ListKey(oe, true) + "|tags=" +
             string.Join(",", oe.Elements(One + "Tag").Select(t => ((string)Definition(page, t)?.Attribute("symbol") ?? "?") + ":" + (IsCompleted(t) ? "1" : "0")));
 
         /// <summary>发布草稿时判断有没有改动：新 TagDef 还不在快照页面里，所以直接比编号。</summary>
         internal static string DraftKey(XElement oe) => ListKey(oe) + "|" +
             string.Join(",", oe.Elements(One + "Tag").Select(t => (string)t.Attribute("index") + ":" + (IsCompleted(t) ? "1" : "0")));
 
-        private static string ListKey(XElement oe)
+        private static string ListKey(XElement oe, bool written = false)
         {
             var number = oe.Element(One + "List")?.Element(One + "Number");
-            return number == null ? ListKind(oe) : "number:" + NumberAttribute(number, "numberSequence") + ":" +
-                (string)number.Attribute("numberFormat") + ":" + NumberAttribute(number, "restartNumberingAt");
+            if (number == null) return ListKind(oe);
+            var start = NumberAttribute(number, "restartNumberingAt");
+            if (written && start == "1" && !(oe.ElementsBeforeSelf(One + "OE").LastOrDefault() is XElement previous && ListKind(previous) == "number")) start = "";
+            return "number:" + NumberAttribute(number, "numberSequence") + ":" + (string)number.Attribute("numberFormat") + ":" + start;
         }
 
         private static string NumberAttribute(XElement number, string name)
@@ -162,10 +165,11 @@ namespace OneNoteCodeHelper.Services.Agent
             return a.Count == b.Count && a.Zip(b, (x, y) => XNode.DeepEquals(x, y)).All(x => x);
         }
 
-        /// <summary>TagDef 的内容（不含 index），用于按内容对应标记定义。</summary>
+        /// <summary>TagDef 的内容（不含 index），用于匹配定义和核对后续编辑；名称的大小写和首尾空格必须原样保留。</summary>
         internal static string Signature(XElement definition)
         {
-            var values = definition.Attributes().Where(a => a.Name.LocalName != "index").ToDictionary(a => a.Name.LocalName, a => a.Value.Trim().ToLowerInvariant());
+            var values = definition.Attributes().Where(a => a.Name.LocalName != "index").ToDictionary(a => a.Name.LocalName,
+                a => a.Name.LocalName == "name" ? a.Value : a.Value.Trim().ToLowerInvariant());
             if (!values.ContainsKey("fontColor")) values["fontColor"] = "automatic";
             if (!values.ContainsKey("highlightColor")) values["highlightColor"] = "none";
             return string.Join(";", values.OrderBy(v => v.Key, StringComparer.Ordinal).Select(v => v.Key + "=" + v.Value));

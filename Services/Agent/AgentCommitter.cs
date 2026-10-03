@@ -290,8 +290,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     }
                     var timestamp = AgentPageSnapshot.Modified(page);
                     if (!UntouchedPreserved(untouched, page)) throw new AiException("这组格式会影响未指定的嵌套段落，已阻止写入。请分别选择段落处理。");
-                    // 只有新增了 TagDef 才连同 TagDef 一起提交；复用页面已有的定义时不碰它们。
-                    var sendTags = page.Elements(One + "TagDef").Count() != tagDefinitions;
+                    // TagDef 的编号只在提交的 XML 内有效：新增了 TagDef，或写回的内容里有标记时，连同 TagDef 一起提交（见 PageEditor.WithTagDefinitions）。
+                    var sendTags = page.Elements(One + "TagDef").Count() != tagDefinitions || containers.Any(c => c.Descendants(One + "Tag").Any());
                     var xml = PageEditor.BuildPageChanges(snapshot.PageId, page.Elements().Where(e => containers.Contains(e) || e.Name == One + "QuickStyleDef" ||
                         (sendTags && e.Name == One + "TagDef")).Select(e => new XElement(e)).ToArray());
                     cancellation.ThrowIfCancellationRequested();

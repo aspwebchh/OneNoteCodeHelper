@@ -418,7 +418,7 @@ Tests/                    独立签名的 net48 测试程序及页面/HTTP 模�
 独立 `OneNoteCodeHelper.Mcp.exe` 通过 stdio 接受 Codex 等外部 Agent 调用，再经本机命名管道转给插件。
 真实 OneNote 操作继续复用插件中的草稿、冲突检查、核验和撤销；外部调用不启动内置模型循环、不要求插件 AI API Key。
 插件加载后自动就绪，先打开 OneNote，再启动 MCP 客户端。全部现有 Agent 工具以及会话管理工具均已开放，沿用能力开关和保护范围。另有 16 个外部 MCP 工具提供目录浏览、原生搜索、独立页面／选区读取、待办汇总、正文更新和 Markdown 导入、页面与分区操作、定位及 Markdown／PDF 导出；这些新增工具不加入内置 Agent 目录。
-所有笔记写入仍先规划草稿、检查改动，再提交核验并保留撤销。移动会创建并核验目标副本后将源页放入回收站，页面 ID 可能变化；复杂对象在写入前拒绝。搜索、读取与待办分页结果绑定当前客户端，保留 5 分钟；结果与撤销记录保留 30 分钟、最多 16 条。
+所有笔记写入仍先规划草稿、检查改动，再提交核验并保留撤销。移动会创建并核验目标副本后将源页放入回收站，页面 ID 可能变化，子页面复制或移动后成为一级页面；复杂对象在写入前拒绝。搜索、读取与待办分页结果绑定当前客户端，保留 5 分钟；结果与撤销记录保留 30 分钟、最多 16 条。
 
 ```powershell
 dotnet build OneNoteCodeHelper.sln -c Release
@@ -524,6 +524,11 @@ Tests\bin\Release\net48\OneNoteCodeHelper.AgentTests.exe --probe-page-title D:\t
 - **提交时省略 `one:List` 不会去掉列表**（16.0.20326 实测）。已有段落少了 `one:List`，OneNote 照样保留原来的列表；
   空的 `<one:List/>` 被架构拒绝，`bullet="0"` 只是换成另一种符号。要去掉列表只能去掉段落的 objectID 让 OneNote 重建它，
   下级段落保持原 ID。而省略 `one:Tag` 会删掉标记，没人引用的 `one:TagDef` 也会被 OneNote 一并清掉。
+- **`one:Tag` 只按同一份提交 XML 里的 `one:TagDef` 解析**（16.0.20326 实测）。回传含待办等标记的文本框却不带 TagDef，
+  整次写入以 `0x80042001` 被拒绝（`quickStyleIndex` 没有这个限制）。所以写回内容里有标记时，必须连同页面的 TagDef 一起提交。
+- **回存会改写写法，核验只能按语义比较**（16.0.20326 实测）。带标记的新段落把 `spaceBefore`/`spaceAfter` 再写进 style 的 margin；
+  一组编号第一项的 `restartNumberingAt="1"` 被省略；标题里的表情换成符号字体；坐标写成 `36.0`，未由用户设定的文本框宽度按内容重算；
+  页面补上 `PageSettings`、日期、层级和语言，段落补上作者和 `alignment="left"`。
 - **整框回传时，段落的增删和移动按 XML 走**（16.0.20326 实测）。同一文本框里调换顺序、挂到别的段落下、提到上一级的段落都保留 objectID；
   省略的段落被删除；没有 objectID 的段落和表格按新对象建立。新表格的 `one:Column` 必须带 `width`，但没锁定的列宽会被 OneNote 按内容重新计算。
 - **跨文本框的对象一律新建**（16.0.20326 实测）。把段落连同原 objectID 放进另一个文本框，OneNote 也按新对象建立并分配新 ID；

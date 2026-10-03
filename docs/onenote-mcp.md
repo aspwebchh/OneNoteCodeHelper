@@ -166,9 +166,9 @@ codex mcp add onenote_local -- 'G:\WPF\OneNoteCodeHelper\Mcp\Server\bin\Release\
 
 工作区草稿最多规划一项操作，相同参数重复规划返回原计划，参数不同须另开草稿；同一修订号重复提交只返回原结果。创建／复制沿用 `EnableInsert`，移动还要求 `EnableMoves`，导入列表、标记、代码和表格服从各自开关。新页面及副本仅在内容和位置未被后续修改时可撤销，新分区仅在仍为空且名称、位置未变时可撤销。
 
-复制取得图片二进制数据，核验文字、格式、层级、表格、标记、链接和图片；墨迹、附件、音视频、未知对象或坏图在写入前拒绝。移动依次创建目标副本、完整核验、再次检查源页、将源页放入回收站；返回 `page_id/link/object_id_map/source_recycled/source_outcome_known`，不保证旧链接有效。源页变化或删除失败时保留源页及已核验目标副本并报告实际结果；结果未知禁止自动重发。撤销成功移动先重建并核验源分区副本，再移除未被编辑的目标副本，返回恢复页的新 ID 和链接。源页状态无法确认时不允许补偿撤销。
+复制取得图片二进制数据，核验文字、格式、层级、表格、标记、链接和图片；墨迹、附件、音视频、未知对象或坏图在写入前拒绝。新页面和副本都以 OneNote 新建的空白页为底写入，沿用其样式编号和原生标题；副本带上源页的页面设置和日期，子页面复制或移动后成为一级页面。写入核验按 OneNote 的回存规则归一：作者与语言、页面日期与层级、未由用户设定的文本框宽度、OCR 及数值写法由 OneNote 维护，不参与比较。移动依次创建目标副本、完整核验、再次检查源页、将源页放入回收站；返回 `page_id/link/object_id_map/source_recycled/source_outcome_known`，不保证旧链接有效。源页变化或删除失败时保留源页及已核验目标副本并报告实际结果；结果未知禁止自动重发。撤销成功移动先重建并核验源分区副本，再移除未被编辑的目标副本，返回恢复页的新 ID 和链接。源页状态无法确认时不允许补偿撤销。
 
-删除 API 仅使用回收站模式，提交前和实际删除前都检查笔记本回收站；缺少可确认回收站的笔记本明确拒绝可撤销工作区操作。旧 OneNote 2007 格式即使使用非永久删除参数也会永久删除，因此不支持这类工作区写入，依据 [Microsoft OneNote Application 接口说明](https://learn.microsoft.com/en-us/office/client-developer/onenote/application-interface-onenote#deletehierarchy-method)。
+删除 API 仅使用回收站模式，提交前和实际删除前都检查笔记本回收站；缺少可确认回收站的笔记本明确拒绝可撤销工作区操作。新建的笔记本在第一次删除内容之前，层级里没有回收站分区组（16.0.20326 实测），此时先在其中删除一页即可。旧 OneNote 2007 格式即使使用非永久删除参数也会永久删除，因此不支持这类工作区写入，依据 [Microsoft OneNote Application 接口说明](https://learn.microsoft.com/en-us/office/client-developer/onenote/application-interface-onenote#deletehierarchy-method)。
 
 导出只读取已保存页：Markdown 使用统一模型，返回占位或未解析内容的 `complete/issues`；PDF 使用原生 Publish。先生成同目录临时文件、检查源页版本和文件内容，再移动到目标路径；失败清理临时文件且不覆盖已有目标。返回字节数、绝对路径和源页修改时间。新增工具提供输入／输出 Schema、工具注解；请求附 `_meta.progressToken` 时，stdio 每两秒发送进度通知，不改变 IPC 帧协议。
 
@@ -287,7 +287,7 @@ MCP 测试使用模拟页面和随机命名管道，启动真实 EXE 验证初�
 
 以下为需要用户手动执行的真实环境验收，离线测试不能代替它。安装更新的插件后，在专门的测试分区手工建立两页，页面标题写明“MCP 验收测试”，只填写虚构内容：几段中文、空行、一段待高亮代码，以及第二个独立文本框。
 
-**本轮真实 COM 往返尚未验收**：目录层级、FindPages、创建分区／页面、Markdown 在 OneNote 的原生回存、图片保真复制、移动／回收站／补偿撤销及原生 PDF Publish 都需要下面的专用合成数据验证。测试通过不代表已在用户真实笔记上验收，不自动安装、注册或关闭 OneNote。
+**真实 COM 往返的自动探针**：`Tests\bin\Release\net48\OneNoteCodeHelper.AgentTests.exe --probe-workspace <目录>` 在该目录新建独立测试笔记本，核对创建分区、带 Markdown 正文的新页面、含图片页的复制、移动／回收站／补偿撤销、页面草稿的 `append_content`/`insert_content`、含待办文本框的内置格式与 AI 写回，以及 Markdown 导出；结束后关闭测试笔记本，不读写其他笔记本。核验失败时打印第一处差异。目录层级与 FindPages、OCR、原生 PDF Publish 仍需下面的专用合成数据验证。测试通过不代表已在用户真实笔记上验收，不自动安装、注册或关闭 OneNote。
 
 1. OneNote 打开并加载插件，运行发布 EXE 的 `--doctor`，应返回版本和连接成功。
 2. 让外部 Agent 按完整流程读取并设置第一段样式，观察提交前真实页面不变，`finish_edit` 后样式变化、中文和链接保留。再以相同快照和修订号提交，页面不重复改动。
