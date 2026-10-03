@@ -376,6 +376,22 @@ Tools/agent-format-probe.ps1  显式创建专用测试分区和测试页，验�
 Tests/                    独立签名的 net48 测试程序及页面/HTTP 模拟器
 ```
 
+### 本地 MCP：外部 Agent 接入
+
+独立 `OneNoteCodeHelper.Mcp.exe` 通过 stdio 接受 Codex 等外部 Agent 调用，再经本机命名管道转给插件。
+真实 OneNote 操作继续复用插件中的草稿、冲突检查、核验和撤销；外部调用不启动内置模型循环、不要求插件 AI API Key。
+插件加载后自动就绪，先打开 OneNote，再启动 MCP 客户端。全部现有 Agent 工具以及会话管理工具均已开放，沿用能力开关和保护范围。
+
+```powershell
+dotnet build OneNoteCodeHelper.sln -c Release
+powershell -ExecutionPolicy Bypass -File Tools\publish-mcp.ps1
+& '.\Mcp\Server\bin\Release\net10.0-windows\win-x64\publish\OneNoteCodeHelper.Mcp.exe' --doctor
+```
+
+开发机需要 .NET 10 SDK。交付复制整个 `publish` 文件夹，自带 Windows x64 运行时，不采用单文件打包或裁剪。
+`install.ps1` 的正常构建步骤也会发布 MCP，插件 DLL 注册路径保持原样。
+完整的 EXE 路径、Codex 配置示例、调用流程、错误状态和专用合成页面验收见 [本地 MCP 接入文档](docs/onenote-mcp.md)。
+
 ### 回归验证
 
 ```powershell
@@ -384,6 +400,8 @@ powershell -ExecutionPolicy Bypass -File Tools\detect-test.ps1
 powershell -ExecutionPolicy Bypass -File Tools\ai-merge-test.ps1
 powershell -ExecutionPolicy Bypass -File Tools\highlight-selection-test.ps1
 powershell -ExecutionPolicy Bypass -File Tools\agent-test.ps1
+powershell -ExecutionPolicy Bypass -File Tools\addin-surrogate-test.ps1
+powershell -ExecutionPolicy Bypass -File Tools\mcp-test.ps1
 ```
 
 这些回归不需要运行中的 OneNote，也不使用真实 API Key。脚本支持 `-DllPath` 指定待测 DLL。

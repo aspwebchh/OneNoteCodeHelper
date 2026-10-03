@@ -105,6 +105,8 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>本次注册了这个工具；系统提示词按实际提供的工具追加说明。</summary>
         internal bool Has(string name) => _tools.ContainsKey(name);
         internal object[] Definitions => _tools.Select(Definition).ToArray();
+        // 目录实例只生成定义；页面实例仍按能力开关和保护范围注册可执行工具。
+        internal static AgentTools Catalog() => new AgentTools(null, null, CancellationToken.None);
         /// <summary>只取指定的工具定义，比如最后一轮只给 finish_edit。</summary>
         internal object[] DefinitionsOf(params string[] names) => _tools.Where(t => names.Contains(t.Key)).Select(Definition).ToArray();
         private static object Definition(KeyValuePair<string, Tool> t) =>
@@ -113,11 +115,13 @@ namespace OneNoteCodeHelper.Services.Agent
         internal AgentTools(AgentPageSnapshot snapshot, AgentCommitter committer, CancellationToken cancellation, AddInSettings codeSettings = null)
         {
             _snapshot = snapshot; _committer = committer; _cancellation = cancellation; _code = codeSettings ?? new AddInSettings();
-            if (snapshot.Options.EnableMarkdownCleanup) CacheFenceRoles();
+            var catalog = snapshot == null;
+            var options = snapshot?.Options ?? new AgentOptions();
+            if (!catalog && options.EnableMarkdownCleanup) CacheFenceRoles();
             Register("get_page_overview", "获取当前固定页面的段落摘要、保护范围及样式。每页 100 项；通过 offset 翻页。", AgentSchema.Obj(new Dictionary<string, AgentSchema>
             { ["offset"] = AgentSchema.Num(0, 1000, true) }), Overview);
             Register("read_blocks", "完整读取段落正文及样式。修改前必须调用，不能修改受保护段落；传入的受保护段落会跳过，列在 skipped 里并附原因。", WithIds(), Read);
-            if (!snapshot.SelectionOnly)
+            if (catalog || !snapshot.SelectionOnly)
                 Register("set_page_title", "根据整页内容填写 OneNote 原生标题栏，或按用户明确的改名要求替换原标题。先读完范围内可读取的段落；只改草稿，由 finish_edit 提交。" +
                     "title 是单行纯文字。默认保留非空原标题；仅用户明确要求重新拟标题或改名时传 replace_existing=true。普通排版或突出正文标题不调用。",
                     AgentSchema.Obj(new Dictionary<string, AgentSchema>
@@ -125,7 +129,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         ["snapshot_id"] = AgentSchema.Str(), ["title"] = AgentSchema.Short(MaxInsertChars),
                         ["replace_existing"] = new AgentSchema { Type = "boolean" }
                     }, "snapshot_id", "title"), SetPageTitle);
-            if (snapshot.Images.Count > 0)
+            if (catalog || snapshot.Images.Count > 0)
             {
                 var images = SnapshotOnly();
                 images.Properties["image_ids"] = AgentSchema.Array(AgentSchema.Str());
@@ -137,7 +141,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 ["alignment"] = AgentSchema.Str("left", "center", "right"), ["font_family"] = AgentSchema.Str(ParagraphStyles.Fonts),
                 ["font_size_pt"] = AgentSchema.Num(8, 32), ["color"] = AgentSchema.Str(ParagraphStyles.Colors)
             };
-            if (snapshot.Options.EnableParagraphSpacing)
+            if (options.EnableParagraphSpacing)
             { fields["space_before_pt"] = AgentSchema.Num(0, 36); fields["space_after_pt"] = AgentSchema.Num(0, 36); }
             var paragraph = WithIds();
             paragraph.Properties["preset_id"] = AgentSchema.Str(ParagraphStyles.Ids);
@@ -170,7 +174,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         ["replacement"] = AgentSchema.Short(MaxFixChars)
                     }, "block_id", "quote", "occurrence", "replacement"))
                 }, "snapshot_id", "fixes"), FixText);
-            if (snapshot.Options.EnableMarkdownCleanup)
+            if (options.EnableMarkdownCleanup)
             {
                 var markdown = WithIds();
                 markdown.Properties["block_ids"].MaxItems = 1000;
@@ -183,7 +187,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     "markdown/md 围栏里照常处理；其他围栏里的代码不动，列在 code_lines 里。链接、图片和表格不处理。" +
                     "结果 changed 里的 heading（级别）、list、todo、quote、indent 是原来的标记，可以据此设置标题、列表、待办和引用。", markdown, StripMarkdown);
             }
-            if (snapshot.Options.EnableClearFormat)
+            if (options.EnableClearFormat)
             {
                 var clear = WithIds();
                 clear.Properties["block_ids"].MaxItems = 1000;
@@ -193,14 +197,14 @@ namespace OneNoteCodeHelper.Services.Agent
                     "可编辑段落和 unhighlighted_code 段落要先完整读取；reason 为 empty、protected_code 的段落读不到，可以直接传入。" +
                     "代码框（highlighted_code）里的段落和其余受保护的段落跳过，列在 skipped 里；代码框要用 unwrap_code 拆开。", clear, ClearFormat);
             }
-            if (snapshot.Options.EnableLists)
+            if (options.EnableLists)
             {
                 var list = WithIds();
                 list.Properties["list"] = AgentSchema.Str(AgentMarks.ListKinds);
                 list.Required = new[] { "snapshot_id", "block_ids", "list" };
                 Register("set_list", "把完整读取的段落设为项目符号（bullet）、编号（number）列表，或取消列表（none）；只改段落前的符号，不改文字。", list, SetList);
             }
-            if (snapshot.Options.EnableTags)
+            if (options.EnableTags)
             {
                 var tag = WithIds();
                 tag.Properties["tag"] = AgentSchema.Str(AgentMarks.TagKinds.Concat(new[] { "none" }).ToArray());
@@ -209,7 +213,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 Register("set_tag", "给完整读取的段落加待办（todo）、重要（important）或问题（question）标记；completed 勾选或取消待办，只用于 todo。" +
                     "none 去掉这三种标记，其他标记保留。", tag, SetTag);
             }
-            if (snapshot.Options.EnableTableStyles && snapshot.Tables.Any(t => t.Editable))
+            if (options.EnableTableStyles && (catalog || snapshot.Tables.Any(t => t.Editable)))
             {
                 var look = AgentSchema.Obj(new Dictionary<string, AgentSchema>
                 {
@@ -225,7 +229,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         ["snapshot_id"] = AgentSchema.Str(), ["table_ids"] = AgentSchema.Array(AgentSchema.Str()), ["style"] = look
                     }, "snapshot_id", "table_ids", "style"), TableStyle);
             }
-            if (snapshot.Options.EnableCodeHighlight)
+            if (options.EnableCodeHighlight)
             {
                 var code = WithIds();
                 code.Properties["block_ids"].MaxItems = 1000;
@@ -234,13 +238,13 @@ namespace OneNoteCodeHelper.Services.Agent
                 Register("highlight_code", "把同一文本块里连续的代码段落（含中间空行）整体换成插件的高亮代码框；先完整读取有文字的段落。" +
                     "language 为 auto 时自动识别，识别不出会报错，可改用 text。已有代码框和行内代码不要转换。", code, HighlightCode);
             }
-            var structural = snapshot.EditableOutlines.Count > 0;
-            if (structural && (snapshot.Options.EnableBlankLineRemoval || snapshot.Options.EnableInsert))
+            var structural = catalog || snapshot.EditableOutlines.Count > 0;
+            if (structural && (options.EnableBlankLineRemoval || options.EnableInsert))
                 Register("normalize_code_spacing", "只规范化同一文本框或单元格内代码框与文字的交界，空段落和文字首尾的 Shift+Enter 空行合计保留一行，多删少补。" +
                     "先转换代码并完成其他结构调整，最后调用此工具；之后再调整结构、转换代码或清理 Markdown 会撤回已做的间隔调整。代码内部、文字之间及文本框首尾不处理。" +
                     "删除和补入分别受删空行、插入段落开关控制，关闭时对应边界返回 skipped。",
                     SnapshotOnly(), NormalizeCodeSpacing);
-            if (structural && snapshot.Options.EnableBlankLineRemoval && (snapshot.Options.EnableInsert ||
+            if (structural && options.EnableBlankLineRemoval && (catalog || options.EnableInsert ||
                 snapshot.Blocks.Any(b => b.ProtectedReason == "empty" && snapshot.EditableOutlines.Contains(b.ContainerId))))
             {
                 var blank = SnapshotOnly();
@@ -249,14 +253,14 @@ namespace OneNoteCodeHelper.Services.Agent
                 Register("remove_blank_lines", "删除多余的空行（只有空白的段落）：collapse 把连续空行合并为一行，并删掉文本框、单元格首尾的空行；all 删掉全部空行。" +
                     "也处理本次用 insert_blocks 插入的空行；带列表、标记或下级段落的空段落和代码里的空行不删。", blank, RemoveBlankLines);
             }
-            if (structural && snapshot.Options.EnableIndent)
+            if (structural && options.EnableIndent)
             {
                 var indent = WithIds();
                 indent.Properties["direction"] = AgentSchema.Str("in", "out");
                 indent.Required = new[] { "snapshot_id", "block_ids", "direction" };
                 Register("set_indent", "调整段落层级：in 挂到上一段下面，out 提到上一级（原来排在它后面的同级段落改挂到它下面）。上下顺序不变，下级段落跟着一起调整。", indent, SetIndent);
             }
-            if (structural && snapshot.Options.EnableMoves)
+            if (structural && options.EnableMoves)
             {
                 var move = WithIds();
                 move.Properties["target_id"] = AgentSchema.Str();
@@ -264,7 +268,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 move.Required = new[] { "snapshot_id", "block_ids", "target_id", "position" };
                 Register("move_blocks", "把段落连同下级段落按原来的先后顺序移到目标段落前面或后面，成为目标的同级段落。可以移到另一个文本框，" +
                     "但表格单元格里的段落只能在同一个单元格里移动，也不能把文本框移空。", move, MoveBlocks);
-                if (snapshot.EditableOutlines.Count > 1)
+                if (catalog || snapshot.EditableOutlines.Count > 1)
                     Register("merge_outlines", "把一个文本框的全部内容（段落、表格、图片、空行）按原来的顺序移到另一个文本框里目标段落的前面或后面，成为目标的同级段落，" +
                         "再删掉空了的源文本框。source_id 是源文本框的 container_id（见 get_page_overview 的 outlines）。" +
                         "结果里的 mergeable_left 是能在目标框内至少一个合法位置继续合并的文本框数（mergeable_outline_ids 列出它们），已核验选区、格式和转换限制。" +
@@ -275,11 +279,11 @@ namespace OneNoteCodeHelper.Services.Agent
                             ["snapshot_id"] = AgentSchema.Str(), ["source_id"] = AgentSchema.Str(), ["target_id"] = AgentSchema.Str(), ["position"] = AgentSchema.Str("before", "after")
                         }, "snapshot_id", "source_id", "target_id", "position"), MergeOutlines);
             }
-            if (structural && snapshot.Options.EnableInsert)
+            if (structural && options.EnableInsert)
             {
                 var item = new Dictionary<string, AgentSchema> { ["text"] = AgentSchema.Short(MaxInsertChars), ["preset_id"] = AgentSchema.Str("heading1", "heading2", "body", "quote"),
                     ["blank"] = new AgentSchema { Type = "boolean" } };
-                if (snapshot.Options.EnableLists) item["list"] = AgentSchema.Str("bullet", "number");
+                if (options.EnableLists) item["list"] = AgentSchema.Str("bullet", "number");
                 // 文字项要 text 和 preset_id，空行项只写 blank，由 InsertBlocks 逐项校验。
                 var entry = AgentSchema.Obj(item);
                 entry.NonEmpty = true;
@@ -293,7 +297,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         ["snapshot_id"] = AgentSchema.Str(), ["target_id"] = AgentSchema.Str(), ["position"] = AgentSchema.Str("before", "after"), ["paragraphs"] = paragraphs
                     }, "snapshot_id", "target_id", "position", "paragraphs"), InsertBlocks);
             }
-            if (structural && snapshot.Options.EnableTextTables)
+            if (structural && options.EnableTextTables)
             {
                 var table = WithIds();
                 table.Properties["block_ids"].MaxItems = 200;
@@ -323,8 +327,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     "只有用户要求加表头或要把标签挪成列名时才用 header 在首行前新增一行列名，个数应等于列数，少了补空，多了按 header 加列。" +
                     $"最多 {AgentTextTable.MaxRows} 行、{AgentTextTable.MaxColumns} 列。", table, TextToTable);
             }
-            if (structural && snapshot.Options.EnableCodeUnwrap &&
-                snapshot.Tables.Any(t => t.ProtectedReason == "highlighted_code" && snapshot.EditableOutlines.Contains(t.ContainerId)))
+            if (structural && options.EnableCodeUnwrap &&
+                (catalog || snapshot.Tables.Any(t => t.ProtectedReason == "highlighted_code" && snapshot.EditableOutlines.Contains(t.ContainerId))))
             {
                 var unwrap = SnapshotOnly();
                 var tables = AgentSchema.Array(AgentSchema.Str());
@@ -588,12 +592,10 @@ namespace OneNoteCodeHelper.Services.Agent
         internal object Execute(AgentToolCall call)
         {
             _cancellation.ThrowIfCancellationRequested();
+            if (_snapshot == null) throw new InvalidOperationException("工具目录不能执行编辑。");
             if (_snapshot.Frozen) throw new AiException("草稿已冻结，不能继续操作。");
-            if (!_tools.TryGetValue(call.Name, out var tool)) throw new AiException("未知工具。");
-            var parsed = AgentChatClient.Parse(call.Arguments);
-            tool.Schema.Validate(parsed);
-            var args = (IDictionary<string, object>)parsed;
-            if (args.TryGetValue("snapshot_id", out var id) && (string)id != _snapshot.SnapshotId) throw new AiException("快照 ID 已失效。");
+            var args = ValidateArguments(call);
+            var tool = _tools[call.Name];
             if (_spacingBase == null || !SpacingSensitive.Contains(call.Name)) return tool.Execute(args);
             // 先撤回间隔调整，在不含删补的草稿上执行；提交前复核会要求重新规范化。工具失败或没有改动时原样恢复。
             var saved = (Layout: _snapshot.Layout, Inserted: _snapshot.Inserted.ToList(), Changes: _snapshot.LayoutChanges.ToList(), Base: _spacingBase, Revision: _snapshot.Revision);
@@ -616,6 +618,16 @@ namespace OneNoteCodeHelper.Services.Agent
             catch { Restore(); throw; }
             if (_snapshot.Revision == saved.Revision) Restore();
             return result;
+        }
+
+        internal IDictionary<string, object> ValidateArguments(AgentToolCall call)
+        {
+            if (call == null || call.Name == null || !_tools.TryGetValue(call.Name, out var tool)) throw new AiException("未知工具或当前范围未启用此能力。");
+            var parsed = AgentChatClient.Parse(call.Arguments);
+            tool.Schema.Validate(parsed);
+            var args = (IDictionary<string, object>)parsed;
+            if (_snapshot != null && args.TryGetValue("snapshot_id", out var id) && (string)id != _snapshot.SnapshotId) throw new AiException("快照 ID 已失效。");
+            return args;
         }
 
         private object Overview(IDictionary<string, object> args)

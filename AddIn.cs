@@ -39,6 +39,7 @@ namespace OneNoteCodeHelper
 
         private OneNoteApi _api;
         private PageEditor _editor;
+        private Services.Mcp.McpPipeHost _mcpHost;
         private AddInSettings _settings;
         private IRibbonUI _ribbon;
 
@@ -138,6 +139,7 @@ namespace OneNoteCodeHelper
 
                 _api = new OneNoteApi(oneNote);
                 _editor = new PageEditor(_api);
+                StartMcp(_api);
                 AddInLog.Info("已连接到 OneNote。");
             }
             catch (Exception ex)
@@ -153,6 +155,7 @@ namespace OneNoteCodeHelper
                 AddInLog.Info($"OnDisconnection，removeMode={removeMode}");
                 Interlocked.Exchange(ref _disconnecting, 1);
                 _agentWindow?.CancelForShutdown();
+                Interlocked.Exchange(ref _mcpHost, null)?.Dispose();
                 _editor = null;
                 var api = _api;
                 _api = null;
@@ -180,12 +183,26 @@ namespace OneNoteCodeHelper
             {
                 Interlocked.Exchange(ref _disconnecting, 1);
                 _agentWindow?.CancelForShutdown();
+                Interlocked.Exchange(ref _mcpHost, null)?.Dispose();
                 _api?.Stop();
             }
             catch (Exception ex) { AddInLog.Warn("停止 Agent 时发生异常。", ex); }
         }
 
         #endregion
+
+        private void StartMcp(OneNoteApi api)
+        {
+            try
+            {
+                var service = new Services.Mcp.McpEditService(api, api.GetCurrentPageId,
+                    Services.Mcp.McpEditService.LoadConfiguredOptions, () => _settings);
+                var host = new Services.Mcp.McpPipeHost(service);
+                _mcpHost = host;
+                host.Start();
+            }
+            catch (Exception ex) { AddInLog.Info("MCP startup state=failed type=" + ex.GetType().Name); }
+        }
 
         #region IRibbonExtensibility
 

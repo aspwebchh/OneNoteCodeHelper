@@ -9,6 +9,8 @@ $scriptPaths = @(
     (Join-Path $PSScriptRoot 'unregister.ps1'),
     (Join-Path $PSScriptRoot 'addin-surrogate.ps1'),
     (Join-Path $PSScriptRoot 'probe-com.ps1'),
+    (Join-Path $PSScriptRoot 'publish-mcp.ps1'),
+    (Join-Path $PSScriptRoot 'mcp-test.ps1'),
     $PSCommandPath
 )
 foreach ($scriptPath in $scriptPaths) {

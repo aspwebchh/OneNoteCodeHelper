@@ -25,6 +25,7 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--probe") return Probe.Run(args.Skip(1).ToArray());
+        if (args.Length == 2 && args[0] == "--mcp-only") return TestMcp(Path.GetFullPath(args[1]));
         if (args.Length == 2 && args[0] == "--probe-page-title") return TitleProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--probe-code-spacing") return CodeSpacingProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--probe-clear-format") return ClearFormatProbe.Run(args[1]);

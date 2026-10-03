@@ -7,6 +7,8 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>OneNoteCodeHelper</RootNamespace>
     <AssemblyName>OneNoteCodeHelper</AssemblyName>
+    <!-- net48 的引用解析还会扫描 None 项中的 DLL；必须排除 MCP 的自包含运行时。 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Mcp\**\*</DefaultItemExcludes>
     <!-- COM 外接程序：程序集本身不可见，只在 AddIn 类上单独标 ComVisible -->
     <ComVisible>false</ComVisible>
     <!-- 注册由 Tools/register.ps1 写 HKLM/HKCU 完成，不走 regasm -->
@@ -52,6 +54,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Mcp\**\*.cs" />
+    <Page Remove="Mcp\**\*.xaml" />
+    <EmbeddedResource Remove="Mcp\**\*" />
+    <Compile Include="Mcp\Shared\*.cs" />
     <Compile Remove="Tests\**\*.cs" />
     <Page Remove="Tests\**\*.xaml" />
     <EmbeddedResource Include="Ribbon.xml" />

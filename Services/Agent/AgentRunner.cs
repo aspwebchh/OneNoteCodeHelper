@@ -128,7 +128,8 @@ namespace OneNoteCodeHelper.Services.Agent
             using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(snapshot.Options.TimeoutSeconds)))
             using (var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, timeout.Token))
             {
-                var tools = new AgentTools(snapshot, _committer, linked.Token, _codeSettings);
+                var session = new AgentEditSession(snapshot, _committer, linked.Token, _codeSettings);
+                var tools = session.Tools;
                 var options = snapshot.Options;
                 var budget = $"本任务最多 {options.MaxTurns} 轮、{options.MaxToolCalls} 次工具调用；互不依赖的读取和修改尽量放在同一轮一起调用" +
                     "（比如同一轮用多次 read_blocks 分批读取，每批最多 100 段，同一轮设置几组样式），finish_edit 仍须单独调用。";
@@ -213,7 +214,7 @@ namespace OneNoteCodeHelper.Services.Agent
                                 {
                                     if (finishTogether) throw new AiException("finish_edit 必须独立调用，本轮未执行任何操作。");
                                     if (last && call.Name != "finish_edit") throw new AiException("最后一轮只能调用 finish_edit。");
-                                    outcome = tools.Execute(call);
+                                    outcome = session.Execute(call);
                                 }
                                 catch (AiException ex) when (!snapshot.Frozen) { outcome = new { ok = false, error = ex.Message }; }
                                 result = AgentJson.ToolResult(outcome);

@@ -221,7 +221,7 @@ try {
 
         $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
         if (-not $dotnet) {
-            Write-Error '找不到 dotnet 命令。请先安装 .NET SDK，或用 -SkipBuild 跳过构建直接注册。'
+            Write-Error '找不到 dotnet 命令。请先安装 .NET 10 SDK，或用 -SkipBuild 跳过构建直接注册。'
             exit 1
         }
 
@@ -241,13 +241,19 @@ try {
             }
         }
 
-        & dotnet build -c $Configuration --nologo -v quiet
+        & dotnet build OneNoteCodeHelper.sln -c $Configuration --nologo -v quiet
         if ($LASTEXITCODE -ne 0) {
             Write-Error "构建失败（退出码 $LASTEXITCODE）。"
             exit 1
         }
 
         Write-Ok '构建成功。'
+        Write-Step '发布 MCP（Windows x64，自带运行时）'
+        & (Join-Path $PSScriptRoot 'Tools\publish-mcp.ps1') -Configuration $Configuration
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "MCP 发布失败（退出码 $LASTEXITCODE）。"
+            exit 1
+        }
     }
 
     # --- 3. 注册 / 注销 ---

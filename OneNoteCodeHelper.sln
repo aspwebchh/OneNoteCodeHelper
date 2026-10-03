@@ -5,6 +5,12 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OneNoteCodeHelper", "OneNoteCodeHelper.csproj", "{1CAF2B67-19F7-4074-A978-527EBB90B27A}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Mcp", "Mcp", "{60D02A9B-BD8A-21E2-79E7-27A6B3D0EB49}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Server", "Server", "{BFD091D2-24F3-7CBA-C7F5-EFF11E2102F0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OneNoteCodeHelper.Mcp", "Mcp\Server\OneNoteCodeHelper.Mcp.csproj", "{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,8 +33,24 @@ Global
 		{1CAF2B67-19F7-4074-A978-527EBB90B27A}.Release|x64.Build.0 = Release|Any CPU
 		{1CAF2B67-19F7-4074-A978-527EBB90B27A}.Release|x86.ActiveCfg = Release|Any CPU
 		{1CAF2B67-19F7-4074-A978-527EBB90B27A}.Release|x86.Build.0 = Release|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Debug|x64.Build.0 = Debug|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Debug|x86.Build.0 = Debug|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Release|x64.ActiveCfg = Release|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Release|x64.Build.0 = Release|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Release|x86.ActiveCfg = Release|Any CPU
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{BFD091D2-24F3-7CBA-C7F5-EFF11E2102F0} = {60D02A9B-BD8A-21E2-79E7-27A6B3D0EB49}
+		{715C0AE3-C27F-40CC-8C8F-95B52BB8BAC3} = {BFD091D2-24F3-7CBA-C7F5-EFF11E2102F0}
 	EndGlobalSection
 EndGlobal
