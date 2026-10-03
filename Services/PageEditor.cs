@@ -509,14 +509,14 @@ namespace OneNoteCodeHelper.Services
                 : DateTime.MinValue;
         }
 
-        /// <summary>找一个不压住已有内容的位置：所有 Outline 的底边取最大值再往下留点空。</summary>
-        private static (double X, double Y) NextFreePosition(XElement page)
+        /// <summary>找一个不压住已有内容的位置：页面级对象的底边取最大值再往下留点空。</summary>
+        internal static (double X, double Y) NextFreePosition(XElement page)
         {
             const double DefaultX = 36;
             const double DefaultY = 86;
             const double Gap = 20;
 
-            var bottom = page.Descendants(One + "Outline")
+            var bottom = page.Elements().Where(e => e.Element(One + "Position") != null)
                 .Select(outline =>
                 {
                     var y = ReadDouble(outline.Element(One + "Position"), "y");

@@ -76,7 +76,7 @@ internal sealed class IpcClient(string pipeName) : IAsyncDisposable
             _snapshots.TryGetValue(snapshot.GetString()!, out var instance) && instance != connection.Instance)
             throw new IpcException("snapshot_expired", "插件已重新启动，旧快照失效；不能重发旧草稿，请重新 begin_edit。");
         var reply = await SendAsync(connection, new McpRequest { Method = "call", ToolName = name, ArgumentsJson = arguments }, cancellation);
-        if (name == "begin_edit")
+        if (name is "begin_edit" or "begin_workspace_edit")
         {
             using var result = JsonDocument.Parse(reply.ResultJson);
             _snapshots[result.RootElement.GetProperty("snapshot_id").GetString()!] = connection.Instance;

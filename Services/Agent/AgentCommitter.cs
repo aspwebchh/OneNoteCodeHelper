@@ -150,7 +150,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     var draft = snapshot.LayoutChanges.Count > 0 ? snapshot.CreateDraftPage() : null;
                     foreach (var group in snapshot.LayoutGroups)
                     {
-                        if (!group.All(id => Outline(page, id) is XElement current && Outline(snapshot.Page, id) is XElement before &&
+                        if (!group.All(id => snapshot.NewOutlines.Contains(id) ? Outline(page, id) == null : Outline(page, id) is XElement current && Outline(snapshot.Page, id) is XElement before &&
                             AgentLayout.OutlineFingerprint(current, page) == AgentLayout.OutlineFingerprint(before, snapshot.Page)))
                         {
                             report.ConflictIds.AddRange(snapshot.LayoutChanges.Where(c => group.Contains(c.OutlineId))
@@ -160,11 +160,26 @@ namespace OneNoteCodeHelper.Services.Agent
                         var key = Guid.NewGuid().ToString("N");
                         foreach (var id in group)
                         {
+                            if (snapshot.NewOutlines.Contains(id))
+                            {
+                                if (Outline(draft, id) == null) continue;
+                                var added = new XElement(Outline(draft, id)); added.SetAttributeValue("objectID", null); AgentLayout.Strip(added);
+                                var (appendX, appendY) = PageEditor.NextFreePosition(page);
+                                added.Element(One + "Position")?.SetAttributeValue("x", appendX);
+                                added.Element(One + "Position")?.SetAttributeValue("y", appendY);
+                                AgentPageTitle.Remap(added, page, snapshot.DraftStyles.Elements(), snapshot.DraftTags.Elements());
+                                var relocated = AgentLayout.StripForeign(added, id, homes); AgentLayout.FillImageData(added, Binary, relocated); AgentLayout.PrepareImages(added);
+                                page.Add(added);
+                                var fresh = new OutlineEdit { Id = id, Created = true, Written = added, Group = key,
+                                    Styles = new List<XElement>(), Tags = new List<XElement>() };
+                                fresh.Changes.AddRange(snapshot.LayoutChanges.Where(c => c.OutlineId == id)); edits.Add(fresh);
+                                continue;
+                            }
                             var current = Outline(page, id);
                             var edit = Outline(draft, id) == null ? DeleteOutline(page, current) : ReplaceOutline(snapshot, draft, page, original, homes, current, formatted, Binary);
                             edit.Group = key;
                             // 撤销时图片要放回别的文本框（或重建的文本框），先记下图片数据。
-                            if (group.Count > 1) AgentLayout.FillImageData(edit.Before, Binary);
+                            if (group.Count > 1 && edit.Before != null) AgentLayout.FillImageData(edit.Before, Binary);
                             edits.Add(edit);
                         }
                     }
@@ -181,7 +196,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     // 删掉、转换、改过格式、跨框重建的段落不再按「未指定段落」核对；只是移动、调整缩进的段落仍要求格式不变。
                     var present = new HashSet<string>(page.Descendants().Attributes("objectID").Select(a => a.Value));
                     foreach (var edit in edits.Where(e => !e.Restore))
-                        foreach (var oid in edit.Before.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null))
+                        foreach (var oid in (edit.Before?.Descendants(One + "OE") ?? Enumerable.Empty<XElement>()).Select(e => (string)e.Attribute("objectID")).Where(x => x != null))
                             if (!present.Contains(oid) || formatted.Contains(oid)) untouched.Remove(oid);
                     var titleWrite = PrepareTitle(snapshot, page, report, untouched, containers);
                     foreach (var block in snapshot.Blocks.Where(b => b.Changed && !replaced.Contains(b.ContainerId) && !(snapshot.TitleEdit != null && b.IsPageTitle)))
@@ -557,6 +572,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>一个整框写入的文本框：写入前后的样子，以及框里要核验、计数的改动。</summary>
         private sealed class OutlineEdit
         {
+            internal bool Created;
             internal string Id;
             internal bool Restore;
             /// <summary>合并后空了的文本框：写成一行空白，OneNote 收到后直接删掉；还留着时核验通过后再删。</summary>
@@ -696,6 +712,11 @@ namespace OneNoteCodeHelper.Services.Agent
             Dictionary<string, string> untouched, ISet<string> formatted)
         {
             var current = item.Deleted ? null : Outline(page, item.OutlineId);
+            if (item.Before == null)
+            {
+                foreach (var id in current.Descendants(One + "OE").Attributes("objectID").Select(a => a.Value)) untouched.Remove(id);
+                var removal = DeleteOutline(page, current); removal.Restore = true; return removal;
+            }
             var edit = new OutlineEdit { Id = item.OutlineId, Restore = true, Before = current == null ? null : new XElement(current),
                 RestoredMarkdownMarks = item.MarkdownMarks, RestoredLinks = item.LinksRemoved, RestoredTextFixes = item.TextFixes };
             var written = new XElement(item.Before);
@@ -806,9 +827,10 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             report.Outlines++;
             // 合并删掉的文本框在删除之后才记撤销。
-            var after = edit.Restore || edit.Delete ? null : Outline(actual, edit.Id);
+            var after = edit.Restore || edit.Delete ? null : edit.Created
+                ? actual.Elements(One + "Outline").ElementAtOrDefault(page.Elements(One + "Outline").ToList().IndexOf(edit.Written)) : Outline(actual, edit.Id);
             if (after != null)
-                report.OutlineUndo.Add(new AgentOutlineUndoItem { OutlineId = edit.Id, Before = edit.Before, Styles = edit.Styles, Tags = edit.Tags, Group = edit.Group,
+                report.OutlineUndo.Add(new AgentOutlineUndoItem { OutlineId = (string)after.Attribute("objectID"), Before = edit.Before, Styles = edit.Styles, Tags = edit.Tags, Group = edit.Group,
                     AfterFingerprint = AgentLayout.OutlineFingerprint(after, actual), MarkdownMarks = report.MarkdownMarks - marksBefore,
                     LinksRemoved = report.LinksRemoved - linksBefore, TextFixes = report.TextFixes.Skip(fixesBefore).ToList() });
         }

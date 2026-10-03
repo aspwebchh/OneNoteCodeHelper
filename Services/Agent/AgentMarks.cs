@@ -132,13 +132,13 @@ namespace OneNoteCodeHelper.Services.Agent
         internal static XElement Definition(XElement defs, XElement tag) =>
             defs.Elements(One + "TagDef").FirstOrDefault(d => (string)d.Attribute("index") == (string)tag.Attribute("index"));
 
-        private static string KindOf(XElement defs, XElement tag)
+        internal static string KindOf(XElement defs, XElement tag)
         {
             var symbol = (string)Definition(defs, tag)?.Attribute("symbol");
             return Presets.Where(p => Invariant(p.Symbol) == symbol).Select(p => p.Kind).FirstOrDefault();
         }
 
-        private static bool IsCompleted(XElement tag) => (string)tag.Attribute("completed") == "true";
+        internal static bool IsCompleted(XElement tag) => (string)tag.Attribute("completed") == "true";
 
         /// <summary>换掉 OE 里所有名为 name 的子元素。原来有就放在原位置，没有就按架构顺序插入。</summary>
         private static void Replace(XElement oe, string name, IList<XElement> items)

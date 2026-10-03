@@ -84,6 +84,7 @@ namespace OneNoteCodeHelper.Mcp
         public string Name { get; set; }
         public string Description { get; set; }
         public string InputSchemaJson { get; set; }
+        public string OutputSchemaJson { get; set; }
         public bool ReadOnly { get; set; }
         public bool Destructive { get; set; }
     }

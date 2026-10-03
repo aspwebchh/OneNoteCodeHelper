@@ -15,7 +15,7 @@ namespace OneNoteCodeHelper.Services
     /// PowerShell 的原生晚绑定却是好的，说明 COM 对象本身没问题）。早绑定直接按接口 IID
     /// 做 QI，不碰类型库，因此可用。
     /// </summary>
-    internal sealed class OneNoteApi : IOneNotePageAccess
+    internal sealed class OneNoteApi : Mcp.IOneNoteWorkspaceAccess
     {
         /// <summary>OneNote 页面 XML 的命名空间（当前桌面版返回的就是 2013 架构）。</summary>
         internal const string OneNs = "http://schemas.microsoft.com/office/onenote/2013/onenote";
@@ -62,6 +62,34 @@ namespace OneNoteCodeHelper.Services
         {
             return Call(() => { _app.GetHierarchy(startNodeId, scope, out string xml, XMLSchema.xs2013); return xml; });
         }
+
+        string Mcp.IOneNoteWorkspaceAccess.GetHierarchy(string id, HierarchyScope scope) => GetHierarchy(id, scope);
+        string Mcp.IOneNoteWorkspaceAccess.FindPages(string id, string query) => Call(() =>
+        { _app.FindPages(id ?? "", query, out string xml, true, false, XMLSchema.xs2013); return xml; });
+        string Mcp.IOneNoteWorkspaceAccess.CreatePage(string id) => Call(() =>
+        { _app.CreateNewPage(id, out string page, NewPageStyle.npsBlankPageWithTitle); return page; });
+        string Mcp.IOneNoteWorkspaceAccess.CreateSection(string id, string name) => Call(() =>
+        { _app.OpenHierarchy(name + ".one", id, out string section, CreateFileType.cftSection); return section; });
+        void Mcp.IOneNoteWorkspaceAccess.Recycle(string id, DateTime modified) => Call(() =>
+        {
+            var tree = Mcp.McpReadService.Xml(GetHierarchy("", HierarchyScope.hsPages));
+            var node = tree.DescendantsAndSelf().FirstOrDefault(e => (string)e.Attribute("ID") == id && Mcp.McpReadService.IsLive(e));
+            var notebook = node?.AncestorsAndSelf(One + "Notebook").FirstOrDefault();
+            if (notebook == null || !notebook.Descendants(One + "SectionGroup").Any(e => (string)e.Attribute("isRecycleBin") == "true"))
+                throw new AiException("没有可确认的笔记本回收站，删除已停止。");
+            if (node.Name == One + "Page")
+            {
+                int Level(XElement page) => int.TryParse((string)page.Attribute("pageLevel"), out var level) ? level : 1;
+                var next = node.ElementsAfterSelf(One + "Page").FirstOrDefault();
+                if (next != null && Level(next) > Level(node)) throw new AiException("页面含子页面，回收站操作已停止。");
+            }
+            _app.DeleteHierarchy(id, modified, false); return true;
+        });
+        string Mcp.IOneNoteWorkspaceAccess.GetLink(string id, string objectId) => Call(() =>
+        { _app.GetHyperlinkToObject(id, objectId ?? "", out string link); return link; });
+        void Mcp.IOneNoteWorkspaceAccess.Navigate(string id, string objectId) => NavigateTo(id, objectId ?? "");
+        void Mcp.IOneNoteWorkspaceAccess.ExportPdf(string id, string path) => Call(() =>
+        { _app.Publish(id, path, PublishFormat.pfPDF, ""); return true; });
 
         internal string GetPageContent(string pageId, PageInfo info)
         {

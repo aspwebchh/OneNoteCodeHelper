@@ -329,6 +329,7 @@ pwsh -ExecutionPolicy Bypass -File publish.ps1
 | `-Configuration Debug` | 发布 Debug 版，默认 Release |
 | `-OutputDirectory D:\Releases` | 指定发布包的父目录；相对路径按当前工作目录解释。仓库内只能输出到 `bin` 下 |
 | `-SkipBuild` | 使用已有插件构建和 MCP 自包含发布输出，不调用 `dotnet`；MCP 输出须已由 `Tools\publish-mcp.ps1` 生成 |
+| `-PluginDirectory` / `-McpDirectory` | 配合 `-SkipBuild` 从已验证的独立输出目录打包；运行中的插件占用默认 DLL 时可使用 |
 | `-NoZip` | 只生成发布目录、说明和文件校验值 |
 
 交付时复制完整目录或解压 ZIP 到固定目录。在发布包根目录执行：
@@ -416,7 +417,8 @@ Tests/                    独立签名的 net48 测试程序及页面/HTTP 模�
 
 独立 `OneNoteCodeHelper.Mcp.exe` 通过 stdio 接受 Codex 等外部 Agent 调用，再经本机命名管道转给插件。
 真实 OneNote 操作继续复用插件中的草稿、冲突检查、核验和撤销；外部调用不启动内置模型循环、不要求插件 AI API Key。
-插件加载后自动就绪，先打开 OneNote，再启动 MCP 客户端。全部现有 Agent 工具以及会话管理工具均已开放，沿用能力开关和保护范围。
+插件加载后自动就绪，先打开 OneNote，再启动 MCP 客户端。全部现有 Agent 工具以及会话管理工具均已开放，沿用能力开关和保护范围。另有 16 个外部 MCP 工具提供目录浏览、原生搜索、独立页面／选区读取、待办汇总、正文更新和 Markdown 导入、页面与分区操作、定位及 Markdown／PDF 导出；这些新增工具不加入内置 Agent 目录。
+所有笔记写入仍先规划草稿、检查改动，再提交核验并保留撤销。移动会创建并核验目标副本后将源页放入回收站，页面 ID 可能变化；复杂对象在写入前拒绝。搜索、读取与待办分页结果绑定当前客户端，保留 5 分钟；结果与撤销记录保留 30 分钟、最多 16 条。
 
 ```powershell
 dotnet build OneNoteCodeHelper.sln -c Release

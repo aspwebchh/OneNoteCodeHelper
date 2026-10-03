@@ -231,6 +231,8 @@ namespace OneNoteCodeHelper.Services.Agent
         internal XElement Layout;
         /// <summary>可以调整结构的文本框（objectID）：不是标题，不含墨迹、附件等不支持的对象。</summary>
         internal readonly HashSet<string> EditableOutlines = new HashSet<string>();
+        // MCP 内容导入的独立文本框；草稿身份不得发送给 OneNote。
+        internal readonly HashSet<string> NewOutlines = new HashSet<string>();
         internal readonly List<AgentLayoutChange> LayoutChanges = new List<AgentLayoutChange>();
         internal readonly List<AgentInserted> Inserted = new List<AgentInserted>();
         /// <summary>撤销时整框换回的文本框。</summary>
@@ -264,7 +266,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool CodeSpacingRequested;
         internal static XNamespace One => OneNoteApi.One;
 
-        internal AgentPageSnapshot(string xml, ISet<string> selection, AgentOptions options)
+        internal AgentPageSnapshot(string xml, ISet<string> selection, AgentOptions options, bool enforceLimits = true)
         {
             Page = ParsePage(xml);
             DraftStyles = new XElement("styles", Page.Elements(One + "QuickStyleDef").Select(e => new XElement(e)));
@@ -310,7 +312,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     Depth = oe.Ancestors(One + "OE").Count()
                 });
             }
-            if (Blocks.Sum(b => b.Editable ? b.Text.Length : 0) > options.MaxPageChars || Blocks.Count > 1000)
+            if (enforceLimits && (Blocks.Sum(b => b.Editable ? b.Text.Length : 0) > options.MaxPageChars || Blocks.Count > 1000))
                 throw new AiException("页面内容超过 Agent 限额，请选择较小范围后重试。");
             // 待高亮代码也要发给模型读。放不下时按原来的方式只保护，不让整页失败。
             if (!options.EnableCodeHighlight || Blocks.Sum(b => b.Editable || b.CodeCandidate ? b.Text.Length : 0) > options.MaxPageChars)

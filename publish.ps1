@@ -13,6 +13,10 @@
     使用已有插件构建和 MCP 自包含发布输出，不执行 dotnet 命令。
 .PARAMETER NoZip
     只生成发布目录及目录内校验文件，不压缩 ZIP。
+.PARAMETER PluginDirectory
+    配合 SkipBuild 使用已验证的独立插件输出目录，避免正在运行的插件占用默认 DLL。
+.PARAMETER McpDirectory
+    配合 SkipBuild 使用已验证的 Windows x64 自包含 MCP 输出目录。
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File publish.ps1
 .EXAMPLE
@@ -25,6 +29,8 @@
 param(
     [ValidateSet('Release', 'Debug')][string]$Configuration = 'Release',
     [string]$OutputDirectory,
+    [string]$PluginDirectory,
+    [string]$McpDirectory,
     [switch]$SkipBuild,
     [switch]$NoZip
 )
@@ -58,6 +64,7 @@ function Assert-McpOutput {
 }
 
 try {
+    if (($PluginDirectory -or $McpDirectory) -and -not $SkipBuild) { throw '自定义构建目录只允许与 -SkipBuild 一起使用。' }
     if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot 'bin\publish' }
     $outputRoot = [IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory))
     $repoBoundary = $repoRoot.TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
@@ -80,6 +87,7 @@ try {
     }
 
     $pluginSource = Join-Path $repoRoot "bin\$Configuration\net48"
+    if ($PluginDirectory) { $pluginSource = (Resolve-Path -LiteralPath $PluginDirectory).Path }
     $pluginFiles = @('OneNoteCodeHelper.dll', 'Extensibility.dll', 'Microsoft.Office.Interop.OneNote.dll')
     foreach ($name in $pluginFiles) { Assert-File (Join-Path $pluginSource $name) }
     $identity = [Reflection.AssemblyName]::GetAssemblyName((Join-Path $pluginSource 'OneNoteCodeHelper.dll'))
@@ -102,6 +110,7 @@ try {
     $mcpTarget = Join-Path $packagePath $mcpRelative
     if ($SkipBuild) {
         $mcpSource = Join-Path $repoRoot $mcpRelative
+        if ($McpDirectory) { $mcpSource = (Resolve-Path -LiteralPath $McpDirectory).Path }
         Assert-McpOutput $mcpSource
         [void][IO.Directory]::CreateDirectory($mcpTarget)
         foreach ($file in Get-ChildItem -LiteralPath $mcpSource -Recurse -File) {

@@ -41,7 +41,7 @@ internal static partial class Program
             using (var s = McpService(new FakePage(Page(Paragraph("a", "中文😀")))))
             {
                 var canonical = AgentTools.Catalog().Definitions.Select(d => Map(McpJson.Arguments(McpJson.Serialize(d))["function"])).ToArray();
-                Equal(canonical.Length + 6, s.Catalog.Tools.Length);
+                Equal(canonical.Length + 6 + McpExtensionCatalog.Schemas.Count, s.Catalog.Tools.Length);
                 Equal(s.Catalog.Tools.Length, s.Catalog.Tools.Select(t => t.Name).Distinct().Count());
                 foreach (var d in canonical)
                 {
@@ -94,6 +94,98 @@ internal static partial class Program
                 var undo = McpCall(s, "undo_edit", new { snapshot_id = id }); Equal("Verified", undo["status"]); Equal(2, api.Writes);
                 Equal(McpJson.Serialize(undo), McpJson.Serialize(McpCall(s, "undo_edit", new { snapshot_id = id }))); Equal(2, api.Writes);
                 Equal(false, McpCall(s, "get_edit_status", new { snapshot_id = id })["can_undo"]);
+            }
+        });
+        Test("MCP compact XML commits and undoes formatting without changing content or runs", () =>
+        {
+            var parent = Paragraph("parent", "父段落");
+            parent.Add(new XElement(One + "OEChildren", Paragraph("child", "子段落")));
+            var api = new FakePage(Page(Paragraph("a", "&nbsp;&nbsp;中文😀 <b>重点</b><br><a href='https://example.com/?a=1&amp;b=2'>链接</a>", "\t  "),
+                Paragraph("blank", ""), parent, Paragraph("b", "最后一段"))) { ReadSaveOptions = SaveOptions.DisableFormatting };
+            var before = string.Join("|", api.Page.Descendants(One + "OE").Select(e => new AgentRichText(e).Signature(api.Page, false)));
+            var childFormat = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "child"), api.Page);
+            using (var s = McpService(api))
+            {
+                var id = McpBegin(s); McpRead(s, id, "p1", "p3", "p4", "p5"); McpStyle(s, id);
+                McpCall(s, "set_paragraph_style", new { snapshot_id = id, block_ids = new[] { "p5" }, preset_id = "body" });
+                var revision = McpRevision(s, id); Equal(0, api.Writes);
+                var result = McpFinish(s, id, revision);
+                Equal("Verified", result["status"]); Equal(2, result["applied"]); Equal(0, ((IList)result["skipped_conflict"]).Count); Equal(1, api.Writes);
+                Equal(before, string.Join("|", api.Page.Descendants(One + "OE").Select(e => new AgentRichText(e).Signature(api.Page, false))));
+                Equal(2, AgentCommitter.Find(api.Page, "a").Elements(One + "T").Count());
+                var lastRun = new XElement(One + "OE", new XElement(AgentCommitter.Find(api.Page, "a").Elements(One + "T").Last()));
+                Equal("\t  ", new AgentRichText(lastRun).Text);
+                Equal(childFormat, AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "child"), api.Page));
+                Equal("Verified", McpFinish(s, id, revision)["status"]); Equal(1, api.Writes);
+                Equal("Verified", McpCall(s, "undo_edit", new { snapshot_id = id })["status"]); Equal(2, api.Writes);
+                Equal(before, string.Join("|", api.Page.Descendants(One + "OE").Select(e => new AgentRichText(e).Signature(api.Page, false))));
+            }
+        });
+        Test("MCP compact XML selection preserves unselected nested and outside paragraphs", () =>
+        {
+            var parent = Paragraph("a", "父段落"); parent.SetAttributeValue("selected", "all");
+            parent.Add(new XElement(One + "OEChildren", Paragraph("child", "选区外的子段落")));
+            var api = new FakePage(Page(parent, Paragraph("outside", "选区外正文"))) { ReadSaveOptions = SaveOptions.DisableFormatting };
+            var childFormat = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "child"), api.Page);
+            var outsideFormat = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "outside"), api.Page);
+            var before = Texts(api.Page);
+            using (var s = McpService(api))
+            {
+                var id = McpBegin(s, "selection");
+                Equal(1, McpCall(s, "get_page_overview", new { snapshot_id = id })["total"]);
+                McpRead(s, id, "p1"); McpStyle(s, id);
+                api.Page.Descendants().Attributes("selected").Remove();
+                Equal("Verified", McpFinish(s, id, McpRevision(s, id))["status"]); Equal(1, api.Writes);
+                Equal(before, Texts(api.Page));
+                Equal(childFormat, AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "child"), api.Page));
+                Equal(outsideFormat, AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "outside"), api.Page));
+            }
+        });
+        Test("MCP compact XML preserves real text, whitespace, link and format conflicts", () =>
+        {
+            foreach (var edit in new Action<XElement>[] {
+                e => e.Element(One + "T").Value = "用户修改后的正文",
+                e => e.Element(One + "T").Value = "  第一段  ",
+                e => e.Element(One + "T").Value = "<a href='https://example.org/changed'>第一段</a>",
+                e => e.SetAttributeValue("style", "font-size:22pt") })
+            {
+                var api = new FakePage(Page(Paragraph("a", "第一段"), Paragraph("b", "第二段"))) { ReadSaveOptions = SaveOptions.DisableFormatting };
+                using (var s = McpService(api))
+                {
+                    var id = McpBegin(s); McpRead(s, id, "p1", "p2"); McpStyle(s, id);
+                    edit(AgentCommitter.Find(api.Page, "a")); var changed = api.Page.ToString(SaveOptions.DisableFormatting);
+                    var result = McpFinish(s, id, McpRevision(s, id));
+                    Equal("NoChange", result["status"]); Equal(0, result["applied"]); Equal(0, api.Writes);
+                    Equal("p1", string.Join(",", ((IList)result["skipped_conflict"]).Cast<string>()));
+                    Equal(changed, api.Page.ToString(SaveOptions.DisableFormatting));
+                }
+            }
+        });
+        Test("MCP compact XML merges and undoes whole groups, skips concurrent group changes", () =>
+        {
+            foreach (var conflict in new[] { false, true })
+            {
+                var api = new FakePage(TwoBoxes()) { ReadSaveOptions = SaveOptions.DisableFormatting };
+                var before = Texts(api.Page);
+                using (var s = McpService(api))
+                {
+                    var id = McpBegin(s); McpRead(s, id, "p1", "p2", "p3", "p4", "p5");
+                    McpCall(s, "merge_outlines", new { snapshot_id = id, source_id = "B", target_id = "p2", position = "after" });
+                    if (conflict) AgentCommitter.Find(api.Page, "a1").Element(One + "T").Value = "用户修改目标框";
+                    var result = McpFinish(s, id, McpRevision(s, id));
+                    if (conflict)
+                    {
+                        Equal("NoChange", result["status"]); Equal(0, api.Writes);
+                        Equal(2, api.Page.Elements(One + "Outline").Count()); True(Texts(api.Page).Contains("用户修改目标框"));
+                    }
+                    else
+                    {
+                        Equal("Verified", result["status"]); Equal(1, api.Writes);
+                        Equal(1, api.Page.Elements(One + "Outline").Count()); Equal(before, Texts(api.Page));
+                        Equal("Verified", McpCall(s, "undo_edit", new { snapshot_id = id })["status"]); Equal(2, api.Writes);
+                        Equal(2, api.Page.Elements(One + "Outline").Count()); Equal(before, Texts(api.Page));
+                    }
+                }
             }
         });
         Test("MCP concurrent clients own separate drafts and cannot claim snapshots", () =>
@@ -243,7 +335,7 @@ internal static partial class Program
         if (string.IsNullOrEmpty(executable) || !File.Exists(executable)) throw new Exception("MCP EXE 不存在，请先构建解决方案或传入 --mcp-only <exe>。");
         Test("real MCP subprocess initialize, discover all tools, Chinese, errors, edit, repeat, undo and EOF", () =>
         {
-            var api = new FakePage(Page(Paragraph("a", "中文😀第一段"), Paragraph("b", "第二段")));
+            var api = new FakePage(Page(Paragraph("a", "中文😀第一段"), Paragraph("b", "第二段"))) { ReadSaveOptions = SaveOptions.DisableFormatting };
             using (var s = McpService(api))
             using (var host = new McpPipeHost(s, "OneNoteCodeHelper.Test." + Guid.NewGuid().ToString("N")))
             {
@@ -419,6 +511,7 @@ internal static partial class Program
             using (var child = new McpChild(executable, name, true)) { Equal(1, child.ExitCode()); Equal("", child.Stdout()); True(child.Stderr.Contains("plugin_unavailable")); }
             using (var child = new McpChild(executable, name)) { Equal(1, child.ExitCode()); Equal("", child.Stdout()); }
         });
+        TestMcpExtensions(executable);
         Console.WriteLine($"MCP/Agent tests: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
     }
@@ -447,6 +540,7 @@ internal static partial class Program
         private readonly Task<string> _stderr;
         private readonly StreamWriter _input;
         private readonly Dictionary<int, IDictionary<string, object>> _replies = new Dictionary<int, IDictionary<string, object>>();
+        internal readonly List<IDictionary<string, object>> Notifications = new List<IDictionary<string, object>>();
         private int _id;
         internal string Stderr => _stderr.GetAwaiter().GetResult();
         internal McpChild(string exe, string pipe, bool doctor = false)
@@ -479,6 +573,7 @@ internal static partial class Program
                 var message = McpJson.Arguments(line.Result); // 任意非协议 stdout 都会失败。
                 Equal("2.0", message["jsonrpc"]);
                 if (message.TryGetValue("id", out var responseId)) _replies[Convert.ToInt32(responseId)] = message;
+                else Notifications.Add(message);
             }
             var reply = _replies[id]; _replies.Remove(id);
             if (reply.ContainsKey("error")) throw new Exception("MCP error: " + McpJson.Serialize(reply["error"]));

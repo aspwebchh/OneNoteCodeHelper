@@ -3,6 +3,8 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
+using ModelContextProtocol.Server;
 using ModelContextProtocol.Protocol;
 
 namespace OneNoteCodeHelper.Mcp;
@@ -36,8 +38,9 @@ internal static class Program
             var advertised = catalog.Tools.Select(t => new Tool
             {
                 Name = t.Name, Description = t.Description, InputSchema = ParseElement(t.InputSchemaJson),
+                OutputSchema = t.OutputSchemaJson == null ? null : ParseElement(t.OutputSchemaJson),
                 Annotations = new ToolAnnotations { ReadOnlyHint = t.ReadOnly, DestructiveHint = t.Destructive,
-                    IdempotentHint = t.ReadOnly || t.Name is "finish_edit" or "undo_edit" or "abort_edit", OpenWorldHint = false }
+                    IdempotentHint = t.ReadOnly || t.Name is "finish_edit" or "undo_edit" or "abort_edit" or "navigate_to" or "create_page" or "copy_page" or "move_page" or "create_section" or "append_content" or "insert_content" or "replace_text", OpenWorldHint = false }
             }).ToList();
             var builder = Host.CreateApplicationBuilder();
             // SDK 的异常日志可能带工具参数；诊断由本程序输出安全的错误码和状态。
@@ -45,7 +48,7 @@ internal static class Program
             builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(3));
             builder.Services.AddMcpServer(options =>
             {
-                options.ServerInfo = new Implementation { Name = "OneNoteCodeHelper", Version = "1.0.0" };
+                options.ServerInfo = new Implementation { Name = "OneNoteCodeHelper", Version = "1.1.0" };
                 options.ServerInstructions = catalog.Instructions;
             }).WithStdioServerTransport()
                 .WithListToolsHandler((_, _) => ValueTask.FromResult(new ListToolsResult { Tools = advertised }))
@@ -54,8 +57,14 @@ internal static class Program
                     var request = context.Params!;
                     try
                     {
-                        var json = await ipc.CallAsync(request.Name, request.Arguments == null ? "{}" : JsonSerializer.Serialize(request.Arguments), cancellation);
-                        return Result(json);
+                        using var progressStop = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                        var progress = request.ProgressToken is { } token ? ReportProgressAsync(context.Server, token, progressStop.Token) : Task.CompletedTask;
+                        try
+                        {
+                            var json = await ipc.CallAsync(request.Name, request.Arguments == null ? "{}" : JsonSerializer.Serialize(request.Arguments), cancellation);
+                            return Result(json);
+                        }
+                        finally { progressStop.Cancel(); await progress; }
                     }
                     catch (IpcException ex) { return Result(JsonSerializer.Serialize(new { ok = false, error_code = ex.Code, error = ex.Message }), true); }
                     catch (JsonException) { return Result("{\"ok\":false,\"error_code\":\"invalid_arguments\",\"error\":\"工具参数不是有效 JSON 对象。\"}", true); }
@@ -72,6 +81,20 @@ internal static class Program
     {
         using var document = JsonDocument.Parse(json);
         return document.RootElement.Clone();
+    }
+
+    private static async Task ReportProgressAsync(McpServer server, ProgressToken token, CancellationToken cancellation)
+    {
+        var elapsed = 0;
+        try
+        {
+            while (true)
+            {
+                await server.NotifyProgressAsync(token, new ProgressNotificationValue { Progress = elapsed, Message = $"OneNote 正在处理，已用 {elapsed} 秒。" }, null, cancellation);
+                await Task.Delay(2000, cancellation); elapsed += 2;
+            }
+        }
+        catch (Exception) { /* 进度失败不得影响提交结果，也不记录参数或正文。 */ }
     }
 
     private static CallToolResult Result(string json, bool error = false)

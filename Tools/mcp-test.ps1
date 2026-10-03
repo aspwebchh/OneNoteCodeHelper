@@ -6,13 +6,15 @@
 [CmdletBinding()]
 param(
     [string]$McpExe,
-    [ValidateSet('Release', 'Debug')][string]$Configuration = 'Release'
+    [ValidateSet('Release', 'Debug')][string]$Configuration = 'Release',
+    [string]$DllPath
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $McpExe) { $McpExe = Join-Path $repoRoot "Mcp\Server\bin\$Configuration\net10.0-windows\OneNoteCodeHelper.Mcp.exe" }
 $McpExe = (Resolve-Path -LiteralPath $McpExe).Path
-$dll = Join-Path $repoRoot "bin\$Configuration\net48\OneNoteCodeHelper.dll"
+if (-not $DllPath) { $DllPath = Join-Path $repoRoot "bin\$Configuration\net48\OneNoteCodeHelper.dll" }
+$dll = (Resolve-Path -LiteralPath $DllPath).Path
 $project = Join-Path $repoRoot 'Tests\OneNoteCodeHelper.AgentTests.csproj'
 & dotnet build $project -c $Configuration "-p:AgentDllPath=$dll" --nologo
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

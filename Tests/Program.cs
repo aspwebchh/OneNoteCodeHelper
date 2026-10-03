@@ -26,6 +26,7 @@ internal static partial class Program
     {
         if (args.Length > 0 && args[0] == "--probe") return Probe.Run(args.Skip(1).ToArray());
         if (args.Length == 2 && args[0] == "--mcp-only") return TestMcp(Path.GetFullPath(args[1]));
+        if (args.Length == 2 && args[0] == "--mcp-extensions-only") { TestMcpExtensions(Path.GetFullPath(args[1])); Console.WriteLine($"MCP extensions: {_passed} passed, {_failed} failed"); return _failed == 0 ? 0 : 1; }
         if (args.Length == 2 && args[0] == "--probe-page-title") return TitleProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--probe-code-spacing") return CodeSpacingProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--probe-clear-format") return ClearFormatProbe.Run(args[1]);
@@ -4065,6 +4066,8 @@ internal static partial class Program
         internal XElement Page;
         internal int Attempts, Writes, ConflictsRemaining;
         internal bool ThrowAfterSave, FailReadAfterSave;
+        // 覆盖 OneNote 返回无缩进 XML 的情况；默认仍保留已有测试的读取方式。
+        internal SaveOptions ReadSaveOptions = SaveOptions.None;
         internal Action OnConflict, AfterSave;
         /// <summary>最近一次提交的 XML。</summary>
         internal string LastXml;
@@ -4081,7 +4084,7 @@ internal static partial class Program
         public string GetPageContent(string id, PageInfo info)
         {
             if (FailReadAfterSave && Writes > 0) throw new Exception("read failed");
-            if (info != PageInfo.piBinaryData) return Page.ToString();
+            if (info != PageInfo.piBinaryData) return Page.ToString(ReadSaveOptions);
             var copy = new XElement(Page);
             foreach (var image in copy.Descendants(One + "Image").ToList())
             {
@@ -4089,7 +4092,7 @@ internal static partial class Program
                 if (callback == null || !Binary.TryGetValue(callback, out var data)) { image.Remove(); continue; }
                 image.Element(One + "CallbackID").ReplaceWith(new XElement(One + "Data", data));
             }
-            return copy.ToString();
+            return copy.ToString(ReadSaveOptions);
         }
         public void DeletePageContent(string pageId, string objectId, DateTime expected)
         {
