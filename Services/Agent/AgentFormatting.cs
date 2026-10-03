@@ -351,7 +351,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// 按字符投影，容忍 OneNote 合并/拆分 span 和 T。用于回读检查。includeLinks 为 false 时不看链接，用于核对去掉链接后文字没变；
         /// skipWhitespace 跳过空白字符，用于 OneNote 会改写硬空格的代码行，文字另按规范化的纯文字核对。
         /// </summary>
-        internal string Signature(XElement page, bool includeStyles, bool includeLinks = true, bool skipWhitespace = false)
+        internal string Signature(XElement page, bool includeStyles, bool includeLinks = true, bool skipWhitespace = false, bool titleSymbolFonts = false)
         {
             var result = new StringBuilder();
             var runs = _oe.Elements(OneNoteApi.One + "T").ToList();
@@ -360,9 +360,27 @@ namespace OneNoteCodeHelper.Services.Agent
                 var css = PieceStyle(p, runs, page, out var link);
                 if (!includeLinks) link = "";
                 var style = includeStyles ? Css.Write(css) : "";
-                foreach (var ch in p.Text.Where(ch => !skipWhitespace || !char.IsWhiteSpace(ch)))
+                for (var i = 0; i < p.Text.Length; i++)
+                {
+                    var ch = p.Text[i];
+                    if (skipWhitespace && char.IsWhiteSpace(ch)) continue;
+                    var characterStyle = style;
+                    // 原生标题回存会自动给 emoji/符号选择字体。只归一这些字形的字体，其他样式照常逐字核验。
+                    if (titleSymbolFonts && includeStyles)
+                    {
+                        var index = char.IsLowSurrogate(ch) && i > 0 && char.IsHighSurrogate(p.Text[i - 1]) ? i - 1 : i;
+                        var category = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(p.Text, index);
+                        if (category == System.Globalization.UnicodeCategory.OtherSymbol || category == System.Globalization.UnicodeCategory.ModifierSymbol ||
+                            ch == '\u200d' || ch == '\ufe0f' || ch == '\ufe0e')
+                        {
+                            var symbolStyle = new Dictionary<string, string>(css);
+                            symbolStyle.Remove("font-family");
+                            characterStyle = Css.Write(symbolStyle);
+                        }
+                    }
                     result.Append((int)ch).Append(':').Append(link.Length).Append(':').Append(link)
-                    .Append(':').Append(style.Length).Append(':').Append(style).Append(';');
+                        .Append(':').Append(characterStyle.Length).Append(':').Append(characterStyle).Append(';');
+                }
             }
             // 空 T 没有字符可投影，代码空行又会把硬空格回存成空 T；仍须检查它们的有效格式。
             if (includeStyles && (skipWhitespace ? string.IsNullOrWhiteSpace(Text) : Text.Length == 0))

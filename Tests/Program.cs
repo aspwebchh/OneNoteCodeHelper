@@ -25,6 +25,7 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--probe") return Probe.Run(args.Skip(1).ToArray());
+        if (args.Length == 2 && args[0] == "--probe-page-title") return TitleProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--probe-code-spacing") return CodeSpacingProbe.Run(args[1]);
         if (args.Length == 2 && args[0] == "--probe-clear-format") return ClearFormatProbe.Run(args[1]);
         if (args.Length == 3 && args[0] == "--compare-formats") return ClearFormatProbe.Compare(args[1], args[2]);
@@ -39,6 +40,7 @@ internal static partial class Program
             }
             return 0;
         }
+        TestPageTitles();
         Test("HTML entities, whitespace, links and multiple runs survive formatting", () =>
         {
             var oe = Paragraph("a", "&nbsp;A&amp;B <b>重点</b><br><a href='https://example.com'>链接</a>", "中文😀");
@@ -4134,6 +4136,7 @@ internal static partial class Program
                     written.Remove();
             }
             Writes++; Page.SetAttributeValue("lastModifiedTime", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            if (XElement.Parse(xml).Element(One + "Title") != null) Page.SetAttributeValue("name", AgentPageTitle.Text(Page.Element(One + "Title")));
             AfterSave?.Invoke();
             if (ThrowAfterSave) throw new COMException("uncertain");
         }

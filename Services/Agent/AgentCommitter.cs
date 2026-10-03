@@ -57,6 +57,10 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int Outlines;
         /// <summary>合并后没能删掉、留着一行空白的文本框。</summary>
         internal int Leftover;
+        internal bool TitleChanged;
+        internal string PageTitle;
+        internal string PageName;
+        internal AgentTitleUndoItem TitleUndo;
         internal readonly List<AgentUndoItem> Undo = new List<AgentUndoItem>();
         internal readonly List<AgentCodeUndoItem> CodeUndo = new List<AgentCodeUndoItem>();
         internal readonly List<AgentTableUndoItem> TableUndo = new List<AgentTableUndoItem>();
@@ -70,10 +74,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int LinksRemoved;
         /// <summary>已核验写入、为保留下级格式而只设置外观的段落。</summary>
         internal readonly List<string> AppearanceOnly = new List<string>();
-        internal bool CanUndo => Undo.Count + CodeUndo.Count + TableUndo.Count + OutlineUndo.Count > 0;
+        internal bool CanUndo => TitleUndo != null || Undo.Count + CodeUndo.Count + TableUndo.Count + OutlineUndo.Count > 0;
         /// <summary>撤销之后不再把撤销的逆操作当作可撤销。</summary>
-        internal void ClearUndo() { Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
+        internal void ClearUndo() { TitleUndo = null; Undo.Clear(); CodeUndo.Clear(); TableUndo.Clear(); OutlineUndo.Clear(); }
         internal object ToToolResult() => new { status = Status, applied = Applied, text_fixes = TextFixes.Count, markdown_marks = MarkdownMarks, links_removed = LinksRemoved,
+            page_title_changed = TitleChanged, page_title = PageTitle,
             code_blocks = CodeBlocks, tables = Tables, text_tables = TextTables,
             removed = Removed, moved = Moved, indented = Indented, inserted = Inserted, merged = Merged, unwrapped_code = Unwrapped,
             removed_soft_lines = RemovedSoftLines, inserted_blank_lines = InsertedBlankLines, spacing_skipped = SpacingSkipped,
@@ -178,7 +183,8 @@ namespace OneNoteCodeHelper.Services.Agent
                     foreach (var edit in edits.Where(e => !e.Restore))
                         foreach (var oid in edit.Before.Descendants(One + "OE").Select(e => (string)e.Attribute("objectID")).Where(x => x != null))
                             if (!present.Contains(oid) || formatted.Contains(oid)) untouched.Remove(oid);
-                    foreach (var block in snapshot.Blocks.Where(b => b.Changed && !replaced.Contains(b.ContainerId)))
+                    var titleWrite = PrepareTitle(snapshot, page, report, untouched, containers);
+                    foreach (var block in snapshot.Blocks.Where(b => b.Changed && !replaced.Contains(b.ContainerId) && !(snapshot.TitleEdit != null && b.IsPageTitle)))
                     {
                         var target = Find(page, block.ObjectId);
                         if (target == null || !fingerprints.TryGetValue(block.ObjectId, out var fingerprint) || fingerprint != block.Fingerprint)
@@ -261,7 +267,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         containers.Add(target.Ancestors().First(e => e.Parent == page));
                     }
                     report.Conflicts = report.ConflictIds.Count;
-                    if (planned.Count == 0 && codes.Count == 0 && restores.Count == 0 && tables.Count == 0 && edits.Count == 0)
+                    if (titleWrite == null && planned.Count == 0 && codes.Count == 0 && restores.Count == 0 && tables.Count == 0 && edits.Count == 0)
                     {
                         report.Status = "NoChange";
                         report.Message = report.Conflicts > 0 ? $"没有写入：{report.Conflicts} 段在处理期间发生变化。" : "没有需要写入的格式修改。";
@@ -286,7 +292,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     catch (Exception)
                     {
                         report.Status = "CommitOutcomeUnknown";
-                        report.Unverified = planned.Count + codes.Count + restores.Count + tables.Count + edits.Count;
+                        report.Unverified = (titleWrite == null ? 0 : 1) + planned.Count + codes.Count + restores.Count + tables.Count + edits.Count;
                         AddInLog.Info(VerificationDiagnostic("page", snapshot.PageId, "readback_failed"));
                         report.Message = "已尝试写入，但无法回读确认。请查看目标页面，不要立即重复执行。";
                         return report;
@@ -309,7 +315,7 @@ namespace OneNoteCodeHelper.Services.Agent
                     {
                         // 重建的段落没有原 ID，按在页面上的位置找；位置对不上的情况由下面的内容核验兜底。
                         var recreated = item.Target.Attribute("objectID") == null;
-                        var written = recreated ? AtSamePosition(page, actual, item.Target) : Find(actual, item.Block.ObjectId);
+                        var written = recreated ? AtSamePosition(page, actual, item.Target, titleWrite != null) : Find(actual, item.Block.ObjectId);
                         try
                         {
                             var desired = recreated ? AgentPageSnapshot.SemanticFormat(item.Target, page) : DesiredSignature(item.Desired, page, item.Block.ObjectId);
@@ -329,12 +335,30 @@ namespace OneNoteCodeHelper.Services.Agent
                         }
                         catch (Exception) { NoteUnverified(report, "paragraph", item.Block.ObjectId, "format_unreadable"); }
                     }
+                    if (titleWrite != null)
+                    {
+                        try
+                        {
+                            if (!AgentPageTitle.Verified(page, actual, titleWrite.PreserveFormat)) NoteUnverified(report, "title", snapshot.PageId, "title_mismatch");
+                            else
+                            {
+                                report.TitleChanged = true;
+                                report.PageTitle = AgentPageTitle.Text(actual.Element(One + "Title"));
+                                report.PageName = (string)actual.Attribute("name");
+                                report.TitleUndo = new AgentTitleUndoItem { Before = titleWrite.Before, AfterFingerprint = AgentPageTitle.Fingerprint(actual),
+                                    Styles = titleWrite.Before == null ? new List<XElement>() : AgentLayout.Styles(titleWrite.Before, original),
+                                    Tags = titleWrite.Before == null ? new List<XElement>() : AgentLayout.Tags(titleWrite.Before, original) };
+                                report.TextFixes.AddRange(snapshot.Blocks.Where(b => b.IsPageTitle).SelectMany(b => b.TextFixes));
+                            }
+                        }
+                        catch (Exception) { NoteUnverified(report, "title", snapshot.PageId, "title_unreadable"); }
+                    }
                     // 原页面所有文字、链接、段落顺序必须保留，包括没有交给模型的对象。
                     formatted.UnionWith(planned.Select(p => p.Block.ObjectId));
                     // 只有本次专用工具补入、或删段内空行后剩下的单行空段落，允许 OneNote 回存为空 T。
                     // 按期望节点记录，身份、层级和位置仍由内容核验先行检查。
                     var spacingBlanks = new HashSet<XElement>(edits.SelectMany(e => e.BlankLines.Concat(e.SoftLines.Select(s => s.Node))).Where(IsNormalizableBlank));
-                    if (!ContentPreserved(page, actual, known, formatted, spacingBlanks) || !UntouchedPreserved(untouched, actual))
+                    if (!ContentPreserved(page, actual, known, formatted, spacingBlanks, titleWrite != null) || !UntouchedPreserved(untouched, actual))
                     {
                         report.Status = "CommitOutcomeUnknown";
                         AddInLog.Info(VerificationDiagnostic("page", snapshot.PageId, "content_or_untouched_mismatch"));
@@ -342,8 +366,8 @@ namespace OneNoteCodeHelper.Services.Agent
                         return report;
                     }
                     // 内容核验保证两边的段落一一对应，按位置找到 OneNote 新建的代码框和还原段落。
-                    var expectedLines = page.Descendants(One + "OE").ToList();
-                    var actualLines = actual.Descendants(One + "OE").ToList();
+                    var expectedLines = page.Descendants(One + "OE").Where(e => titleWrite == null || !e.Ancestors(One + "Title").Any()).ToList();
+                    var actualLines = actual.Descendants(One + "OE").Where(e => titleWrite == null || !e.Ancestors(One + "Title").Any()).ToList();
                     foreach (var code in codes)
                     {
                         var written = actualLines[expectedLines.IndexOf(code.Box)];
@@ -396,16 +420,57 @@ namespace OneNoteCodeHelper.Services.Agent
                     report.Status = report.Unverified > 0 || report.Conflicts > 0 || report.Leftover > 0 ? "PartiallyApplied" : "Verified";
                     var conversions = codes.Select(c => c.Conversion).Concat(edits.SelectMany(e => e.Boxes.Select(b => b.Conversion))).ToList();
                     report.Message = $"已验证修改 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"修正文字 {report.TextFixes.Count} 处；" : "") +
+                        (report.TitleChanged ? "页面标题已写入；" : "") +
                         (report.MarkdownMarks > 0 ? $"去除 Markdown 符号 {report.MarkdownMarks} 处；" : "") +
                         (report.LinksRemoved > 0 ? $"去掉链接 {report.LinksRemoved} 处；" : "") + report.LayoutSummary +
                         (conversions.Any(c => !c.TextTable) ? $"高亮代码 {report.CodeBlocks} 处；" : "") + (conversions.Any(c => c.TextTable) ? $"转换表格 {report.TextTables} 个；" : "") +
                         (tables.Count + edits.Sum(e => e.Tables.Count) > 0 ? $"表格样式 {report.Tables} 个；" : "") +
                         $"冲突跳过 {report.Conflicts} 处；未验证 {report.Unverified} 处；保护 {report.Protected} 段。";
                     if (report.AppearanceOnly.Count > 0) report.Message += $"\n为保留下级段落格式，有 {report.AppearanceOnly.Count} 段仅设置外观，保留原有标题层级。";
-                    if (uncertain && report.Applied + report.CodeBlocks + report.Tables + report.TextTables + report.Outlines == 0) report.Message = "写回未得到确认，请检查页面。" + report.Message;
+                    if (uncertain && !report.TitleChanged && report.Applied + report.CodeBlocks + report.Tables + report.TextTables + report.Outlines == 0) report.Message = "写回未得到确认，请检查页面。" + report.Message;
                     return report;
                 }
             }
+        }
+
+        private sealed class TitleWrite
+        {
+            internal XElement Before;
+            internal bool PreserveFormat;
+        }
+
+        private static TitleWrite PrepareTitle(AgentPageSnapshot snapshot, XElement page, AgentReport report,
+            Dictionary<string, string> untouched, HashSet<XElement> containers)
+        {
+            var edit = snapshot.TitleEdit;
+            if (edit == null) return null;
+            if (AgentPageTitle.Fingerprint(page) != edit.Fingerprint)
+            { report.ConflictIds.Add("page_title"); return null; }
+            var current = page.Element(One + "Title");
+            var before = current == null ? null : new XElement(current);
+            var desired = edit.Restore ? new XElement(edit.Before ?? current ?? AgentPageTitle.Empty()) : new XElement(snapshot.CreateDraftPage().Element(One + "Title"));
+            if (edit.Restore && edit.Before == null)
+            {
+                desired.Elements(One + "OE").Remove();
+                desired.Add(new XElement(One + "OE", new XElement(One + "T", new XCData(""))));
+            }
+            if (edit.Restore && !desired.Elements(One + "OE").Any()) desired.Add(new XElement(One + "OE", new XElement(One + "T", new XCData(""))));
+            var line = desired.Element(One + "OE");
+            if (!line.Elements(One + "T").Any()) line.Add(new XElement(One + "T", new XCData("")));
+            if (edit.Restore)
+            {
+                // 用当前容器里的身份恢复原格式，避免把新分配的标题段落再复制一份。
+                desired.SetAttributeValue("objectID", (string)current?.Attribute("objectID"));
+                line.SetAttributeValue("objectID", (string)current?.Element(One + "OE")?.Attribute("objectID"));
+            }
+            AgentLayout.Strip(desired);
+            AgentPageTitle.Remap(desired, page, edit.Restore ? edit.Styles : snapshot.DraftStyles.Elements(), edit.Restore ? edit.Tags : snapshot.DraftTags.Elements());
+            foreach (var id in current?.Descendants(One + "OE").Attributes("objectID").Select(a => a.Value) ?? Enumerable.Empty<string>()) untouched.Remove(id);
+            AgentPageTitle.Put(page, desired);
+            containers.Add(desired);
+            var formatSource = edit.Restore ? edit.Before : before;
+            return new TitleWrite { Before = before, PreserveFormat = formatSource?.Element(One + "OE")?.Elements(One + "T").Any() == true ||
+                (!edit.Restore && (line.Attribute("style") != null || line.Attribute("quickStyleIndex") != null)) };
         }
 
         private static string DesiredSignature(XElement desired, XElement page, string objectId)
@@ -423,6 +488,9 @@ namespace OneNoteCodeHelper.Services.Agent
                 cancellation.ThrowIfCancellationRequested();
                 var xml = _api.GetPageContent(pageId, PageInfo.piBasic);
                 var snapshot = new AgentPageSnapshot(xml, new HashSet<string>(previous.Undo.Select(i => i.ObjectId)), options);
+                if (previous.TitleUndo != null)
+                    snapshot.TitleEdit = new AgentTitleEdit { Before = previous.TitleUndo.Before == null ? null : new XElement(previous.TitleUndo.Before),
+                        Fingerprint = previous.TitleUndo.AfterFingerprint, Restore = true, Styles = previous.TitleUndo.Styles, Tags = previous.TitleUndo.Tags };
                 snapshot.CodeRestores.AddRange(previous.CodeUndo);
                 snapshot.OutlineRestores.AddRange(previous.OutlineUndo);
                 // 表格外观和写入后一致时换回原外观；指纹用写入后的，表格之后又被改过就按冲突跳过。
@@ -455,6 +523,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 report.ConflictIds.AddRange(skipped);
                 if (report.Status == "Verified" && report.Conflicts > 0) report.Status = "PartiallyApplied";
                 report.Message = $"撤销已验证恢复 {report.Applied} 段；" + (report.TextFixes.Count > 0 ? $"还原文字 {report.TextFixes.Count} 处；" : "") +
+                    (report.TitleChanged ? "恢复页面标题；" : "") +
                     (report.MarkdownMarks > 0 ? $"还原 Markdown 符号 {report.MarkdownMarks} 处；" : "") +
                     (report.LinksRemoved > 0 ? $"还原链接 {report.LinksRemoved} 处；" : "") +
                     (previous.OutlineUndo.Count > 0 ? $"恢复文本框结构 {report.Outlines} 个；" : "") +
@@ -814,8 +883,20 @@ namespace OneNoteCodeHelper.Services.Agent
 
         /// <param name="formatted">本次写入格式的段落。它们的列表和标记已按语义核验，这里不再逐字比 XML（OneNote 会补上字号、编号文字、时间）。</param>
         /// <param name="spacingBlanks">本次代码框间隔调整得到的单行空段落；只允许无链接、无换行的空白与空 T 等价，外观另行核验。</param>
-        private static bool ContentPreserved(XElement expected, XElement actual, ISet<string> known, ISet<string> formatted, ISet<XElement> spacingBlanks)
+        private static bool ContentPreserved(XElement expected, XElement actual, ISet<string> known, ISet<string> formatted, ISet<XElement> spacingBlanks, bool separateTitle = false)
         {
+            if (separateTitle)
+            {
+                // 标题已单独核验，允许 Office 补默认样式、重建标题 OE 或省略空标题。
+                // 只排除 Title；正文的身份、顺序、链接和未指定格式仍用原有严格核验。
+                var left = new XElement(expected);
+                var right = new XElement(actual);
+                left.Elements(One + "Title").Remove(); right.Elements(One + "Title").Remove();
+                // 复制后按正文序号对应空行，避免标题段落使序号偏移。
+                var sourceLines = expected.Descendants(One + "OE").Where(e => !e.Ancestors(One + "Title").Any()).ToList();
+                var blanks = new HashSet<XElement>(sourceLines.Zip(left.Descendants(One + "OE"), (a, b) => (a, b)).Where(p => spacingBlanks.Contains(p.a)).Select(p => p.b));
+                return ContentPreserved(left, right, known, formatted, blanks);
+            }
             if (Topology(expected, known) != Topology(actual, known)) return false;
             var before = expected.Descendants(One + "OE").ToList();
             var after = actual.Descendants(One + "OE").ToList();
@@ -860,10 +941,10 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         /// <summary>写入前后页面的段落一一对应（由内容核验保证），按序号找回 OneNote 新建的段落。</summary>
-        private static XElement AtSamePosition(XElement expected, XElement actual, XElement element)
+        private static XElement AtSamePosition(XElement expected, XElement actual, XElement element, bool separateTitle = false)
         {
-            var before = expected.Descendants(One + "OE").ToList();
-            var after = actual.Descendants(One + "OE").ToList();
+            var before = expected.Descendants(One + "OE").Where(e => !separateTitle || !e.Ancestors(One + "Title").Any()).ToList();
+            var after = actual.Descendants(One + "OE").Where(e => !separateTitle || !e.Ancestors(One + "Title").Any()).ToList();
             var index = before.IndexOf(element);
             return index >= 0 && before.Count == after.Count ? after[index] : null;
         }

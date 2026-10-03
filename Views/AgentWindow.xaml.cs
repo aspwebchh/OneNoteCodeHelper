@@ -304,7 +304,9 @@ namespace OneNoteCodeHelper.Views
             {
                 var xml = _api.GetPageContent(_pageId, Microsoft.Office.Interop.OneNote.PageInfo.piBasic);
                 var snapshot = new AgentPageSnapshot(xml, selection, config.Agent);
-                if (!snapshot.Blocks.Any(b => b.Editable || b.CodeCandidate)) throw new AiException("目标范围没有可编辑文字，或所在文本框包含尚未启用的混合内容。");
+                // 当前页即使没有可编辑正文，也允许通过标题工具直接指定页面名称。
+                if (snapshot.SelectionOnly && !snapshot.Blocks.Any(b => b.Editable || b.CodeCandidate))
+                    throw new AiException("目标范围没有可编辑文字，或所在文本框包含尚未启用的混合内容。");
                 if (!AgentTools.FontInstalled(config.Agent.FontFamily))
                     config.Agent.FontFamily = ParagraphStyles.Fonts.FirstOrDefault(AgentTools.FontInstalled)
                         ?? throw new AiException("Agent 默认字体未安装，请在 AI 配置的 Agent/FontFamily 中选择已安装字体。");
@@ -651,6 +653,7 @@ namespace OneNoteCodeHelper.Views
             }
 
             // 执行时列出核验写入的文字修正；撤销时这些修正已经还原，消息里的计数就够了。
+            if (report.TitleChanged) PageText.Text = "目标页面：" + (string.IsNullOrWhiteSpace(report.PageName) ? "当前页" : report.PageName);
             ShowResult("结果", undo || report.TextFixes.Count == 0 ? report.Message
                 : report.Message + "\n修正的文字：\n" + string.Join("\n", report.TextFixes.Select(f => "• " + f)));
         }

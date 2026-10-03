@@ -117,6 +117,14 @@ namespace OneNoteCodeHelper.Services.Agent
             Register("get_page_overview", "获取当前固定页面的段落摘要、保护范围及样式。每页 100 项；通过 offset 翻页。", AgentSchema.Obj(new Dictionary<string, AgentSchema>
             { ["offset"] = AgentSchema.Num(0, 1000, true) }), Overview);
             Register("read_blocks", "完整读取段落正文及样式。修改前必须调用，不能修改受保护段落；传入的受保护段落会跳过，列在 skipped 里并附原因。", WithIds(), Read);
+            if (!snapshot.SelectionOnly)
+                Register("set_page_title", "根据整页内容填写 OneNote 原生标题栏，或按用户明确的改名要求替换原标题。先读完范围内可读取的段落；只改草稿，由 finish_edit 提交。" +
+                    "title 是单行纯文字。默认保留非空原标题；仅用户明确要求重新拟标题或改名时传 replace_existing=true。普通排版或突出正文标题不调用。",
+                    AgentSchema.Obj(new Dictionary<string, AgentSchema>
+                    {
+                        ["snapshot_id"] = AgentSchema.Str(), ["title"] = AgentSchema.Short(MaxInsertChars),
+                        ["replace_existing"] = new AgentSchema { Type = "boolean" }
+                    }, "snapshot_id", "title"), SetPageTitle);
             if (snapshot.Images.Count > 0)
             {
                 var images = SnapshotOnly();
@@ -353,6 +361,7 @@ namespace OneNoteCodeHelper.Services.Agent
             ["get_page_overview"] = "读取页面概况",
             ["read_blocks"] = "读取段落",
             ["set_paragraph_style"] = "设置段落样式",
+            ["set_page_title"] = "设置页面标题",
             ["set_text_style"] = "设置重点文字样式",
             ["fix_text"] = "修正错别字",
             ["strip_markdown"] = "去除 Markdown 符号",
@@ -446,6 +455,10 @@ namespace OneNoteCodeHelper.Services.Agent
                     detail = JoinDetail(PresetName(AiClient.Get(args, "preset_id") as string), CountOf(args, "block_ids"));
                     if (AiClient.Get(outcome, "appearance_only") is IList appearance && appearance.Count > 0)
                         detail = JoinDetail(detail, $"{appearance.Count} 段仅设置外观");
+                    break;
+                case "set_page_title":
+                    detail = (AiClient.Get(outcome, "reason") as string) == "title_exists" ? "保留原标题" :
+                        AiClient.Get(outcome, "changed") is bool titleChanged && !titleChanged ? "标题无需修改" : "已更新标题草稿";
                     break;
                 case "set_text_style":
                     detail = AiClient.Get(args, "targets") is IList targets ? $"{targets.Count} 处" : null;
@@ -594,6 +607,7 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             var spacingBase = _spacingBase.Value;
             _snapshot.Layout = new XElement(spacingBase.Layout);
+            _snapshot.SyncTitleLayout();
             _snapshot.Inserted.RemoveRange(spacingBase.Inserted, _snapshot.Inserted.Count - spacingBase.Inserted);
             _snapshot.LayoutChanges.RemoveRange(spacingBase.Changes, _snapshot.LayoutChanges.Count - spacingBase.Changes);
             _spacingBase = null;
@@ -609,6 +623,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var offset = args.TryGetValue("offset", out var n) ? Convert.ToInt32(n) : 0;
             var items = Ordered();
             return new { snapshot_id = _snapshot.SnapshotId, page_title = _snapshot.Title, scope = _snapshot.SelectionOnly ? "selected_paragraphs" : "page",
+                page_title_edit = Has("set_page_title"), native_page_title = _snapshot.NativeTitle, title_is_empty = string.IsNullOrWhiteSpace(_snapshot.NativeTitle),
                 draft_revision = _snapshot.Revision, presets = ParagraphStyles.Ids, native_headings = _snapshot.Options.EnableNativeHeadings,
                 paragraph_spacing = _snapshot.Options.EnableParagraphSpacing, code_highlight = _snapshot.Options.EnableCodeHighlight,
                 languages = _snapshot.Options.EnableCodeHighlight ? Languages : null,
@@ -713,6 +728,47 @@ namespace OneNoteCodeHelper.Services.Agent
                 runs = AgentLayout.Find(page, b.Id).Elements(OneNoteApi.One + "T").Any(t => t.Value.IndexOf('<') >= 0) ? AgentLayout.Find(page, b.Id).Elements(OneNoteApi.One + "T").Select(t => t.Value).ToArray() : null }).ToArray() };
         }
 
+        private object SetPageTitle(IDictionary<string, object> args)
+        {
+            if (UnreadCount > 0) throw new AiException("请先完整读取范围内所有可读取的段落，再设置页面标题。");
+            var raw = (string)args["title"];
+            if (raw.Any(c => char.IsControl(c) || c == '\u2028' || c == '\u2029')) throw new AiException("页面标题必须是单行纯文字，不能含换行或制表符。");
+            var text = raw.Trim();
+            if (text.Length == 0) throw new AiException("页面标题不能是空白。");
+            System.Xml.XmlConvert.VerifyXmlChars(text);
+            AgentPageTitle.Validate(_snapshot.Page);
+            var original = _snapshot.Page.Element(OneNoteApi.One + "Title");
+            var replace = args.TryGetValue("replace_existing", out var flag) && (bool)flag;
+            if (!replace && !string.IsNullOrWhiteSpace(AgentPageTitle.Text(original)))
+                return new { ok = true, changed = false, reason = "title_exists", draft_revision = _snapshot.Revision };
+            if (_snapshot.NativeTitle == text)
+                return new { ok = true, changed = false, draft_revision = _snapshot.Revision };
+
+            var title = new XElement(_snapshot.CreateDraftPage().Element(OneNoteApi.One + "Title") ?? AgentPageTitle.Empty());
+            var line = title.Element(OneNoteApi.One + "OE");
+            if (line == null) { line = new XElement(OneNoteApi.One + "OE"); title.Add(line); }
+            if (!line.Elements(OneNoteApi.One + "T").Any()) line.Add(new XElement(OneNoteApi.One + "T", new XCData("")));
+            var initial = new XElement(line);
+            RichParagraph.Parse(line).Apply(text);
+            if (RichParagraph.Parse(line).Text != text) throw new AiException("标题草稿与目标文字不一致，没有修改。");
+            var block = _snapshot.Blocks.SingleOrDefault(b => b.IsPageTitle);
+            if (block == null)
+                block = new AgentBlock { Id = "p" + (_snapshot.Blocks.Count + 1), ObjectId = (string)line.Attribute("objectID"), Original = initial,
+                    Text = AgentPageTitle.Text(original), ContainerId = (string)title.Attribute("objectID") ?? "Title", IsPageTitle = true };
+            line.SetAttributeValue(AgentLayout.Key, block.Id);
+            _snapshot.TitleEdit = _snapshot.TitleEdit ?? new AgentTitleEdit { Before = original == null ? null : new XElement(original), Fingerprint = AgentPageTitle.Fingerprint(_snapshot.Page) };
+            _snapshot.TitleEdit.Draft = new XElement(title);
+            block.Draft = new XElement(line);
+            block.TitleTextEdited = true;
+            block.ProtectedReason = null; // 仅开放经标题容器校验的这一段，普通空段落仍受保护。
+            block.Read = true;
+            block.TextFixes.Clear(); block.MarkdownMarks = 0; block.LinksRemoved = 0; block.MarkdownList = null;
+            if (!_snapshot.Blocks.Contains(block)) _snapshot.Blocks.Add(block);
+            AgentPageTitle.Put(_snapshot.Layout, title);
+            _snapshot.Revision++;
+            return new { ok = true, changed = true, draft_revision = _snapshot.Revision, block_id = block.Id, title = text };
+        }
+
         private object Paragraph(IDictionary<string, object> args)
         {
             var blocks = Targets(args);
@@ -722,7 +778,7 @@ namespace OneNoteCodeHelper.Services.Agent
             foreach (var b in blocks)
             {
                 Block(b.Id, true);
-                if (preset == "page_title" && AgentCommitter.Find(_snapshot.Page, b.ObjectId).Parent?.Name != OneNoteApi.One + "Title") throw new AiException("页面标题样式只能用于原标题。");
+                if (preset == "page_title" && !b.IsPageTitle) throw new AiException("页面标题样式只能用于原标题。");
             }
             var (changed, noop, appearanceOnly) = ApplyPreset(blocks.ToDictionary(b => b, b => new XElement(b.Draft)), b => preset, overrides);
             return new { ok = true, draft_revision = _snapshot.Revision, changed, noop, appearance_only = appearanceOnly };
@@ -840,7 +896,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 else if (b.Conversion != null) reason = "converted";
                 else if (!(b.Editable || b.CodeCandidate || b.ProtectedReason == "empty" || b.ProtectedReason == "protected_code")) reason = b.ProtectedReason;
                 // 空行、代码的保护原因会盖掉 ID 和容器的问题，这里补查；段落里有图片等对象的也不动。
-                else if (string.IsNullOrEmpty(b.ObjectId) || _snapshot.Blocks.Count(x => x.ObjectId == b.ObjectId) > 1) reason = "missing_or_duplicate_id";
+                else if (!(b.IsPageTitle && _snapshot.TitleEdit != null) && (string.IsNullOrEmpty(b.ObjectId) || _snapshot.Blocks.Count(x => x.ObjectId == b.ObjectId) > 1)) reason = "missing_or_duplicate_id";
                 else if (!_snapshot.ContainerAllowed(b) || b.Original.Elements().Any(e => e.Name.Namespace != OneNoteApi.One || !allowed.Contains(e.Name.LocalName)))
                     reason = "unsupported_content";
                 if (reason != null) { skipped.Add((id, reason)); continue; }
@@ -850,7 +906,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 // 段落 style 里的加粗、背景色等同样是格式；预设只覆盖字体、字号和颜色，先整个去掉。
                 // 有下级段落时它们会跟着变，由 ApplyPreset 的继承检查回退成只设本段外观。
                 draft.SetAttributeValue("style", null);
-                if (AgentCommitter.Find(_snapshot.Page, b.ObjectId).Parent?.Name == OneNoteApi.One + "Title") titles.Add(b);
+                if (b.IsPageTitle) titles.Add(b);
                 else
                 {
                     if (lists) AgentMarks.SetList(draft, "none");
@@ -874,7 +930,7 @@ namespace OneNoteCodeHelper.Services.Agent
         private AgentBlock MarkTarget(AgentBlock b)
         {
             Block(b.Id, true);
-            if (AgentCommitter.Find(_snapshot.Page, b.ObjectId).Parent?.Name == OneNoteApi.One + "Title") throw new AiException("页面标题不能设置列表或标记。");
+            if (b.IsPageTitle) throw new AiException("页面标题不能设置列表或标记。");
             return b;
         }
 
@@ -1596,6 +1652,7 @@ namespace OneNoteCodeHelper.Services.Agent
             var unread = UnreadBlockIds();
             var present = new HashSet<string>(_snapshot.Layout.Descendants(OneNoteApi.One + "OE").Select(AgentLayout.KeyOf));
             return new { snapshot_id = _snapshot.SnapshotId, draft_revision = _snapshot.Revision,
+                page_title_changed = _snapshot.TitleEdit != null, page_title = _snapshot.NativeTitle,
                 changed = _snapshot.Blocks.Where(b => b.Changed).Select(b => b.Id).ToArray(),
                 text_fixes = _snapshot.Blocks.Where(b => b.TextFixes.Count > 0).Select(b => new { id = b.Id, fixes = b.TextFixes.ToArray() }).ToArray(),
                 markdown_stripped = _snapshot.Blocks.Where(b => b.MarkdownMarks > 0).Select(b => b.Id).ToArray(),

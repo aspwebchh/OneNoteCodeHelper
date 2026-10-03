@@ -175,7 +175,9 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>草稿里 clear_format 去掉的链接处数。写回核验通过后计入结果，撤销时链接一起还原。</summary>
         internal int LinksRemoved;
         /// <summary>草稿改了正文（文字或链接）：只有这样的段落写回时允许正文变化，而且只能变成草稿里的样子。</summary>
-        internal bool TextEdited => TextFixes.Count > 0 || MarkdownMarks > 0 || LinksRemoved > 0;
+        internal bool TextEdited => TitleTextEdited || TextFixes.Count > 0 || MarkdownMarks > 0 || LinksRemoved > 0;
+        internal bool IsPageTitle;
+        internal bool TitleTextEdited;
         /// <summary>为保留下级段落的格式，本段预设只设置外观，保留原有原生样式。</summary>
         internal bool AppearanceOnly;
         internal string CurrentText => TextEdited ? new AgentRichText(Draft).Text : Text;
@@ -233,6 +235,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal readonly List<AgentInserted> Inserted = new List<AgentInserted>();
         /// <summary>撤销时整框换回的文本框。</summary>
         internal readonly List<AgentOutlineUndoItem> OutlineRestores = new List<AgentOutlineUndoItem>();
+        internal AgentTitleEdit TitleEdit;
         /// <summary>
         /// 结构草稿改过的文本框，提交时整框替换。跨框移动、合并连起来的文本框在同一组里，整组写入或整组跳过，
         /// 不会一边写进、一边没删。组内按页面顺序。
@@ -253,7 +256,8 @@ namespace OneNoteCodeHelper.Services.Agent
             }
         }
         internal string PageId => (string)Page.Attribute("ID");
-        internal string Title => (string)Page.Attribute("name") ?? "当前页面";
+        internal string Title => TitleEdit == null ? (string)Page.Attribute("name") ?? "当前页面" : NativeTitle;
+        internal string NativeTitle => AgentPageTitle.Text(CreateDraftPage().Element(One + "Title"));
         internal int Revision;
         internal bool Frozen;
         internal bool SelectionOnly;
@@ -299,7 +303,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 Blocks.Add(new AgentBlock
                 {
                     Id = "p" + (Blocks.Count + 1), ObjectId = objectId, Original = original, Draft = new XElement(original),
-                    Text = text, ProtectedReason = reason, Fingerprint = Fingerprint(oe, Page),
+                    Text = text, ProtectedReason = reason, Fingerprint = Fingerprint(oe, Page), IsPageTitle = container?.Name == One + "Title",
                     ContainerId = container == null ? "" : (string)container.Attribute("objectID") ?? container.Name.LocalName,
                     ParentId = (string)oe.Ancestors(One + "OE").FirstOrDefault()?.Attribute("objectID"),
                     TableId = oe.Ancestors(One + "Table").FirstOrDefault() is XElement table && tableIds.TryGetValue(table, out var tableId) ? tableId : null,
@@ -316,7 +320,7 @@ namespace OneNoteCodeHelper.Services.Agent
         /// <summary>
         /// 段落所在的标题或文本框本身没有保护原因。空行、代码的保护原因会盖掉容器的原因，clear_format 处理这两类段落前另外检查。
         /// </summary>
-        internal bool ContainerAllowed(AgentBlock block) =>
+        internal bool ContainerAllowed(AgentBlock block) => (block.IsPageTitle && TitleEdit != null) ||
             Page.Elements().FirstOrDefault(e => ((string)e.Attribute("objectID") ?? e.Name.LocalName) == block.ContainerId) is XElement container && ContainerReason(container) == null;
 
         /// <summary>容器级的保护原因：只支持标题和文本框；图文混排要开关允许，墨迹、附件等对象所在的整个文本框跳过。</summary>
@@ -413,6 +417,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal XElement CreateDraftPage(XElement layout = null, IDictionary<AgentBlock, XElement> formats = null, XElement styles = null, XElement tags = null, bool applyCodeSpacing = true)
         {
             var page = new XElement(layout ?? Layout);
+            if (TitleEdit?.Draft != null) AgentPageTitle.Put(page, new XElement(TitleEdit.Draft));
             page.Elements(One + "QuickStyleDef").Remove();
             page.Elements(One + "TagDef").Remove();
             page.AddFirst((tags ?? DraftTags).Elements().Concat((styles ?? DraftStyles).Elements()).Select(e => new XElement(e)));
@@ -430,6 +435,12 @@ namespace OneNoteCodeHelper.Services.Agent
                     if (!converted.Contains(AgentLayout.KeyOf(oe) ?? "")) AgentCodeSpacing.Apply(oe);
             }
             return page;
+        }
+
+        /// <summary>撤回代码框间隔草稿时仍保留独立的标题草稿；它不属于正文结构撤回的范围。</summary>
+        internal void SyncTitleLayout()
+        {
+            if (TitleEdit?.Draft != null) AgentPageTitle.Put(Layout, new XElement(TitleEdit.Draft));
         }
 
         /// <summary>
@@ -482,7 +493,7 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool InSelection(XElement oe) => !SelectionOnly || AgentLayout.KeyOf(oe) != null || InSelectedObject(oe);
         internal bool SelectedObjectContains(XElement oe) => !SelectionOnly || InSelectedObject(oe);
 
-        private static bool IsBinary(XElement e) => new[] { "Image", "InkDrawing", "InkWord", "InkParagraph", "InsertedFile", "MediaFile", "FutureObject", "HTMLBlock" }.Contains(e.Name.LocalName);
+        internal static bool IsBinary(XElement e) => new[] { "Image", "InkDrawing", "InkWord", "InkParagraph", "InsertedFile", "MediaFile", "FutureObject", "HTMLBlock" }.Contains(e.Name.LocalName);
         /// <summary>
         /// 代码段落分三种：已在代码框里（单格表格、格内全是等宽段落）的保护不动；整段等宽的待转换为代码框；
         /// 只有部分文字等宽的是行内代码，保守保护整段。不是代码返回 null。
@@ -565,6 +576,7 @@ namespace OneNoteCodeHelper.Services.Agent
         }
 
         internal static string SemanticFormat(XElement oe, XElement page) => SemanticFormat(oe, page, false);
+        internal static string TitleFormat(XElement oe, XElement page) => SemanticFormat(oe, page, false, true);
 
         /// <summary>
         /// 拆开代码框得到的段落、撤销时重建的代码框行：OneNote 会改写代码行的 span 和硬空格，格式跳过空白字符比较，
@@ -572,12 +584,12 @@ namespace OneNoteCodeHelper.Services.Agent
         /// </summary>
         internal static string CodeLineFormat(XElement oe, XElement page) => SemanticFormat(oe, page, true);
 
-        private static string SemanticFormat(XElement oe, XElement page, bool skipWhitespace)
+        private static string SemanticFormat(XElement oe, XElement page, bool skipWhitespace, bool titleSymbolFonts = false)
         {
             var rich = new AgentRichText(oe);
             var index = (string)oe.Attribute("quickStyleIndex");
             var role = (string)page.Elements(One + "QuickStyleDef").FirstOrDefault(d => (string)d.Attribute("index") == index)?.Attribute("name") ?? "p";
-            return rich.Signature(page, true, skipWhitespace: skipWhitespace) + "|" + ((string)oe.Attribute("alignment") ?? "left") + "|" +
+            return rich.Signature(page, true, skipWhitespace: skipWhitespace, titleSymbolFonts: titleSymbolFonts) + "|" + ((string)oe.Attribute("alignment") ?? "left") + "|" +
                 NormalizeSpacing(oe, "spaceBefore") + "|" + NormalizeSpacing(oe, "spaceAfter") + "|" + role + "|" + AgentMarks.Projection(oe, page);
         }
         internal static string BlankFormat(XElement oe, XElement page)
