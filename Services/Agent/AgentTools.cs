@@ -735,7 +735,9 @@ namespace OneNoteCodeHelper.Services.Agent
             if (raw.Any(c => char.IsControl(c) || c == '\u2028' || c == '\u2029')) throw new AiException("页面标题必须是单行纯文字，不能含换行或制表符。");
             var text = raw.Trim();
             if (text.Length == 0) throw new AiException("页面标题不能是空白。");
-            System.Xml.XmlConvert.VerifyXmlChars(text);
+            // 转成工具错误交还模型；XmlException 会越过运行器的工具错误处理，中断整个任务。
+            try { System.Xml.XmlConvert.VerifyXmlChars(text); }
+            catch (System.Xml.XmlException) { throw new AiException("页面标题含有 XML 不允许的字符。"); }
             AgentPageTitle.Validate(_snapshot.Page);
             var original = _snapshot.Page.Element(OneNoteApi.One + "Title");
             var replace = args.TryGetValue("replace_existing", out var flag) && (bool)flag;

@@ -40,6 +40,8 @@ internal static partial class Program
             Rejects("完整读取", () => SetTitle(t, s, "标题")); Read(t, s);
             foreach (var invalid in new[] { "", "   ", "甲\n乙", "甲\r乙", "甲\t乙", "甲\u2028乙", "甲\u2029乙", new string('甲', 501) })
                 Throws(() => SetTitle(t, s, invalid));
+            foreach (var invalid in new[] { "甲￿乙", "甲￾乙" })
+                Rejects("XML 不允许的字符", () => SetTitle(t, s, invalid));
             Equal(0, s.Revision); Equal(null, s.TitleEdit); Equal("", s.NativeTitle);
         });
         Test("blank native title writes escaped text and title-only edits undo without touching body blanks", () =>
