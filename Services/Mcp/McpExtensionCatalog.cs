@@ -22,7 +22,7 @@ namespace OneNoteCodeHelper.Services.Mcp
             var tasks = Fields(paging, "root_id"); tasks["completed"] = new AgentSchema { Type = "boolean" };
             Add("find_tasks", "分批扫描原生待办标记，默认未完成。返回真实对象 ID、页面路径及链接；跳过页面明确说明。", tasks);
             Add("begin_workspace_edit", "建立页面或分区操作草稿。每个草稿只规划一项操作，检查 get_pending_changes 后 finish_edit 才写入。", new Dictionary<string, AgentSchema>());
-            Add("append_content", "在页面下方追加独立文本框，支持空页；只修改草稿。plain/markdown，最多 5000 字和 50 段，服从插入能力开关。", Format(Fields(null, "snapshot_id", "content"), "plain", "markdown"), "snapshot_id", "content", "format");
+            Add("append_content", "在页面下方追加独立文本框，支持空页；只修改草稿。plain/markdown，最多 5000 字和 50 段。", Format(Fields(null, "snapshot_id", "content"), "plain", "markdown"), "snapshot_id", "content", "format");
             Add("insert_content", "在已读取的普通段落前后插入 plain/markdown 内容，检查选区边界，整框核验和撤销。", Format(Position(Fields(null, "snapshot_id", "target_id", "content")), "plain", "markdown"), "snapshot_id", "target_id", "position", "content", "format");
             var replace = Fields(null, "snapshot_id", "block_id", "quote", "replacement"); replace["replacement"].AllowEmpty = true;
             replace["occurrence"] = AgentSchema.Num(1, 100000, true);

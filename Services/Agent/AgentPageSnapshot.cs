@@ -25,19 +25,6 @@ namespace OneNoteCodeHelper.Services.Agent
         internal Action<AgentOptions, int> Set { get; }
     }
 
-    /// <summary>ai-settings.xml 里 Agent 节点的一个开关，默认都是开。</summary>
-    internal sealed class AgentSwitchOption
-    {
-        internal AgentSwitchOption(string key, Func<AgentOptions, bool> get, Action<AgentOptions, bool> set)
-        {
-            Key = key; Get = get; Set = set;
-        }
-
-        internal string Key { get; }
-        internal Func<AgentOptions, bool> Get { get; }
-        internal Action<AgentOptions, bool> Set { get; }
-    }
-
     internal sealed class AgentOptions
     {
         internal const string DefaultFontFamily = "Microsoft YaHei";
@@ -57,40 +44,9 @@ namespace OneNoteCodeHelper.Services.Agent
             new AgentNumberOption("MaxRequestChars", 1000000, 16000, 3000000, o => o.MaxRequestChars, (o, v) => o.MaxRequestChars = v)
         };
 
-        /// <summary>开关项，顺序同 <see cref="Numbers"/>，默认文件里写在 FontFamily 后面。</summary>
-        internal static readonly AgentSwitchOption[] Switches =
-        {
-            new AgentSwitchOption("SendThinking", o => o.SendThinking, (o, v) => o.SendThinking = v),
-            new AgentSwitchOption("ReplayReasoning", o => o.ReplayReasoning, (o, v) => o.ReplayReasoning = v),
-            new AgentSwitchOption("StreamUsage", o => o.StreamUsage, (o, v) => o.StreamUsage = v),
-            // 已经通过 Office16 往返探针；可为其他 Office 构建单独关闭。
-            new AgentSwitchOption("EnableNativeHeadings", o => o.EnableNativeHeadings, (o, v) => o.EnableNativeHeadings = v),
-            new AgentSwitchOption("EnableParagraphSpacing", o => o.EnableParagraphSpacing, (o, v) => o.EnableParagraphSpacing = v),
-            new AgentSwitchOption("EnableMixedOutlines", o => o.EnableMixedOutlines, (o, v) => o.EnableMixedOutlines = v),
-            // 把未高亮的代码转换为插件代码框；关闭时整段等宽代码仍只保护。
-            new AgentSwitchOption("EnableCodeHighlight", o => o.EnableCodeHighlight, (o, v) => o.EnableCodeHighlight = v),
-            // 列表符号、待办等标记和表格外观；关闭时这些只保护、不修改。
-            new AgentSwitchOption("EnableLists", o => o.EnableLists, (o, v) => o.EnableLists = v),
-            new AgentSwitchOption("EnableTags", o => o.EnableTags, (o, v) => o.EnableTags = v),
-            new AgentSwitchOption("EnableTableStyles", o => o.EnableTableStyles, (o, v) => o.EnableTableStyles = v),
-            // 去掉段落里的 Markdown 标记（# 标题、- 列表、**粗体**、`代码`、``` 围栏等），只删标记字符。
-            new AgentSwitchOption("EnableMarkdownCleanup", o => o.EnableMarkdownCleanup, (o, v) => o.EnableMarkdownCleanup = v),
-            // 清除格式：行内格式、段落样式，按需去掉列表、标记和链接，文字不变。
-            new AgentSwitchOption("EnableClearFormat", o => o.EnableClearFormat, (o, v) => o.EnableClearFormat = v),
-            // 改变段落结构的工具：删空行、调整缩进、移动段落、插入段落、把分隔的文字转成表格。
-            new AgentSwitchOption("EnableBlankLineRemoval", o => o.EnableBlankLineRemoval, (o, v) => o.EnableBlankLineRemoval = v),
-            new AgentSwitchOption("EnableIndent", o => o.EnableIndent, (o, v) => o.EnableIndent = v),
-            new AgentSwitchOption("EnableMoves", o => o.EnableMoves, (o, v) => o.EnableMoves = v),
-            new AgentSwitchOption("EnableInsert", o => o.EnableInsert, (o, v) => o.EnableInsert = v),
-            new AgentSwitchOption("EnableTextTables", o => o.EnableTextTables, (o, v) => o.EnableTextTables = v),
-            // 把已有代码框拆成正文段落，整框写回、整框撤销。
-            new AgentSwitchOption("EnableCodeUnwrap", o => o.EnableCodeUnwrap, (o, v) => o.EnableCodeUnwrap = v)
-        };
-
         internal AgentOptions()
         {
             foreach (var option in Numbers) option.Set(this, option.Default);
-            foreach (var option in Switches) option.Set(this, true);
         }
 
         internal int MaxTurns { get; set; }
@@ -98,24 +54,6 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int TimeoutSeconds { get; set; }
         internal int MaxPageChars { get; set; }
         internal int MaxRequestChars { get; set; }
-        internal bool SendThinking { get; set; }
-        internal bool ReplayReasoning { get; set; }
-        internal bool StreamUsage { get; set; }
-        internal bool EnableParagraphSpacing { get; set; }
-        internal bool EnableNativeHeadings { get; set; }
-        internal bool EnableMixedOutlines { get; set; }
-        internal bool EnableCodeHighlight { get; set; }
-        internal bool EnableLists { get; set; }
-        internal bool EnableTags { get; set; }
-        internal bool EnableTableStyles { get; set; }
-        internal bool EnableMarkdownCleanup { get; set; }
-        internal bool EnableBlankLineRemoval { get; set; }
-        internal bool EnableIndent { get; set; }
-        internal bool EnableMoves { get; set; }
-        internal bool EnableInsert { get; set; }
-        internal bool EnableTextTables { get; set; }
-        internal bool EnableClearFormat { get; set; }
-        internal bool EnableCodeUnwrap { get; set; }
         internal string FontFamily { get; set; } = DefaultFontFamily;
 
         /// <summary>打开 Agent 时预填的需求；本次执行仍以需求框中的文字为准。</summary>
@@ -123,7 +61,7 @@ namespace OneNoteCodeHelper.Services.Agent
 
         /// <summary>每一项都是默认值。</summary>
         internal bool IsDefault =>
-            Numbers.All(o => o.Get(this) == o.Default) && Switches.All(o => o.Get(this)) && FontFamily == DefaultFontFamily
+            Numbers.All(o => o.Get(this) == o.Default) && FontFamily == DefaultFontFamily
             && NormalizeRequest(DefaultRequest) == DefaultRequestText;
 
         internal static AgentOptions Parse(XElement element)
@@ -131,7 +69,6 @@ namespace OneNoteCodeHelper.Services.Agent
             var value = new AgentOptions();
             if (element == null) return value;
             foreach (var option in Numbers) option.Set(value, Number(element, option));
-            foreach (var option in Switches) option.Set(value, Boolean(element, option.Key, true));
             var font = (string)element.Element("FontFamily");
             if (ParagraphStyles.Fonts.Contains(font)) value.FontFamily = font;
             var request = NormalizeRequest((string)element.Element("DefaultRequest"));
@@ -139,13 +76,12 @@ namespace OneNoteCodeHelper.Services.Agent
             return value;
         }
 
-        /// <summary>按 DefaultRequest、<see cref="Numbers"/>、FontFamily、<see cref="Switches"/> 的顺序生成 Agent 节点的全部子节点。</summary>
+        /// <summary>按 DefaultRequest、<see cref="Numbers"/>、FontFamily 的顺序生成 Agent 节点的全部子节点。</summary>
         internal IEnumerable<XElement> ToElements()
         {
             yield return new XElement("DefaultRequest", NormalizeRequest(DefaultRequest));
             foreach (var option in Numbers) yield return new XElement(option.Key, option.Get(this));
             yield return new XElement("FontFamily", FontFamily);
-            foreach (var option in Switches) yield return new XElement(option.Key, option.Get(this));
         }
 
         internal static string NormalizeRequest(string request) =>
@@ -153,8 +89,6 @@ namespace OneNoteCodeHelper.Services.Agent
 
         private static int Number(XElement e, AgentNumberOption option) =>
             int.TryParse((string)e.Element(option.Key), out var value) ? Math.Max(option.Min, Math.Min(option.Max, value)) : option.Default;
-        private static bool Boolean(XElement e, string key, bool fallback) =>
-            bool.TryParse((string)e.Element(key), out var value) ? value : fallback;
     }
 
     internal sealed class AgentBlock
@@ -315,7 +249,7 @@ namespace OneNoteCodeHelper.Services.Agent
             if (enforceLimits && (Blocks.Sum(b => b.Editable ? b.Text.Length : 0) > options.MaxPageChars || Blocks.Count > 1000))
                 throw new AiException("页面内容超过 Agent 限额，请选择较小范围后重试。");
             // 待高亮代码也要发给模型读。放不下时按原来的方式只保护，不让整页失败。
-            if (!options.EnableCodeHighlight || Blocks.Sum(b => b.Editable || b.CodeCandidate ? b.Text.Length : 0) > options.MaxPageChars)
+            if (Blocks.Sum(b => b.Editable || b.CodeCandidate ? b.Text.Length : 0) > options.MaxPageChars)
                 foreach (var b in Blocks.Where(b => b.CodeCandidate)) b.ProtectedReason = "protected_code";
         }
 
@@ -325,12 +259,11 @@ namespace OneNoteCodeHelper.Services.Agent
         internal bool ContainerAllowed(AgentBlock block) => (block.IsPageTitle && TitleEdit != null) ||
             Page.Elements().FirstOrDefault(e => ((string)e.Attribute("objectID") ?? e.Name.LocalName) == block.ContainerId) is XElement container && ContainerReason(container) == null;
 
-        /// <summary>容器级的保护原因：只支持标题和文本框；图文混排要开关允许，墨迹、附件等对象所在的整个文本框跳过。</summary>
+        /// <summary>容器级的保护原因：只支持标题和文本框；图文混排可以处理，墨迹、附件等对象所在的整个文本框跳过。</summary>
         private string ContainerReason(XElement container)
         {
             string reason = null;
             if (container == null || !(container.Name == One + "Title" || container.Name == One + "Outline")) reason = "unsupported_container";
-            if (!Options.EnableMixedOutlines && container != null && container.Descendants().Any(IsBinary)) reason = "mixed_outline_not_verified";
             if (container != null && container.Descendants().Any(e => IsBinary(e) && e.Name != One + "Image")) reason = "unsupported_outline_objects";
             return reason;
         }

@@ -61,18 +61,20 @@ internal static partial class Program
         {
             var a = Paragraph("a", "选中文字"); a.SetAttributeValue("selected", "all");
             var api = new FakePage(Page(a, Paragraph("b", "范围外")));
-            var options = new AgentOptions { EnableLists = false, EnableMoves = false };
+            var options = new AgentOptions { MaxToolCalls = 6 };
             using (var s = McpService(api, () => options))
             {
                 var id = McpBegin(s, "selection");
-                options.EnableLists = options.EnableMoves = true;
+                options.MaxToolCalls = 200;
                 api.Page.Descendants().Attributes("selected").Remove();
                 api.Page.SetAttributeValue("ID", "another-page");
                 var overview = McpCall(s, "get_page_overview", new { snapshot_id = id });
-                Equal(1, overview["total"]); Equal(false, overview["list_edit"]); Equal(false, overview["move"]);
+                Equal(1, overview["total"]);
                 Equal("page", McpCall(s, "get_edit_status", new { snapshot_id = id })["page_id"]);
-                Throws(() => McpCall(s, "set_list", new { snapshot_id = id, block_ids = new[] { "p1" }, list = "bullet" }));
                 Throws(() => McpCall(s, "set_page_title", new { snapshot_id = id, title = "标题" }));
+                // 调用上限在 begin_edit 时固定，之后改配置不影响这份草稿。
+                for (var i = 1; i < 6; i++) McpCall(s, "get_page_overview", new { snapshot_id = id });
+                Throws<McpFault>(() => McpCall(s, "get_page_overview", new { snapshot_id = id }));
                 api.Page.SetAttributeValue("ID", "page");
                 Throws<McpFault>(() => McpBegin(s, "selection"));
                 Equal(0, api.Writes);

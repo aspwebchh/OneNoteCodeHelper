@@ -209,9 +209,7 @@ namespace OneNoteCodeHelper.Services.Agent
                         || blanks.Any(b => !snapshot.InSelection(b.Node))) reason = "outside_selection";
                     else if (text.Block != null && text.Block.Editable && !text.Block.Read) reason = "unread_text";
                     else if (blanks.Any(b => !PlainBlank(b) || !IdentityKnown(b, page))) reason = "protected_blank";
-                    else if (gap > 1 && !snapshot.Options.EnableBlankLineRemoval) reason = "removal_disabled";
                     else if (gap > 1 && soft > 0 && text.Block != null && !text.Block.Editable) reason = "protected_text";
-                    else if (gap == 0 && !snapshot.Options.EnableInsert) reason = "insert_disabled";
                     else if (gap == 0 && snapshot.Inserted.Count + result.Inserted.Count >= AgentTools.MaxInserted) reason = "insert_limit";
                     if (reason != null) { result.Skipped.Add(new Skip { TextId = text.Id, CodeId = code.Id, Reason = reason }); continue; }
                     if (gap == 0)
@@ -246,8 +244,6 @@ namespace OneNoteCodeHelper.Services.Agent
             {
                 case "outside_selection": return "交界处不完全在选区内";
                 case "unread_text": return "文字尚未完整读取";
-                case "removal_disabled": return "删除空行能力已关闭";
-                case "insert_disabled": return "插入段落能力已关闭";
                 case "insert_limit": return "插入段落配额已用完";
                 default: return "交界处包含受保护内容";
             }

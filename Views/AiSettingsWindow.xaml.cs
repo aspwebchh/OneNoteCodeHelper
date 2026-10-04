@@ -38,33 +38,9 @@ namespace OneNoteCodeHelper.Views
             ["MaxRequestChars"] = "请求字符上限"
         };
 
-        /// <summary>Agent 开关的显示名和所在分组（0 格式工具、1 结构工具、2 接口兼容），键是 <see cref="AgentOptions.Switches"/> 里的节点名。</summary>
-        private static readonly Dictionary<string, (int Group, string Label)> SwitchLabels = new Dictionary<string, (int, string)>
-        {
-            ["EnableNativeHeadings"] = (0, "原生标题样式"),
-            ["EnableParagraphSpacing"] = (0, "段前段后间距"),
-            ["EnableMixedOutlines"] = (0, "整理图文混排的文本框"),
-            ["EnableCodeHighlight"] = (0, "把代码转成代码框"),
-            ["EnableLists"] = (0, "项目符号和编号列表"),
-            ["EnableTags"] = (0, "待办、重要、问题标记"),
-            ["EnableTableStyles"] = (0, "表格边框和底色"),
-            ["EnableMarkdownCleanup"] = (0, "去除 Markdown 符号"),
-            ["EnableClearFormat"] = (0, "清除格式"),
-            ["EnableBlankLineRemoval"] = (1, "删除多余的空行"),
-            ["EnableIndent"] = (1, "调整缩进层级"),
-            ["EnableMoves"] = (1, "移动段落、合并文本框"),
-            ["EnableInsert"] = (1, "插入摘要、目录、小标题和空行"),
-            ["EnableTextTables"] = (1, "把文字转成表格"),
-            ["EnableCodeUnwrap"] = (1, "拆开代码框"),
-            ["SendThinking"] = (2, "发送思考参数"),
-            ["ReplayReasoning"] = (2, "回传思考内容"),
-            ["StreamUsage"] = (2, "请求用量统计")
-        };
-
         private readonly ObservableCollection<string> _models = new ObservableCollection<string>();
         private readonly ObservableCollection<FunctionItem> _functions = new ObservableCollection<FunctionItem>();
         private readonly Dictionary<string, TextBox> _numberBoxes = new Dictionary<string, TextBox>();
-        private readonly Dictionary<string, CheckBox> _switchBoxes = new Dictionary<string, CheckBox>();
         private readonly FrameworkElement[] _pages;
         /// <summary>界面上一次和文件一致时的内容，和当前的比较判断有没有没保存的修改。</summary>
         private string _snapshot;
@@ -123,7 +99,7 @@ namespace OneNoteCodeHelper.Views
         /// <summary>切到第 index 页（接口、模型、文字功能、Agent）。</summary>
         internal void ShowPage(int index) => PageList.SelectedIndex = index;
 
-        /// <summary>按 AgentOptions 的两张表生成 Agent 页的数值框和开关，表里加了新项界面自动跟上。</summary>
+        /// <summary>按 <see cref="AgentOptions.Numbers"/> 生成 Agent 页的数值框，表里加了新项界面自动跟上。</summary>
         private void BuildAgentOptions()
         {
             foreach (var option in AgentOptions.Numbers)
@@ -147,16 +123,6 @@ namespace OneNoteCodeHelper.Views
                 row.Children.Add(range);
                 AgentNumbersPanel.Children.Add(row);
                 _numberBoxes[option.Key] = box;
-            }
-
-            var groups = new[] { FormatSwitchesPanel, StructureSwitchesPanel, CompatSwitchesPanel };
-            foreach (var option in AgentOptions.Switches)
-            {
-                // 表里新加、这里还没起名的开关放进格式工具，直接显示节点名，不会漏掉。
-                var info = SwitchLabels.TryGetValue(option.Key, out var known) ? known : (0, option.Key);
-                var box = new CheckBox { Content = info.Item2, ToolTip = option.Key, Margin = new Thickness(0, 0, 12, 8) };
-                groups[info.Item1].Children.Add(box);
-                _switchBoxes[option.Key] = box;
             }
         }
 
@@ -183,8 +149,6 @@ namespace OneNoteCodeHelper.Views
 
             foreach (var option in AgentOptions.Numbers)
                 _numberBoxes[option.Key].Text = option.Get(config.Agent).ToString(CultureInfo.InvariantCulture);
-            foreach (var option in AgentOptions.Switches)
-                _switchBoxes[option.Key].IsChecked = option.Get(config.Agent);
             FontPicker.SelectedItem = ParagraphStyles.Fonts.FirstOrDefault(f => f == config.Agent.FontFamily) ?? AgentOptions.DefaultFontFamily;
             AgentDefaultRequestBox.Text = config.Agent.DefaultRequest;
 
@@ -205,7 +169,6 @@ namespace OneNoteCodeHelper.Views
             parts.Add("F" + _functions.Count);
             parts.AddRange(_functions.Select(f => f.Name.Trim() + "\u0002" + NormalizePrompt(f.Prompt) + "\u0002" + f.RemoveExtraBlankLines));
             parts.AddRange(_numberBoxes.Values.Select(b => b.Text.Trim()));
-            parts.AddRange(_switchBoxes.Values.Select(b => (b.IsChecked == true).ToString()));
             return string.Join("\u0001", parts);
         }
 
@@ -527,8 +490,6 @@ namespace OneNoteCodeHelper.Views
                 option.Set(agent, value);
             }
 
-            foreach (var option in AgentOptions.Switches)
-                option.Set(agent, _switchBoxes[option.Key].IsChecked == true);
             agent.FontFamily = FontPicker.SelectedItem as string ?? AgentOptions.DefaultFontFamily;
 
             config = new AiConfig(url, ApiKeyValue.Trim(), timeout, maxTokens,

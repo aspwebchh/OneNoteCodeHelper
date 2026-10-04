@@ -33,7 +33,6 @@ namespace OneNoteCodeHelper.Services.Mcp
             var json = McpJson.Serialize(args.OrderBy(a => a.Key).ToDictionary(a => a.Key, a => a.Value));
             if (PlanJson != null)
             { if (Kind != kind || PlanJson != json) throw new McpFault("workspace_operation_limit", "每个工作区草稿只容纳一项操作，请新建草稿。"); return new { ok = true, draft_revision = 1, changed = false }; }
-            if (!_options.EnableInsert || kind == "move_page" && !_options.EnableMoves) throw new McpFault("capability_disabled", "页面创建、复制或移动能力已关闭。");
             var section = args.TryGetValue("section_id", out var s) ? (string)s : null;
             XElement source = null, desired = null; string sourceSection = null; var sourceLevel = 1;
             string[] warnings = new string[0];

@@ -164,6 +164,14 @@ namespace OneNoteCodeHelper.Services
         private static readonly string[] RootOrder =
             { "ApiUrl", "ApiKey", "TimeoutSeconds", "MaxTokens", "Agent", "Models", "Functions" };
 
+        /// <summary>Agent 节点里已经取消的开关。工具和接口参数现在固定启用，保存时删掉旧文件里的这些节点，免得以为还能关。</summary>
+        private static readonly string[] RetiredAgentKeys =
+        {
+            "SendThinking", "ReplayReasoning", "StreamUsage", "EnableNativeHeadings", "EnableParagraphSpacing", "EnableMixedOutlines",
+            "EnableCodeHighlight", "EnableLists", "EnableTags", "EnableTableStyles", "EnableMarkdownCleanup", "EnableClearFormat",
+            "EnableBlankLineRemoval", "EnableIndent", "EnableMoves", "EnableInsert", "EnableTextTables", "EnableCodeUnwrap"
+        };
+
         internal const string TypoFunctionName = "错别字修复";
 
         internal const string DefaultModelId = "deepseek-v4-flash";
@@ -344,9 +352,8 @@ namespace OneNoteCodeHelper.Services
                     new XElement("TimeoutSeconds", config.TimeoutSeconds),
                     new XComment(" 单次请求最多输出多少 token（含思考过程）。0 表示用接口的默认值 "),
                     new XElement("MaxTokens", config.MaxTokens),
-                    new XComment(" Agent 工具调用：默认启用标题、段间距、图文容器、代码框转换、列表、标记、表格样式、清除格式，以及删空行、缩进、移动（含跨文本框移动和合并文本框）、插入段落、转表格和拆开代码框等结构调整，哪项回存有问题或不想让 Agent 改结构，就把对应的 Enable 开关设为 false。" +
-                        "DefaultRequest 是打开 Agent 时预填的需求，可在执行前修改；工具协议由插件附加。" +
-                        "若接口不接受思考参数，可把 SendThinking 设为 false。旧配置不写此节点也可使用默认值。 "),
+                    new XComment(" Agent 工具调用：格式和结构工具全部启用，按页面内容提供。" +
+                        "DefaultRequest 是打开 Agent 时预填的需求，可在执行前修改；工具协议由插件附加。旧配置不写此节点也可使用默认值。 "),
                     new XElement("Agent", new Agent.AgentOptions().ToElements()),
                     new XComment(" Agent 窗口「模型」下拉里的选项：id 是接口的模型名，下拉里直接显示它 "),
                     new XElement(
@@ -435,7 +442,7 @@ namespace OneNoteCodeHelper.Services
         /// <summary>
         /// 把 config 写进已有的配置文档，只动窗口里能改的部分：
         /// 根节点下的四个值原地改，缺的按默认文件的顺序补上；Models、Functions 保留节点本身，里面整个按 config 重建，
-        /// removeExtraBlankLines 一律明写，不靠「没写时跟同名内置功能走」；Agent 节点已有时改全部已知项，
+        /// removeExtraBlankLines 一律明写，不靠「没写时跟同名内置功能走」；Agent 节点已有时改全部已知项、删掉已取消的开关，
         /// 没有时只在有一项不是默认值时才加，保持旧文件不写这一节也能用的约定。其余节点和注释原样留着。
         /// </summary>
         internal static void Apply(XDocument document, AiConfig config)
@@ -449,6 +456,7 @@ namespace OneNoteCodeHelper.Services
             if (root.Element("Agent") != null || !config.Agent.IsDefault)
             {
                 var agent = Child(root, "Agent", RootOrder);
+                agent.Elements().Where(e => RetiredAgentKeys.Contains(e.Name.LocalName)).Remove();
                 var values = config.Agent.ToElements().ToList();
                 var order = values.Select(e => e.Name.LocalName).ToArray();
                 foreach (var value in values)

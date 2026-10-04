@@ -756,12 +756,12 @@
                         </Grid>
                     </Grid>
 
-                    <!-- ========== Agent：数值和开关按 AgentOptions 的表在后台代码里生成 ========== -->
+                    <!-- ========== Agent：数值项按 AgentOptions 的表在后台代码里生成 ========== -->
                     <ScrollViewer x:Name="AgentPage" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
                         <StackPanel Margin="20,16,20,20">
                             <TextBlock Text="Agent" Style="{StaticResource PageTitle}" />
                             <TextBlock Margin="0,4,0,0" Style="{StaticResource Hint}"
-                                       Text="「自定义排版（Agent）」的默认需求、预算和工具开关。" />
+                                       Text="「自定义排版（Agent）」的默认需求、预算和字体。" />
 
                             <TextBlock Margin="0,18,0,0" Text="默认需求" Style="{StaticResource SectionLabel}" />
                             <TextBox x:Name="AgentDefaultRequestBox"
@@ -788,21 +788,6 @@
                             <TextBlock Margin="0,4,0,8" Style="{StaticResource Hint}"
                                        Text="设置正文、标题等样式时用的字体；没装时自动换成其中已装的一种。" />
                             <ComboBox x:Name="FontPicker" Width="200" HorizontalAlignment="Left" Style="{StaticResource Picker}" />
-
-                            <TextBlock Margin="0,18,0,0" Text="格式工具" Style="{StaticResource SectionLabel}" />
-                            <TextBlock Margin="0,4,0,8" Style="{StaticResource Hint}"
-                                       Text="关掉后对应的内容只保护、不修改。其他 Office 版本回存有问题时可以分别关闭。" />
-                            <UniformGrid x:Name="FormatSwitchesPanel" Columns="2" />
-
-                            <TextBlock Margin="0,14,0,0" Text="结构工具" Style="{StaticResource SectionLabel}" />
-                            <TextBlock Margin="0,4,0,8" Style="{StaticResource Hint}"
-                                       Text="改变段落结构的工具，只在需求里提到时使用。不想让 Agent 动段落结构时全部关掉。" />
-                            <UniformGrid x:Name="StructureSwitchesPanel" Columns="2" />
-
-                            <TextBlock Margin="0,14,0,0" Text="接口兼容" Style="{StaticResource SectionLabel}" />
-                            <TextBlock Margin="0,4,0,8" Style="{StaticResource Hint}"
-                                       Text="兼容接口不接受这些扩展参数时再关掉。模型本身必须支持工具调用。" />
-                            <UniformGrid x:Name="CompatSwitchesPanel" Columns="2" />
                         </StackPanel>
                     </ScrollViewer>
                 </Grid>

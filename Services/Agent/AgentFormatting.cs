@@ -610,11 +610,8 @@ namespace OneNoteCodeHelper.Services.Agent
             css["font-size"] = size.ToString(CultureInfo.InvariantCulture) + "pt";
             css["color"] = color;
             oe.SetAttributeValue("alignment", "left");
-            if (options.EnableParagraphSpacing)
-            {
-                oe.SetAttributeValue("spaceBefore", new[] { 0, 12, 8, 0, 4 }[index]);
-                oe.SetAttributeValue("spaceAfter", new[] { 12, 6, 4, 4, 4 }[index]);
-            }
+            oe.SetAttributeValue("spaceBefore", new[] { 0, 12, 8, 0, 4 }[index]);
+            oe.SetAttributeValue("spaceAfter", new[] { 12, 6, 4, 4, 4 }[index]);
             foreach (var item in overrides)
             {
                 switch (item.Key)

@@ -33,7 +33,6 @@ namespace OneNoteCodeHelper.Services.Mcp
                 var fence = format == "markdown" ? Regex.Match(line, @"^\s*(`{3,}|~{3,})([^\s]*)\s*$") : Match.Empty;
                 if (fence.Success)
                 {
-                    if (!options.EnableCodeHighlight) throw new McpFault("capability_disabled", "代码高亮能力已关闭。");
                     var end = i + 1;
                     while (end < lines.Length && !Regex.IsMatch(lines[end], @"^\s*" + Regex.Escape(fence.Groups[1].Value[0].ToString()) + "{" + fence.Groups[1].Length + @",}\s*$")) end++;
                     if (end == lines.Length) { result.Warnings.Add("unclosed_fence_preserved"); result.Nodes.Add(result.Paragraph(line, "body", options, false)); continue; }
@@ -49,7 +48,6 @@ namespace OneNoteCodeHelper.Services.Mcp
                 }
                 if (format == "markdown" && i + 1 < lines.Length && line.Contains("|") && Regex.IsMatch(lines[i + 1], @"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$"))
                 {
-                    if (!options.EnableTextTables) throw new McpFault("capability_disabled", "表格插入能力已关闭。");
                     var rows = new List<string[]> { Cells(line) }; i++;
                     while (i + 1 < lines.Length && lines[i + 1].Contains("|") && !string.IsNullOrWhiteSpace(lines[i + 1])) rows.Add(Cells(lines[++i]));
                     var columns = rows.Max(r => r.Length);
@@ -63,10 +61,9 @@ namespace OneNoteCodeHelper.Services.Mcp
                 XElement node;
                 if (list.Success)
                 {
-                    if (!options.EnableLists) throw new McpFault("capability_disabled", "列表能力已关闭。");
                     value = list.Groups[3].Value;
                     var todo = Regex.Match(value, @"^\[([ xX])\]\s*(.*)$");
-                    if (todo.Success) { if (!options.EnableTags) throw new McpFault("capability_disabled", "待办标记能力已关闭。"); value = todo.Groups[2].Value; }
+                    if (todo.Success) value = todo.Groups[2].Value;
                     node = result.Paragraph(value, preset, options, true);
                     var numbered = char.IsDigit(list.Groups[2].Value[0]);
                     AgentMarks.SetList(node, numbered ? "number" : "bullet", numbered ? (int?)int.Parse(list.Groups[2].Value.TrimEnd('.')) : null);
@@ -139,7 +136,6 @@ namespace OneNoteCodeHelper.Services.Mcp
                 new AgentRichText(draft); block.Draft = draft; block.TextFixes.Add("正文更新"); snapshot.Revision++;
                 return new { ok = true, draft_revision = snapshot.Revision, changed = true };
             }
-            if (!snapshot.Options.EnableInsert) throw new McpFault("capability_disabled", "插入能力已关闭。");
             if (string.IsNullOrWhiteSpace((string)args["content"])) throw new McpFault("empty_content", "OneNote 不保留全空文本框，请提供正文或使用 insert_blocks 插入空段落。");
             if (name == "append_content" && snapshot.SelectionOnly) throw new McpFault("scope_mismatch", "追加独立文本框只支持整页范围。");
             var content = Parse((string)args["content"], (string)args["format"], snapshot.Options, settings, snapshot.DraftStyles, snapshot.DraftTags);

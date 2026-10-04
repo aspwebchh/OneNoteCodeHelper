@@ -316,7 +316,7 @@ namespace OneNoteCodeHelper.Services.Mcp
                     _entries.Add(snapshot.SnapshotId, entry);
                 }
                 return McpJson.Serialize(new { snapshot_id = snapshot.SnapshotId, instance_id = InstanceId, page_id = snapshot.PageId, page_title = snapshot.Title,
-                    scope, draft_revision = 0, available_tools = Catalog.Tools.Where(t => entry.Session.Tools.Has(t.Name) || McpExtensionCatalog.ContentTools.Contains(t.Name) && (t.Name == "replace_text" || options.EnableInsert && (t.Name != "append_content" || scope == "page"))).Select(t => t.Name).ToArray(),
+                    scope, draft_revision = 0, available_tools = Catalog.Tools.Where(t => entry.Session.Tools.Has(t.Name) || McpExtensionCatalog.ContentTools.Contains(t.Name) && (t.Name != "append_content" || scope == "page")).Select(t => t.Name).ToArray(),
                     max_tool_calls = options.MaxToolCalls, timeout_seconds = options.TimeoutSeconds, expires_at = entry.Expires.ToString("o") });
             }
             finally { lock (_gate) _beginning--; }

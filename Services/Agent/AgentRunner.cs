@@ -14,7 +14,7 @@ namespace OneNoteCodeHelper.Services.Agent
             "文字只能用专门工具修改：用户要求修正错别字时用 fix_text；页面标题另用可用的标题专用工具。fix_text 只改错别字、同音字、形近字和明显的标点误用，不润色、不改写、不改变原意，拿不准的不改。" +
             "先 get_page_overview，按 next_offset 翻页直到没有后续页，再用 read_blocks 分批完整读取范围内所有可读取的段落（正文和待高亮代码，每批最多 100 段）。" +
             "局部需求也要读完范围，但只修改用户指定的目标；格式已正确的段落不用重复修改。统一正文与少量标题层级；用户没有要求时不要加粗或标色正文里的重点，避免全文加粗和彩色。" +
-            "遵守工具返回的原生标题和段间距能力开关。工具失败时根据错误修正，不猜测段落 ID。" +
+            "工具失败时根据错误修正，不猜测段落 ID。" +
             "格式和文字修改都先写草稿；检查 get_pending_changes，unread_count 必须为 0；有未读段落时按 next_read_block_ids 分批读取并完成需求。" +
             "之后单独调用 finish_edit，使用最新 draft_revision，才能真正写入页面。" +
             "finish_edit 必须是该轮唯一工具；每个任务只提交一次。工具结果才代表实际完成情况。无法支持的需求如实说明。";
@@ -174,7 +174,7 @@ namespace OneNoteCodeHelper.Services.Agent
                             continue;
                         }
                         reply.Validate();
-                        messages.Add(reply.ToMessage(options.ReplayReasoning));
+                        messages.Add(reply.ToMessage());
                         if (reply.Calls.Count == 0)
                         {
                             if (!reminded && !last)

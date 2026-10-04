@@ -32,9 +32,8 @@ internal static partial class Program
             Equal("transparent", Css.Read("background:yellow;background-color:none")["background-color"]);
             Equal("yellow", Css.Read("background-color:none;background:yellow")["background-color"]);
         });
-        Test("clearing only a styled parent resets its own text and preserves the child with either native heading setting", () =>
+        Test("clearing only a styled parent resets its own text and preserves the child", () =>
         {
-            foreach (var native in new[] { true, false })
             foreach (var style in new[] { "font-weight:bold", "font-style:italic", "text-decoration:underline line-through", "background:yellow", "vertical-align:super", "vertical-align:sub" })
             foreach (var quick in new[] { false, true })
             {
@@ -48,7 +47,7 @@ internal static partial class Program
                     definition.SetAttributeValue("strikethrough", "true"); definition.SetAttributeValue("superscript", "true");
                     page.AddFirst(definition); parent.SetAttributeValue("quickStyleIndex", "0");
                 }
-                var s = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "parent" }, new AgentOptions { EnableNativeHeadings = native });
+                var s = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "parent" }, new AgentOptions());
                 var t = Tools(s); ReadAll(t, s);
                 var childBefore = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "child"), s.Page);
                 var parentBefore = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "parent"), s.Page);
@@ -65,7 +64,6 @@ internal static partial class Program
         });
         Test("clearing child or parent-child batch overrides paragraph and outline inheritance including empty and multiple T runs", () =>
         {
-            foreach (var native in new[] { true, false })
             foreach (var outline in new[] { true, false })
             foreach (var all in new[] { true, false })
             {
@@ -74,7 +72,7 @@ internal static partial class Program
                 var page = Page(parent);
                 (outline ? page.Element(One + "Outline") : parent).SetAttributeValue("style",
                     "font-family:Calibri;font-size:20pt;color:red;font-weight:bold;font-style:italic;text-decoration:underline line-through;vertical-align:sub;background-color:yellow");
-                var s = new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableNativeHeadings = native, FontFamily = "Arial" });
+                var s = new AgentPageSnapshot(page.ToString(), null, new AgentOptions { FontFamily = "Arial" });
                 var t = Tools(s); ReadAll(t, s);
                 var parentBefore = AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "parent"), s.Page);
                 Clear(t, s, all ? new[] { "p1", "p2", "p3" } : new[] { "p2", "p3" });

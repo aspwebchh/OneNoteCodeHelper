@@ -35,7 +35,7 @@ internal static class WorkspaceProbe
             app.OpenHierarchy(folder, "", out notebook, CreateFileType.cftNotebook);
             var api = new OneNoteApi(app);
             var read = new McpReadService(api, () => null, () => DateTime.UtcNow, () => new AgentOptions());
-            var options = new AgentOptions { EnableInsert = true, EnableMoves = true, EnableLists = true, EnableTags = true, EnableTextTables = true, EnableCodeHighlight = true };
+            var options = new AgentOptions();
             AgentTools.UseInstalledFont(options);
             var settings = new AddInSettings();
             EnsureRecycleBin(app, api, notebook);

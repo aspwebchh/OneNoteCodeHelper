@@ -90,9 +90,9 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 - 需求里要求清除格式（比如「清除所有格式，包括代码外层的框」）时，Agent 用专门的工具一次处理整页或选中的段落，文字一字不改：
   去掉加粗、斜体、下划线、删除线、上下标、颜色、高亮、字体和字号，段落改成正文样式（字体取配置的默认字体，左对齐）；默认同时去掉列表符号、全部标记（含自定义标记）和链接（链接文字保留），
   需求里说要保留哪一项就保留，拆开代码框时也遵守保留链接的要求。行内代码、整段等宽的代码和空行也一起改成正文；页面标题只去掉文字格式，保留标题样式；emoji、符号字体保留，免得显示成方框。
-  只清理父段时，在父段自身的文字上清除格式，保留未处理子段的外观；只清理子段时，也会去掉从父段或文本框继承的格式。关闭原生标题功能时，正文外观仍可清理。
+  只清理父段时，在父段自身的文字上清除格式，保留未处理子段的外观；只清理子段时，也会去掉从父段或文本框继承的格式。
   已有代码框会拆成正文段落：去掉代码框和语法颜色，每个代码行一段，文字、行首缩进和空行不变；普通表格恢复默认外观（显示边框、无标题行、无底色）。
-  列表、标记的开关关闭时这两项照旧保留。结果里写「去掉链接 N 处」「拆开代码框 N 个」，链接数包含已核验拆框时删除的链接，撤销时链接、列表、标记和代码框一起还原。
+  结果里写「去掉链接 N 处」「拆开代码框 N 个」，链接数包含已核验拆框时删除的链接，撤销时链接、列表、标记和代码框一起还原。
   清除继承格式与拆框的真实 OneNote 回存、撤销仍待验收，目前这些修复只通过离线回归。
 - OneNote 已识别出文字的图片（右键能「复制图片中的文本」的），Agent 可以读取图片文字来理解页面，但不修改图片。
 - 需求里明确提到时，还可以调整段落结构：
@@ -114,7 +114,7 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 - 需求只要求「代码块和文字之间保持一个空行，多删少补」时，用专用工具处理同一文本框内代码框与文字的交界，普通表格的单元格各自计算。
   空段落和文字首尾的 Shift+Enter 空行合计保留一行；等宽字体的框外空段落也参与计算，没有时补一行正文空段落。
   文字之间、代码框之间、文本框首尾和代码内部的空行保持原状，不用段间距模拟空行，不调整独立文本框的位置。
-  删除受 `EnableBlankLineRemoval` 控制，补入受 `EnableInsert` 和现有插入配额控制；选区不完整、内容受保护或对应能力关闭时，整处跳过并说明原因。
+  补入受现有插入配额限制；选区不完整、内容受保护或配额用完时，整处跳过并说明原因。
   调整与代码转换、格式修改一起整框核验和撤销；处理中用户编辑过的文本框整体跳过空行调整。
 - 页面标题、代码框和含墨迹等对象的文本框不调整结构；挂到带样式的段落或文本框下面会继承它的样式时，这次缩进、移动或合并不做。
   在「选中段落」范围内，结构调整还必须保留选区外段落和对象的存在、祖先关系及彼此顺序。例如减少缩进会把未选中的后续兄弟段落挂到自己下面时，整次工具调用会被拒绝；需要扩大选区、重开窗口后再执行。已全部选中的表格（有文字的格都选中）和图片属于选区，可以跟着选中段落一起缩进、移动或合并。当前页范围沿用上述结构规则。
@@ -123,7 +123,7 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
   没改的字保留原有格式和链接，代码段落不改。结果里列出每处修正，例如「按装」→「安装」；这些内容只在窗口里显示，不写日志。
 - 需求里要求去掉 Markdown 格式（比如把 AI 回复粘进来后整理）时，Agent 用专门的工具一次处理整页或选中的段落，只删 Markdown 标记字符，其余文字的格式和链接不变：
   行首的 `#` 标题、`>` 引用、`-` `*` `+` 和 `1.` 列表符号（含 `[ ]` 待办框），行内 `` `代码` ``、`**粗体**`、`*斜体*`、`~~删除线~~` 两边的符号。
-  整段只有 ```` ``` ```` 围栏或 `---` 分隔线的段落直接删掉（和删空行一样受 `EnableBlankLineRemoval` 控制，关掉时只清空文字，文本框里至少留一段）。
+  整段只有 ```` ``` ```` 围栏或 `---` 分隔线的段落直接删掉（删不了时只清空文字，文本框里至少留一段）。
   `markdown`/`md` 围栏里的内容照常处理；其他围栏（包括不写语言的）里是代码，不动，可以接着转成代码框。去掉的标记会告诉 Agent，
   它可以据此把原来的 `#` 设为标题、`-` / `1.` 设为列表、`[ ]` 设为待办。`snake_case`、`2 * 3`、`a*b*c` 这类不当强调；链接、图片和表格不处理（表格可以转成表格）。
   围栏保护按执行开始时的完整上下文保留，只选中围栏内部、分批或重复清理也不会改代码；无法解析上下文的文本框或单元格跳过清理。
@@ -156,7 +156,7 @@ Agent 窗口里的三个下拉，选择会记住，下次打开沿用：
 
 ### AI 配置文件
 
-`%APPDATA%\OneNoteCodeHelper\ai-settings.xml`。平时在 Agent 窗口右上角的「AI 配置」里改，配置窗口的每一项都对应这个文件里的一个字段（Agent 页的开关，鼠标停上去能看到对应的节点名）。
+`%APPDATA%\OneNoteCodeHelper\ai-settings.xml`。平时在 Agent 窗口右上角的「AI 配置」里改，配置窗口的每一项都对应这个文件里的一个字段（Agent 页的数值项，鼠标停上去能看到对应的节点名）。
 文件在窗口第一次保存时生成，里面每一项都有注释。想直接改 XML 时，点窗口左下角的「用文本编辑器打开」：
 用系统默认的程序（.xml 关联的编辑器，没有就用记事本）打开，同时关掉窗口，免得两边同时改。
 
@@ -200,33 +200,14 @@ Agent 可在 `AiConfig` 根节点内增加下列配置，也就是「AI 配置�
   <MaxPageChars>200000</MaxPageChars>
   <MaxRequestChars>1000000</MaxRequestChars>
   <FontFamily>Microsoft YaHei</FontFamily>
-  <SendThinking>true</SendThinking>
-  <ReplayReasoning>true</ReplayReasoning>
-  <StreamUsage>true</StreamUsage>
-  <EnableNativeHeadings>true</EnableNativeHeadings>
-  <EnableParagraphSpacing>true</EnableParagraphSpacing>
-  <EnableMixedOutlines>true</EnableMixedOutlines>
-  <EnableCodeHighlight>true</EnableCodeHighlight>
-  <EnableLists>true</EnableLists>
-  <EnableTags>true</EnableTags>
-  <EnableTableStyles>true</EnableTableStyles>
-  <EnableMarkdownCleanup>true</EnableMarkdownCleanup>
-  <EnableClearFormat>true</EnableClearFormat>
-  <EnableBlankLineRemoval>true</EnableBlankLineRemoval>
-  <EnableIndent>true</EnableIndent>
-  <EnableMoves>true</EnableMoves>
-  <EnableInsert>true</EnableInsert>
-  <EnableTextTables>true</EnableTextTables>
-  <EnableCodeUnwrap>true</EnableCodeUnwrap>
 </Agent>
 ```
 
-`EnableCodeHighlight` 设为 `false` 时 Agent 不再把代码转换为代码框，整段等宽的代码只保护、不处理。
-`EnableLists`、`EnableTags`、`EnableTableStyles` 分别控制列表、标记和表格样式工具，设为 `false` 时这些只保护、不修改。
-`EnableMarkdownCleanup` 设为 `false` 时不提供去除 Markdown 标记的工具，`EnableClearFormat` 设为 `false` 时不提供清除格式的工具。
-`EnableBlankLineRemoval`、`EnableIndent`、`EnableMoves`、`EnableInsert`、`EnableTextTables`、`EnableCodeUnwrap` 分别控制删空行、调整缩进、移动段落（含跨文本框移动和合并文本框）、插入段落、转表格和拆开代码框，
-设为 `false` 时不提供对应工具，不想让 Agent 改段落结构时全部关掉。
-读取图片文字没有开关：页面上有 OneNote 识别出文字的图片时才提供，每张最多 4000 字。
+Agent 的工具没有开关，全部启用：原生标题、段前段后间距、图文混排、代码框转换、列表、标记、表格样式、去除 Markdown、清除格式，
+以及删空行、调整缩进、移动段落（含跨文本框移动和合并文本框）、插入段落、转表格和拆开代码框。工具按页面内容提供：
+没有可调整结构的文本框时不提供结构工具，只有一个文本框时不提供合并，没有可编辑表格或代码框时不提供表格样式或拆框，
+只处理选中段落时不提供页面标题；读取图片文字只在页面上有 OneNote 识别出文字的图片时提供，每张最多 4000 字。
+旧配置里的 `Enable...`、`SendThinking`、`ReplayReasoning`、`StreamUsage` 节点不再生效，在「AI 配置」窗口保存时删掉。
 
 `Agent/TimeoutSeconds` 是整个任务的总时限，根节点的 `TimeoutSeconds` 仍是每次 HTTP 请求时限。
 `MaxPageChars` 限制处理范围内的可编辑文字（含待转换的等宽代码；放不下时这些代码只保护、不转换），可设 1000–1000000；
@@ -239,10 +220,8 @@ Agent 可在 `AiConfig` 根节点内增加下列配置，也就是「AI 配置�
 某一轮输出达到根节点的 `MaxTokens`（含思考）被截断时，这一轮的工具不执行，Agent 丢掉这一轮、提醒模型分批后重试，已排的草稿保留；一个任务最多重试 2 次，仍被截断就停止并提示调大 `MaxTokens`（0 表示用接口默认值）或降低思考强度。每轮的结束原因和 token 用量记在日志里。
 
 默认字体可选 `Microsoft YaHei`、`Calibri`、`Arial`；未安装时选择其中已安装的一种。
-`Enable...` 开关默认开启，已有本机 Office16 回存验证；其他 Office 构建如有兼容问题，可分别关闭原生标题、段间距、图文混排、代码框转换、列表、标记、表格样式或清除格式支持。
-`EnableMixedOutlines` 只允许图片和文字混排，不开启墨迹或附件编辑。
-如果兼容接口不接受扩展参数，按其文档关闭 `SendThinking`（不发送 thinking/reasoning_effort）、
-`ReplayReasoning`（不回传 reasoning_content）或 `StreamUsage`（不发送 stream_options）。模型本身仍必须支持工具调用。
+这些工具已有本机 Office16 回存验证。图文混排只允许图片和文字，含墨迹或附件的文本框不编辑。
+Agent 请求固定发送思考参数（thinking/reasoning_effort）和 `stream_options`，并回传 `reasoning_content`；兼容接口需要接受这些参数，模型本身必须支持工具调用。
 Agent 请求失败时按原因提示：401/403 检查 Key 和权限，429 检查限流或额度，502/503 检查网关及模型服务；网关明确返回 `model_not_found` 时提示模型不存在或未开通。
 HTTP 失败不会提交草稿；日志只记录状态和已识别的错误类别，不记录上游错误正文。
 
@@ -417,7 +396,7 @@ Tests/                    独立签名的 net48 测试程序及页面/HTTP 模�
 
 独立 `OneNoteCodeHelper.Mcp.exe` 通过 stdio 接受 Codex 等外部 Agent 调用，再经本机命名管道转给插件。
 真实 OneNote 操作继续复用插件中的草稿、冲突检查、核验和撤销；外部调用不启动内置模型循环、不要求插件 AI API Key。
-插件加载后自动就绪，先打开 OneNote，再启动 MCP 客户端。全部现有 Agent 工具以及会话管理工具均已开放，沿用能力开关和保护范围。另有 16 个外部 MCP 工具提供目录浏览、原生搜索、独立页面／选区读取、待办汇总、正文更新和 Markdown 导入、页面与分区操作、定位及 Markdown／PDF 导出；这些新增工具不加入内置 Agent 目录。
+插件加载后自动就绪，先打开 OneNote，再启动 MCP 客户端。全部现有 Agent 工具以及会话管理工具均已开放，沿用保护范围。另有 16 个外部 MCP 工具提供目录浏览、原生搜索、独立页面／选区读取、待办汇总、正文更新和 Markdown 导入、页面与分区操作、定位及 Markdown／PDF 导出；这些新增工具不加入内置 Agent 目录。
 所有笔记写入仍先规划草稿、检查改动，再提交核验并保留撤销。移动会创建并核验目标副本后将源页放入回收站，页面 ID 可能变化，子页面复制或移动后成为一级页面；复杂对象在写入前拒绝。搜索、读取与待办分页结果绑定当前客户端，保留 5 分钟；结果与撤销记录保留 30 分钟、最多 16 条。
 
 ```powershell

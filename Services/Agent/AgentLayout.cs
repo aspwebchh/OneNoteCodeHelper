@@ -191,7 +191,7 @@ namespace OneNoteCodeHelper.Services.Agent
         {
             var oe = new XElement(One + "OE", new XAttribute(Key, id), new XElement(One + "T", new XCData(OneNoteHtmlEncoder.EncodePlainText(text))));
             ParagraphStyles.Apply(oe, preset, new Dictionary<string, object>(), options);
-            if (options.EnableNativeHeadings) oe.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(styles, ParagraphStyles.Definition(preset, options)));
+            oe.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(styles, ParagraphStyles.Definition(preset, options)));
             if (list != null) AgentMarks.SetList(oe, list);
             return oe;
         }
@@ -225,7 +225,7 @@ namespace OneNoteCodeHelper.Services.Agent
                 foreach (var a in oe.Attributes().Where(a => a.Name.Namespace == Key.Namespace || new[] { "style", "quickStyleIndex", "spaceBefore", "spaceAfter" }.Contains(a.Name.LocalName)).ToList())
                     a.Remove();
                 ParagraphStyles.Apply(oe, "body", new Dictionary<string, object>(), options, false);
-                if (options.EnableNativeHeadings) oe.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(styles, ParagraphStyles.Definition("body", options)));
+                oe.SetAttributeValue("quickStyleIndex", ParagraphStyles.EnsureDefinition(styles, ParagraphStyles.Definition("body", options)));
                 ParagraphStyles.ResetBodyText(oe, options);
                 oe.SetAttributeValue(Key, nextId());
                 return oe;

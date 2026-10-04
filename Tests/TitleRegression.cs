@@ -23,10 +23,10 @@ internal static partial class Program
 
     private static void TestPageTitles()
     {
-        Test("page title tool is page-only and independent of insert and native heading switches", () =>
+        Test("page title tool is page-only", () =>
         {
-            var s = new AgentPageSnapshot(TitlePage().ToString(), null, new AgentOptions { EnableInsert = false, EnableNativeHeadings = false });
-            var t = Tools(s); True(t.Has("set_page_title")); True(!t.Has("insert_blocks"));
+            var s = new AgentPageSnapshot(TitlePage().ToString(), null, new AgentOptions());
+            var t = Tools(s); True(t.Has("set_page_title"));
             True(AgentRunner.SystemPrompt(t).Contains(AgentRunner.PageTitlePrompt));
             var selected = new AgentPageSnapshot(TitlePage().ToString(), new HashSet<string> { "body" }, new AgentOptions());
             var st = Tools(selected); True(!st.Has("set_page_title")); True(!AgentRunner.SystemPrompt(st).Contains(AgentRunner.PageTitlePrompt));

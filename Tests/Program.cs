@@ -97,11 +97,10 @@ internal static partial class Program
             var snapshot = new AgentPageSnapshot(Page(code, Paragraph("a", "text"), Paragraph("b", "secret")).ToString(), new HashSet<string> { "a", "code" }, new AgentOptions());
             Equal(2, snapshot.Blocks.Count); True(!snapshot.Blocks[0].Editable); True(!snapshot.Blocks.Any(b => b.Text == "secret"));
         });
-        Test("mixed Outline is protected until enabled", () =>
+        Test("text beside an image in the same Outline is editable", () =>
         {
             var page = Page(Paragraph("a", "text"), new XElement(One + "OE", new XAttribute("objectID", "image"), new XElement(One + "Image", new XElement(One + "CallbackID", "binary"))));
-            True(!new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableMixedOutlines = false }).Blocks[0].Editable);
-            True(new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableMixedOutlines = true }).Blocks[0].Editable);
+            True(Snapshot(page).Blocks[0].Editable);
         });
         Test("tool requires complete read and rejects unknown fields", () =>
         {
@@ -129,11 +128,6 @@ internal static partial class Program
             var s = Snapshot(p); var t = Tools(s); Read(t, s);
             Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "page_title" });
             Throws(() => Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, preset_id = "page_title" }));
-        });
-        Test("capabilities reject unverified paragraph spacing", () =>
-        {
-            var s = Snapshot(); s.Options.EnableParagraphSpacing = false; var t = Tools(s); Read(t, s);
-            Throws(() => Invoke(t, "set_paragraph_style", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p1" }, preset_id = "body", overrides = new { space_after_pt = 10 } }));
         });
         Test("commit writes once, verifies and records undo", () =>
         {
@@ -411,34 +405,25 @@ internal static partial class Program
             var html = AgentCommitter.Find(api.Page, "a").Element(One + "T").Value;
             Equal("这是重点和斜体", new AgentRichText(AgentCommitter.Find(api.Page, "a")).Text);
             True(html.Contains("font-weight:bold") && html.Contains("font-style:italic"));
-
-            var page = Page(Paragraph("f1", "```"), Paragraph("c", "- item: *x*"), Paragraph("f2", "```"));
-            var off = new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = false }); var o = Tools(off); Read(o, off);
-            var result = Json(Invoke(o, "strip_markdown", new { snapshot_id = off.SnapshotId, block_ids = new[] { "p1", "p2", "p3" } }));
-            True(result.Contains("\"emptied\":[\"p1\",\"p3\"]")); True(result.Contains("\"code_lines\":[\"p2\"]")); True(result.Contains("\"removed_lines\":[]"));
-            var offApi = new FakePage(off.Page); Equal("Verified", new AgentCommitter(offApi).Commit(off, CancellationToken.None).Status);
-            Equal("|- item: *x*|", Texts(offApi.Page));
             // 文本框里只剩分隔线时留一段，清空文字。
             var alone = Snapshot(Page(Paragraph("r", "***"))); var a = Tools(alone); Read(a, alone);
             True(Json(Invoke(a, "strip_markdown", new { snapshot_id = alone.SnapshotId, block_ids = new[] { "p1" } })).Contains("\"emptied\":[\"p1\"]"));
             Equal("", alone.Blocks[0].CurrentText);
         });
-        Test("strip_markdown is a switchable tool with prompt and step text", () =>
+        Test("strip_markdown is registered with prompt and step text", () =>
         {
-            var page = Page(Paragraph("a", "# 标题")).ToString();
-            True(!Tools(new AgentPageSnapshot(page, null, new AgentOptions { EnableMarkdownCleanup = false })).Has("strip_markdown"));
-            var tools = Tools(new AgentPageSnapshot(page, null, new AgentOptions()));
+            var tools = Tools(Snapshot(Page(Paragraph("a", "# 标题"))));
             True(tools.Has("strip_markdown")); True(AgentRunner.SystemPrompt(tools).Contains(AgentRunner.MarkdownPrompt)); True(AgentRunner.SystemPrompt(tools).Contains("highlight_code 转换"));
             Equal(("去除 Markdown 符号 · 3 段 · 删除围栏和分隔线 2 行", AgentStepState.Done),
                 AgentTools.DescribeStep("strip_markdown", "{\"block_ids\":[\"a\"]}", "{\"ok\":true,\"changed\":[{},{},{}],\"removed_lines\":[\"x\",\"y\"]}"));
         });
-        Test("markdown fenced code survives repeated and split cleanup with either removal setting", () =>
+        Test("markdown fenced code survives repeated and split cleanup", () =>
         {
-            foreach (var remove in new[] { true, false }) foreach (var split in new[] { true, false })
+            foreach (var split in new[] { true, false })
             {
                 var page = Page(Paragraph("f1", "```java"), Paragraph("c", "var s = \"**keep**\";"), Paragraph("f2", "```"), Paragraph("h", "# 正文"));
                 var original = Texts(page);
-                var s = new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = remove }); var t = Tools(s); Read(t, s);
+                var s = Snapshot(page); var t = Tools(s); Read(t, s);
                 if (split) Cleanup(t, s, "p1", "p3");
                 Cleanup(t, s, "p1", "p2", "p3", "p4");
                 var revision = s.Revision;
@@ -818,8 +803,6 @@ internal static partial class Program
                 Invoke(selectedTools, "finish_edit", new { snapshot_id = selected.SnapshotId, draft_revision = selected.Revision });
                 Equal("NoChange", selectedTools.Report.Status); Equal(0, selectedTools.Report.UnreadCount);
             }
-            var disabled = new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableCodeHighlight = false });
-            Equal(1, Tools(disabled).UnreadCount);
         });
         Test("coverage excludes generated and converted paragraphs and preserves layout undo", () =>
         {
@@ -1004,7 +987,7 @@ internal static partial class Program
             {
                 var reply = new AgentChatClient(c, "test", "medium", http).CompleteAsync(new List<object>(), new object[0], null, CancellationToken.None).GetAwaiter().GetResult();
                 Equal(12000, reply.Reasoning.Length); Equal("get_page_overview", reply.Calls[0].Name);
-                Equal(reply.Reasoning, (string)((IDictionary<string, object>)reply.ToMessage(true))["reasoning_content"]);
+                Equal(reply.Reasoning, (string)((IDictionary<string, object>)reply.ToMessage())["reasoning_content"]);
             }
         });
         Test("oversized useful SSE output still stops before tools execute", () =>
@@ -1093,9 +1076,22 @@ internal static partial class Program
         });
         Test("configuration absent Agent node preserves defaults", () =>
         {
-            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><MaxTurns>999</MaxTurns><ReplayReasoning>false</ReplayReasoning></Agent></AiConfig>"));
-            Equal(60, c.Agent.MaxTurns); True(!c.Agent.ReplayReasoning); True(c.Agent.EnableMixedOutlines);
+            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><MaxTurns>999</MaxTurns></Agent></AiConfig>"));
+            Equal(60, c.Agent.MaxTurns);
             Equal(24, AgentOptions.Parse(null).MaxTurns); Equal(96, AgentOptions.Parse(null).MaxToolCalls);
+        });
+        Test("retired Agent switches are ignored on read and removed on save", () =>
+        {
+            var document = XDocument.Parse("<AiConfig><Agent><MaxTurns>30</MaxTurns><EnableMoves>false</EnableMoves><EnableLists>false</EnableLists>" +
+                "<SendThinking>false</SendThinking><Unknown>keep</Unknown></Agent></AiConfig>");
+            var config = AiConfigStore.Parse(document.Root);
+            Equal(30, config.Agent.MaxTurns);
+            var tools = Tools(new AgentPageSnapshot(TwoBoxes().ToString(), null, config.Agent));
+            foreach (var name in new[] { "move_blocks", "merge_outlines", "set_list", "insert_blocks" }) True(tools.Has(name));
+            AiConfigStore.Apply(document, config);
+            var agent = document.Root.Element("Agent");
+            True(agent.Element("EnableMoves") == null && agent.Element("EnableLists") == null && agent.Element("SendThinking") == null);
+            Equal("30", (string)agent.Element("MaxTurns")); Equal("keep", (string)agent.Element("Unknown"));
         });
         Test("Agent default request reads legacy configurations and validates complete templates", () =>
         {
@@ -1134,7 +1130,7 @@ internal static partial class Program
         });
         Test("AI settings default request supports normalization, validation and restoring without changing other options", () =>
         {
-            var config = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><DefaultRequest>我的模板</DefaultRequest><MaxTurns>30</MaxTurns><EnableMoves>false</EnableMoves></Agent></AiConfig>"));
+            var config = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><DefaultRequest>我的模板</DefaultRequest><MaxTurns>30</MaxTurns><MaxToolCalls>50</MaxToolCalls></Agent></AiConfig>"));
             var window = new OneNoteCodeHelper.Views.AiSettingsWindow(config, null, IntPtr.Zero);
             try
             {
@@ -1156,7 +1152,7 @@ internal static partial class Program
                 window.RestoreAgentDefaultRequestButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
                 True(Dirty()); True(window.TryBuildConfig(out built));
                 Equal(AgentOptions.DefaultRequestText, built.Agent.DefaultRequest);
-                Equal(30, built.Agent.MaxTurns); True(!built.Agent.EnableMoves);
+                Equal(30, built.Agent.MaxTurns); Equal(50, built.Agent.MaxToolCalls);
                 Equal("我的模板", config.Agent.DefaultRequest);
                 window.AgentDefaultRequestBox.Text = "我的模板"; True(!Dirty());
             }
@@ -1225,10 +1221,9 @@ internal static partial class Program
         Test("AI settings window shows every option and builds the same configuration back", () =>
         {
             var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><ApiUrl>https://gw.test/v1</ApiUrl><ApiKey>k</ApiKey><TimeoutSeconds>90</TimeoutSeconds><MaxTokens>0</MaxTokens>" +
-                "<Agent><MaxTurns>30</MaxTurns><EnableMoves>false</EnableMoves><SendThinking>false</SendThinking><FontFamily>Arial</FontFamily></Agent>" +
+                "<Agent><MaxTurns>30</MaxTurns><MaxToolCalls>50</MaxToolCalls><FontFamily>Arial</FontFamily></Agent>" +
                 "<Models><Model id='m1'/><Model id='m2'/></Models><Functions><Function name='甲' removeExtraBlankLines='true'><Prompt>第一行\n第二行</Prompt></Function><Function name='乙'><Prompt>p</Prompt></Function></Functions></AiConfig>"));
             var window = new OneNoteCodeHelper.Views.AiSettingsWindow(c, null, IntPtr.Zero);
-            Equal(AgentOptions.Switches.Length, window.FormatSwitchesPanel.Children.Count + window.StructureSwitchesPanel.Children.Count + window.CompatSwitchesPanel.Children.Count);
             Equal(AgentOptions.Numbers.Length, window.AgentNumbersPanel.Children.Count);
             var ok = window.TryBuildConfig(out var built);
             Equal("", window.StatusText.Text); True(ok);
@@ -1236,7 +1231,6 @@ internal static partial class Program
             Equal("m1,m2", string.Join(",", built.Models.Select(m => m.Id)));
             Equal("甲=第一行\n第二行=True|乙=p=False", string.Join("|", built.Functions.Select(f => f.Name + "=" + f.Prompt + "=" + f.RemoveExtraBlankLines)));
             foreach (var option in AgentOptions.Numbers) Equal(option.Get(c.Agent), option.Get(built.Agent));
-            foreach (var option in AgentOptions.Switches) Equal(option.Get(c.Agent), option.Get(built.Agent));
             Equal("Arial", built.Agent.FontFamily);
 
             string Rejected() => window.TryBuildConfig(out _) ? "accepted" : window.StatusText.Text;
@@ -1296,13 +1290,6 @@ internal static partial class Program
             Equal("p1", (string)AiClient.Get(((object[])AiClient.Get(mixed, "blocks")).Single(), "id"));
             Equal("p4:protected_code,p5:highlighted_code", string.Join(",", ((object[])AiClient.Get(mixed, "skipped")).Select(x => AiClient.Get(x, "id") + ":" + AiClient.Get(x, "reason"))));
             True(s.Blocks[0].Read && !s.Blocks[3].Read && !s.Blocks[4].Read);
-        });
-        Test("code highlight disabled keeps whole monospace paragraphs protected", () =>
-        {
-            var mono = Paragraph("m", "int x = 1;"); mono.SetAttributeValue("style", "font-family:Consolas");
-            var s = new AgentPageSnapshot(Page(mono).ToString(), null, new AgentOptions { EnableCodeHighlight = false });
-            Equal("protected_code", s.Blocks[0].ProtectedReason);
-            True(!AgentChatClient.Serializer().Serialize(Tools(s).Definitions).Contains("highlight_code"));
         });
         Test("highlight_code converts contiguous paragraphs, verifies and records undo", () =>
         {
@@ -1719,16 +1706,12 @@ internal static partial class Program
             True(AgentRunner.SystemPrompt(t).Contains("read_image_text"));
             True(!Json(Tools(Snapshot()).Definitions).Contains("read_image_text"));
         });
-        Test("switches remove list, tag and table tools and their prompts", () =>
+        Test("list, tag and table tools and their prompts are registered", () =>
         {
-            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><EnableTags>false</EnableTags></Agent></AiConfig>"));
-            True(!c.Agent.EnableTags); True(c.Agent.EnableLists); True(c.Agent.EnableTableStyles);
-            var off = Tools(new AgentPageSnapshot(GridPage().ToString(), null, new AgentOptions { EnableLists = false, EnableTags = false, EnableTableStyles = false }));
-            var defs = Json(off.Definitions); var prompt = AgentRunner.SystemPrompt(off);
-            True(!defs.Contains("set_list") && !defs.Contains("set_tag") && !defs.Contains("set_table_style"));
-            True(!prompt.Contains("set_list") && !prompt.Contains("set_tag") && !prompt.Contains("set_table_style"));
             var on = Tools(Snapshot(GridPage()));
-            True(Json(on.Definitions).Contains("set_table_style")); True(AgentRunner.SystemPrompt(on).Contains("set_list"));
+            var defs = Json(on.Definitions); var prompt = AgentRunner.SystemPrompt(on);
+            True(defs.Contains("set_list") && defs.Contains("set_tag") && defs.Contains("set_table_style"));
+            True(prompt.Contains("set_list") && prompt.Contains("set_tag") && prompt.Contains("set_table_style"));
         });
         Test("step descriptions for list, tag, table and image tools", () =>
         {
@@ -1819,7 +1802,7 @@ internal static partial class Program
             var cell = Snapshot(Page(table)); var ct = Tools(cell); Read(ct, cell); Equal(2, AiClient.Get(Normalize(ct, cell), "inserted_paragraphs"));
             Equal("Verified", new AgentCommitter(new FakePage(cell.Page)).Commit(cell, CancellationToken.None).Status);
         });
-        Test("code spacing respects selection boundaries, protected blanks and disabled capabilities", () =>
+        Test("code spacing respects selection boundaries and protected blanks", () =>
         {
             var page = Page(Paragraph("a", "正文"), Paragraph("e1", ""), Paragraph("e2", ""), SpacingBox("code"), Paragraph("b", "结尾"));
             var selected = new AgentPageSnapshot(page.ToString(), new HashSet<string> { "a", "e1", "code1", "code3" }, new AgentOptions());
@@ -1833,14 +1816,6 @@ internal static partial class Program
             var pt = Tools(protectedPage); Read(pt, protectedPage); True(Json(Normalize(pt, protectedPage)).Contains("protected_blank")); Equal(0, protectedPage.Revision);
             var singleMarked = Snapshot(Page(Paragraph("a", "正文"), new XElement(marked), SpacingBox("code")));
             var mt = Tools(singleMarked); Read(mt, singleMarked); True(Json(Normalize(mt, singleMarked)).Contains("protected_blank")); Equal(0, singleMarked.Revision);
-            foreach (var removing in new[] { true, false })
-            {
-                var p = removing ? Page(Paragraph("a", "正文<br><br>"), SpacingBox("c")) : Page(Paragraph("a", "正文"), SpacingBox("c"));
-                var off = new AgentPageSnapshot(p.ToString(), null, new AgentOptions { EnableBlankLineRemoval = !removing, EnableInsert = removing });
-                var ot = Tools(off); Read(ot, off); True(Json(Normalize(ot, off)).Contains(removing ? "removal_disabled" : "insert_disabled")); Equal(0, off.Revision);
-            }
-            var disabled = Tools(new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = false, EnableInsert = false }));
-            True(!disabled.Has("normalize_code_spacing")); True(!AgentRunner.SystemPrompt(disabled).Contains("normalize_code_spacing"));
         });
         Test("code spacing soft edits skip the entire conflicted frame while independent style changes can commit", () =>
         {
@@ -1903,7 +1878,7 @@ internal static partial class Program
             var other = Snapshot(Page(Paragraph("a", "正文"), ordinary, Paragraph("b", "正文"), empty)); var ot = Tools(other); Read(ot, other);
             Normalize(ot, other); Equal(0, other.Revision);
             var raw = Paragraph("raw", "print(1)"); raw.SetAttributeValue("style", "font-family:Consolas");
-            var rawPage = new AgentPageSnapshot(Page(Paragraph("a", "正文"), raw, Paragraph("b", "结尾")).ToString(), null, new AgentOptions { EnableCodeHighlight = false });
+            var rawPage = Snapshot(Page(Paragraph("a", "正文"), raw, Paragraph("b", "结尾")));
             var rt = Tools(rawPage); Read(rt, rawPage); Normalize(rt, rawPage); Equal(0, rawPage.Revision);
         });
         Test("code spacing follows cross-frame groups and detects corrupted readback and cancellation", () =>
@@ -2427,14 +2402,12 @@ internal static partial class Program
         });
         Test("blank cleanup is available before insertion and removes generated blanks in the same task", () =>
         {
-            foreach (var removal in new[] { false, true }) foreach (var insertion in new[] { false, true }) foreach (var existing in new[] { false, true })
+            foreach (var existing in new[] { false, true })
             {
-                var page = existing ? Page(Paragraph("a", "正文"), Paragraph("e", "")) : Page(Paragraph("a", "正文"));
-                var tools = Tools(new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = removal, EnableInsert = insertion }));
-                var available = removal && (insertion || existing);
-                Equal(available, tools.Has("remove_blank_lines"));
-                Equal(available, AiClient.Get(AgentChatClient.Parse(Json(Invoke(tools, "get_page_overview", new { }))), "blank_lines"));
-                Equal(available, AgentRunner.SystemPrompt(tools).Contains(AgentRunner.BlankLinePrompt));
+                var tools = Tools(Snapshot(existing ? Page(Paragraph("a", "正文"), Paragraph("e", "")) : Page(Paragraph("a", "正文"))));
+                True(tools.Has("remove_blank_lines"));
+                Equal(true, AiClient.Get(AgentChatClient.Parse(Json(Invoke(tools, "get_page_overview", new { }))), "blank_lines"));
+                True(AgentRunner.SystemPrompt(tools).Contains(AgentRunner.BlankLinePrompt));
             }
             var s = Snapshot(); var t = Tools(s); Read(t, s);
             InsertBlanks(t, s, "p1", 2);
@@ -2763,19 +2736,13 @@ internal static partial class Program
             Equal("bullet|none|none|none", string.Join("|", api.Page.Descendants(One + "OE").Select(AgentMarks.ListKind)));
             Equal("已有列表|第一段||第二段", Texts(api.Page)); True(AgentCommitter.Find(api.Page, "a") == null && AgentCommitter.Find(api.Page, "b") != null);
         });
-        Test("switches remove structure tools and prompts; step descriptions", () =>
+        Test("structure tools and prompts are registered; step descriptions", () =>
         {
-            var names = new[] { "remove_blank_lines", "set_indent", "move_blocks", "insert_blocks", "text_to_table" };
-            var page = Page(Paragraph("a", "正文"), Paragraph("e", ""));
-            var off = Tools(new AgentPageSnapshot(page.ToString(), null, new AgentOptions { EnableBlankLineRemoval = false, EnableIndent = false, EnableMoves = false, EnableInsert = false, EnableTextTables = false }));
-            var on = Tools(Snapshot(page));
-            foreach (var name in names)
+            var on = Tools(Snapshot(Page(Paragraph("a", "正文"), Paragraph("e", ""))));
+            foreach (var name in new[] { "remove_blank_lines", "set_indent", "move_blocks", "insert_blocks", "text_to_table" })
             {
-                True(!Json(off.Definitions).Contains(name)); True(!AgentRunner.SystemPrompt(off).Contains(name));
                 True(Json(on.Definitions).Contains(name)); True(AgentRunner.SystemPrompt(on).Contains(name));
             }
-            var c = AiConfigStore.Parse(XElement.Parse("<AiConfig><Agent><EnableMoves>false</EnableMoves></Agent></AiConfig>"));
-            True(!c.Agent.EnableMoves); True(c.Agent.EnableInsert && c.Agent.EnableIndent && c.Agent.EnableBlankLineRemoval && c.Agent.EnableTextTables);
             Equal(("删除空行 · 3 行", AgentStepState.Done), AgentTools.DescribeStep("remove_blank_lines", "{\"mode\":\"collapse\"}", "{\"ok\":true,\"removed\":[\"p1\",\"p2\",\"p3\"]}"));
             Equal(("调整缩进 · 增加缩进 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("set_indent", "{\"block_ids\":[\"a\",\"b\"],\"direction\":\"in\"}", "{\"ok\":true}"));
             Equal(("移动段落 · 3 段", AgentStepState.Done), AgentTools.DescribeStep("move_blocks", "{\"block_ids\":[\"a\",\"b\",\"c\"]}", "{\"ok\":true}"));
@@ -3169,12 +3136,10 @@ internal static partial class Program
             var undo = c.Undo(s.PageId, r, s.Options, CancellationToken.None);
             Equal("Verified", undo.Status); Equal("甲一|甲二", BoxTexts(api.Page, "A")); Equal("乙一|乙一细节|乙二", BoxTexts(api.Page, "B"));
         });
-        Test("merge_outlines needs two editable boxes and the move switch; step description", () =>
+        Test("merge_outlines needs two editable boxes; step description", () =>
         {
             True(Json(Tools(Snapshot(TwoBoxes())).Definitions).Contains("merge_outlines")); True(AgentRunner.SystemPrompt(Tools(Snapshot(TwoBoxes()))).Contains("merge_outlines"));
             True(!Json(Tools(Snapshot()).Definitions).Contains("merge_outlines"));
-            var off = Tools(new AgentPageSnapshot(TwoBoxes().ToString(), null, new AgentOptions { EnableMoves = false }));
-            True(!Json(off.Definitions).Contains("merge_outlines")); True(!Json(off.Definitions).Contains("move_blocks")); True(!AgentRunner.SystemPrompt(off).Contains("merge_outlines"));
             Equal(("合并文本框 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"]}"));
             Equal(("合并文本框 · 2 段 · 还剩 1 个", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"],\"mergeable_left\":1}"));
             Equal(("合并文本框 · 2 段", AgentStepState.Done), AgentTools.DescribeStep("merge_outlines", "{\"source_id\":\"B\"}", "{\"ok\":true,\"moved\":[\"p1\",\"p2\"],\"mergeable_left\":0}"));
@@ -3202,8 +3167,6 @@ internal static partial class Program
             Equal(("插入段落 · 空行 2 行", AgentStepState.Done), AgentTools.DescribeStep("insert_blocks", "{\"paragraphs\":[{\"blank\":true},{\"blank\":true}]}", "{\"ok\":true}"));
             True(AgentRunner.SystemPrompt(Tools(Snapshot(TwoBoxes()))).Contains(AgentRunner.MergeBlankPrompt));
             True(!AgentRunner.SystemPrompt(Tools(Snapshot())).Contains(AgentRunner.MergeBlankPrompt));
-            var off = Tools(new AgentPageSnapshot(TwoBoxes().ToString(), null, new AgentOptions { EnableInsert = false }));
-            True(off.Has("merge_outlines")); True(!off.Has("insert_blocks")); True(!AgentRunner.SystemPrompt(off).Contains(AgentRunner.MergeBlankPrompt));
         });
         ReviewRegressions();
         ClearFormatTests();
@@ -3277,19 +3240,16 @@ internal static partial class Program
         });
         Test("native heading remains available when a child has its own style", () =>
         {
-            foreach (var native in new[] { true, false })
-            {
-                var child = Paragraph("b", "子段"); child.SetAttributeValue("quickStyleIndex", "0");
-                var parent = Paragraph("a", "父标题"); parent.Add(new XElement(One + "OEChildren", child));
-                var page = Page(parent); var definition = ParagraphStyles.Definition("body", new AgentOptions()); definition.SetAttributeValue("index", "0"); page.AddFirst(definition);
-                var s = Snapshot(page); s.Options.EnableNativeHeadings = native; var t = Tools(s); Read(t, s); Style(t, s);
-                True(!s.Blocks[0].AppearanceOnly);
-                var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
-                Equal("Verified", done.Status); Equal(0, done.AppearanceOnly.Count);
-                Equal(native, AgentCommitter.Find(api.Page, "a").Attribute("quickStyleIndex") != null);
-                Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "b"), s.Page), AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page));
-                Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
-            }
+            var child = Paragraph("b", "子段"); child.SetAttributeValue("quickStyleIndex", "0");
+            var parent = Paragraph("a", "父标题"); parent.Add(new XElement(One + "OEChildren", child));
+            var page = Page(parent); var definition = ParagraphStyles.Definition("body", new AgentOptions()); definition.SetAttributeValue("index", "0"); page.AddFirst(definition);
+            var s = Snapshot(page); var t = Tools(s); Read(t, s); Style(t, s);
+            True(!s.Blocks[0].AppearanceOnly);
+            var api = new FakePage(s.Page); var c = new AgentCommitter(api); var done = c.Commit(s, CancellationToken.None);
+            Equal("Verified", done.Status); Equal(0, done.AppearanceOnly.Count);
+            True(AgentCommitter.Find(api.Page, "a").Attribute("quickStyleIndex") != null);
+            Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, "b"), s.Page), AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, "b"), api.Page));
+            Equal("Verified", c.Undo(s.PageId, done, s.Options, CancellationToken.None).Status);
         });
         Test("nested heading batch isolates only the affected parent and preserves drafts on rejection", () =>
         {
@@ -3654,7 +3614,7 @@ internal static partial class Program
             foreach (var id in new[] { "title", "blank" })
                 Equal(AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(s.Page, id), s.Page), AgentPageSnapshot.SemanticFormat(AgentCommitter.Find(api.Page, id), api.Page));
         });
-        Test("clear_format keeps lists, tags and links on request or when their switches are off; all-protected targets change nothing", () =>
+        Test("clear_format keeps lists, tags and links on request; all-protected targets change nothing", () =>
         {
             var s = Snapshot(ClearPage()); var t = Tools(s); ReadAll(t, s);
             var result = Invoke(t, "clear_format", new { snapshot_id = s.SnapshotId, block_ids = new[] { "p2" }, lists = false, tags = false, links = false });
@@ -3662,16 +3622,9 @@ internal static partial class Program
             var draft = s.Blocks.Single(b => b.Id == "p2").Draft;
             Equal("bullet", AgentMarks.ListKind(draft)); Equal(2, draft.Elements(One + "Tag").Count());
             True(draft.Element(One + "T").Value.Contains("<a href")); True(!draft.Element(One + "T").Value.Contains("bold"));
-            var off = new AgentPageSnapshot(ClearPage().ToString(), null, new AgentOptions { EnableLists = false, EnableTags = false });
-            var tools = Tools(off); ReadAll(tools, off);
-            Equal("lists,tags", string.Join(",", (string[])ToolField(Clear(tools, off, "p2"), "kept_by_settings")));
-            var kept = off.Blocks.Single(b => b.Id == "p2").Draft;
-            Equal("bullet", AgentMarks.ListKind(kept)); Equal(2, kept.Elements(One + "Tag").Count()); True(!kept.Element(One + "T").Value.Contains("<a"));
             var fresh = Snapshot(ClearPage());
             Rejects("unwrap_code", () => Clear(Tools(fresh), fresh, "p6", "p7"));
             Equal(0, fresh.Revision);
-            var disabled = Tools(new AgentPageSnapshot(ClearPage().ToString(), null, new AgentOptions { EnableClearFormat = false, EnableCodeUnwrap = false }));
-            True(!disabled.Has("clear_format")); True(!disabled.Has("unwrap_code"));
         });
         Test("clearing a parent keeps the inherited look of an untouched child", () =>
         {

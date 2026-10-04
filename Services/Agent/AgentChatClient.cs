@@ -88,16 +88,16 @@ namespace OneNoteCodeHelper.Services.Agent
         internal int ReasoningLength => ReasoningBuffer.Length;
         internal string FinishReason;
         internal bool Done;
-        /// <summary>接口返回的 usage，只用来写日志；没开 StreamUsage 或接口不给时为 null。</summary>
+        /// <summary>接口返回的 usage，只用来写日志；接口不给时为 null。</summary>
         internal object Usage;
         /// <summary>输出达到 max_tokens 被截断。本轮工具不能执行，但草稿没动，由 <see cref="AgentRunner"/> 决定是否提醒模型分批重试。</summary>
         internal bool Truncated => FinishReason == "length";
         internal readonly SortedDictionary<int, AgentToolCall> Calls = new SortedDictionary<int, AgentToolCall>();
-        internal object ToMessage(bool replayReasoning)
+        internal object ToMessage()
         {
             var message = new Dictionary<string, object> { ["role"] = "assistant", ["content"] = ContentLength == 0 ? null : Content };
             if (Calls.Count > 0) message["tool_calls"] = Calls.Values.Select(c => c.ToMessage()).ToArray();
-            if (replayReasoning) message["reasoning_content"] = Reasoning;
+            message["reasoning_content"] = Reasoning;
             return message;
         }
         internal void Validate()
@@ -162,9 +162,8 @@ namespace OneNoteCodeHelper.Services.Agent
         public async Task<AgentReply> CompleteAsync(List<object> messages, object[] tools, IProgress<AgentProgress> progress, CancellationToken cancellation)
         {
             var body = new Dictionary<string, object> { ["model"] = _model, ["messages"] = messages, ["tools"] = tools,
-                ["tool_choice"] = "auto", ["stream"] = true };
-            if (_config.Agent.StreamUsage) body["stream_options"] = new { include_usage = true };
-            if (_config.Agent.SendThinking) AiEfforts.ApplyTo(body, _effort);
+                ["tool_choice"] = "auto", ["stream"] = true, ["stream_options"] = new { include_usage = true } };
+            AiEfforts.ApplyTo(body, _effort);
             if (_config.MaxTokens > 0) body["max_tokens"] = _config.MaxTokens;
             var json = AgentJson.Serialize(body);
             if (json.Length > _config.Agent.MaxRequestChars)

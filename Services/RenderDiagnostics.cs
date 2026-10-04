@@ -300,12 +300,12 @@ namespace OneNoteCodeHelper.Services
             return System.IO.File.ReadAllText(path);
         }
 
-        /// <summary>按一份 ai-settings.xml 读出的配置概要：地址|Key|超时|MaxTokens|模型|Agent 轮数|移动开关|字体。</summary>
+        /// <summary>按一份 ai-settings.xml 读出的配置概要：地址|Key|超时|MaxTokens|模型|Agent 轮数|工具调用次数|字体。</summary>
         internal static string DescribeAiConfig(string configXml)
         {
             var c = AiConfigStore.Parse(XElement.Parse(configXml));
             return string.Join("|", c.ApiUrl, c.ApiKey, c.TimeoutSeconds, c.MaxTokens,
-                string.Join(",", c.Models.Select(m => m.Id)), c.Agent.MaxTurns, c.Agent.EnableMoves, c.Agent.FontFamily);
+                string.Join(",", c.Models.Select(m => m.Id)), c.Agent.MaxTurns, c.Agent.MaxToolCalls, c.Agent.FontFamily);
         }
 
         /// <summary>

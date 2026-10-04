@@ -76,7 +76,7 @@ internal static class Probe
             api.UpdatePageContent(page.ToString(SaveOptions.DisableFormatting), AgentPageSnapshot.Modified(initial));
             var beforeXml = api.GetPageContent(pageId, PageInfo.piBasic);
             File.WriteAllText(Path.Combine(directory, "before.xml"), beforeXml);
-            var snapshot = new AgentPageSnapshot(beforeXml, null, new AgentOptions { EnableParagraphSpacing = true, EnableMixedOutlines = true });
+            var snapshot = new AgentPageSnapshot(beforeXml, null, new AgentOptions());
             foreach (var b in snapshot.Blocks) Console.WriteLine("Probe block " + b.Id + ": " + (b.ProtectedReason ?? "editable") + ", chars=" + b.Text.Length);
             var tools = new AgentTools(snapshot, new AgentCommitter(api), CancellationToken.None);
             var editable = snapshot.Blocks.Where(b => b.Editable).ToList();

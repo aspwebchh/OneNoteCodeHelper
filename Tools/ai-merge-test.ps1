@@ -366,23 +366,25 @@ Assert-Equal '保存：根节点外和节点前的注释保留' ($applied.Contai
 Assert-Equal '保存：窗口里没有的节点保留' $appliedXml.SelectSingleNode('/AiConfig/Custom[@keep="1"]').InnerText '手写的节点'
 Assert-Equal '保存：缺的节点按默认顺序补上' (Get-ChildNames $appliedXml.AiConfig) 'ApiUrl|ApiKey|TimeoutSeconds|MaxTokens|Custom|Models|Functions'
 Assert-Equal '保存：读回的值和窗口一致' (Invoke-Diag 'DescribeAiConfig' @($applied)) `
-    'https://new.example/v1|sk-test|120|16384|m1,m2|24|True|Microsoft YaHei'
+    'https://new.example/v1|sk-test|120|16384|m1,m2|24|96|Microsoft YaHei'
 Assert-Equal '保存：删空行一律明写' `
     (@($appliedXml.SelectNodes('/AiConfig/Functions/Function') | ForEach-Object { $_.GetAttribute('removeExtraBlankLines') }) -join '|') 'false|false'
 Assert-Equal '保存：删空行读回一致' (Invoke-Diag 'DescribeAiFunctions' @($applied)) '错别字修复=False|排版优化=False'
 Assert-Equal '保存：原来没有 Agent 节点、全是默认值时不加' ($null -eq $appliedXml.SelectSingleNode('/AiConfig/Agent')) $true
 
-$agentOff = $edited.Replace('</AiConfig>', '<Agent><EnableMoves>false</EnableMoves></Agent></AiConfig>')
-$appliedXml = [xml](Invoke-Diag 'ApplyAiConfig' @($handWritten, $agentOff))
+$agentChanged = $edited.Replace('</AiConfig>', '<Agent><MaxToolCalls>50</MaxToolCalls></Agent></AiConfig>')
+$appliedXml = [xml](Invoke-Diag 'ApplyAiConfig' @($handWritten, $agentChanged))
 Assert-Equal '保存：Agent 有一项不是默认值时才加节点，写全部项' `
     (Get-ChildNames $appliedXml.AiConfig.Agent) (Get-ChildNames $defaultXml.AiConfig.Agent)
 Assert-Equal '保存：Agent 节点放在默认位置' (Get-ChildNames $appliedXml.AiConfig) 'ApiUrl|ApiKey|TimeoutSeconds|MaxTokens|Agent|Custom|Models|Functions'
-Assert-Equal '保存：Agent 开关读回一致' (Invoke-Diag 'DescribeAiConfig' @($appliedXml.OuterXml)).Split('|')[6] 'False'
+Assert-Equal '保存：Agent 数值读回一致' (Invoke-Diag 'DescribeAiConfig' @($appliedXml.OuterXml)).Split('|')[6] '50'
 
-$partialAgent = $handWritten.Replace('<Custom', '<Agent><MaxTurns>30</MaxTurns><Unknown>x</Unknown></Agent><Custom')
+$partialAgent = $handWritten.Replace('<Custom', '<Agent><MaxTurns>30</MaxTurns><Unknown>x</Unknown><EnableMoves>false</EnableMoves><SendThinking>false</SendThinking></Agent><Custom')
 $appliedXml = [xml](Invoke-Diag 'ApplyAiConfig' @($partialAgent, $edited))
 Assert-Equal '保存：已有的 Agent 节点改全部已知项，未知项保留' `
-    ('{0}|{1}|{2}' -f $appliedXml.AiConfig.Agent.MaxTurns, $appliedXml.AiConfig.Agent.Unknown, $appliedXml.AiConfig.Agent.EnableTextTables) '24|x|true'
+    ('{0}|{1}|{2}' -f $appliedXml.AiConfig.Agent.MaxTurns, $appliedXml.AiConfig.Agent.Unknown, $appliedXml.AiConfig.Agent.FontFamily) '24|x|Microsoft YaHei'
+Assert-Equal '保存：已取消的 Agent 开关节点删掉' `
+    (($null -eq $appliedXml.SelectSingleNode('/AiConfig/Agent/EnableMoves')) -and ($null -eq $appliedXml.SelectSingleNode('/AiConfig/Agent/SendThinking'))) $true
 
 $saveDir = Join-Path ([System.IO.Path]::GetTempPath()) ('onc-ai-config-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $saveDir | Out-Null
@@ -392,7 +394,7 @@ try {
     $saved = Invoke-Diag 'SaveAiConfigFile' @($savePath, $edited)
     Assert-Equal '保存到新文件：带默认文件的注释' $saved.Contains('OneNote 代码高亮 · AI 助手配置') $true
     Assert-Equal '保存到新文件：值和窗口一致' (Invoke-Diag 'DescribeAiConfig' @($saved)) `
-        'https://new.example/v1|sk-test|120|16384|m1,m2|24|True|Microsoft YaHei'
+        'https://new.example/v1|sk-test|120|16384|m1,m2|24|96|Microsoft YaHei'
 
     [System.IO.File]::WriteAllText($savePath, '<AiConfig><ApiUrl>写坏了')
     $saved = Invoke-Diag 'SaveAiConfigFile' @($savePath, $edited)
