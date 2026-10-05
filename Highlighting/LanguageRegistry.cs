@@ -61,6 +61,43 @@ namespace OneNoteCodeHelper.Highlighting
         }
 
         /// <summary>
+        /// Markdown 围栏上写的语言名常用简写（js、sh、c#），这里按常见别名对上已有的语言。
+        /// 没有对应高亮的（Markdown、Mermaid、日志）按纯文本。
+        /// </summary>
+        private static readonly Dictionary<string, string> Aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["js"] = "javascript", ["jsx"] = "javascript", ["mjs"] = "javascript", ["cjs"] = "javascript", ["node"] = "javascript",
+            ["ts"] = "typescript", ["tsx"] = "typescript",
+            ["sh"] = "bash", ["shell"] = "bash", ["zsh"] = "bash", ["console"] = "bash", ["shellscript"] = "bash",
+            ["cs"] = "csharp", ["c#"] = "csharp",
+            ["c"] = "cpp", ["c++"] = "cpp", ["cc"] = "cpp", ["cxx"] = "cpp", ["h"] = "cpp", ["hpp"] = "cpp",
+            ["py"] = "python", ["python3"] = "python",
+            ["ps1"] = "powershell", ["pwsh"] = "powershell", ["ps"] = "powershell",
+            ["cmd"] = "bat", ["batch"] = "bat",
+            ["yml"] = "yaml",
+            ["xaml"] = "xml", ["svg"] = "xml", ["xsd"] = "xml", ["xsl"] = "xml", ["xslt"] = "xml", ["csproj"] = "xml",
+            ["xhtml"] = "html",
+            ["scss"] = "css", ["less"] = "css",
+            ["mysql"] = "sql", ["postgresql"] = "sql", ["postgres"] = "sql", ["psql"] = "sql", ["sqlite"] = "sql",
+            ["tsql"] = "sql", ["plsql"] = "sql",
+            ["golang"] = "go",
+            ["kt"] = "kotlin", ["kts"] = "kotlin",
+            ["rs"] = "rust",
+            ["htm"] = "html", ["vue"] = "html",
+            ["jsonc"] = "json", ["json5"] = "json",
+            ["txt"] = "text", ["plaintext"] = "text", ["plain"] = "text", ["log"] = "text",
+            ["md"] = "text", ["markdown"] = "text", ["mermaid"] = "text"
+        };
+
+        /// <summary>按 id 或常用别名找语言，找不到返回 null。</summary>
+        internal static ILanguage FindByName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return null;
+            name = name.Trim();
+            return Find(name) ?? (Aliases.TryGetValue(name, out var id) ? Find(id) : null);
+        }
+
+        /// <summary>
         /// 按打分猜测语言。要求最高分够高、且明显高于次高分，否则判为无法确定并返回 null，
         /// 由调用方提示用户手动选——猜错语言比不猜更糟。
         /// 例外是同族的语言：把整族当成一个候选跟族外比，比得过就取族内分最高的那个。

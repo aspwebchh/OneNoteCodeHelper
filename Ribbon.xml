@@ -27,8 +27,8 @@
                   label="插入代码"
                   size="large"
                   imageMso="PasteTextOnly"
-                  screentip="粘贴代码并插入到当前页"
-                  supertip="打开一个窗口，把代码粘进去、看好预览效果，再插入到当前页面。"
+                  screentip="粘贴代码或 Markdown 并插入到当前页"
+                  supertip="打开一个窗口，把代码粘进去、看好预览效果，再插入到当前页面。语言选「Markdown」时，把粘贴的 Markdown 转成标题、列表、表格和代码框。"
                   onAction="OnShowInsertWindow" />
 
           <!--

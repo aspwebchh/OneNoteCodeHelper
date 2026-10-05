@@ -14,6 +14,7 @@
 - `Interop/`：Office COM 接口与 Win32 声明。`Services/OneNoteApi.cs` 封装 OneNote 调用（串行、断开协调），`Services/PageEditor.cs` 处理页面 XML、选区和写回，`Services/PageEditCoordinator.cs` 按页面串行化所有写回。
 - `Highlighting/`：语言词法分析、自动识别和主题；`Services/CodeBlockBuilder.cs`、`OneNoteHtmlEncoder.cs` 生成 OneNote 代码框；`Views/` 提供插入、预览、Agent 和 AI 配置窗口。
 - 文字功能：`Services/AiConfig.cs`（`ai-settings.xml` 读写）、`AiClient.cs`（流式请求）、`AiOptimizer.cs`（编排与固定协议）、`RichParagraph.cs` 和 `TextDiff.cs`（保留格式的逐字合并）、`BlankLines.cs`（删多余空行）、`LiveText.cs`（思考摘录）。
+- `Services/Markdown/`：「插入代码」窗口的「Markdown」选项（解析、行内格式、生成段落、插到页面末尾），预览在 `Views/MarkdownPreviewRenderer.cs`。段落预设、列表和标记复用 `ParagraphStyles`、`AgentMarks`、`AgentLayout`，强调配对复用 `AgentMarkdown`。Markdown 不是 `LanguageRegistry` 里的语言，不进功能区语言下拉、Agent 和 MCP 的语言列表。
 - `Services/Agent/`：Agent 的模型循环（`AgentRunner`）、工具注册与校验（`AgentTools`）、页面快照（`AgentPageSnapshot`）、格式与结构草稿、提交核验和撤销（`AgentCommitter`）。各文件职责见 `docs/agent-implementation.md` 的「代码位置」。
 - MCP：`Services/Mcp/` 是插件内的管道服务、读取和工作区草稿；`Mcp/Server/` 是独立的 net10.0-windows EXE；`Mcp/Shared/` 的协议代码同时编进插件和 EXE。
 - `Services/AddInSettings.cs`、`AddInLog.cs`：功能区设置和文件日志。`Services/RenderDiagnostics.cs`：不经过 OneNote 跑通渲染链路的入口，供回归脚本反射调用。
@@ -78,6 +79,7 @@ powershell -ExecutionPolicy Bypass -File Tools\mcp-test.ps1
 | 「高亮选中」、`PageEditor`、`CodeBlockBuilder`、`OneNoteHtmlEncoder` | `highlight-selection-test.ps1` |
 | 文字功能、`AiConfig`、`AiClient`、`RichParagraph`、`BlankLines`、AI 配置窗口 | `ai-merge-test.ps1` |
 | `Services/Agent/`、`PageEditCoordinator`、`OneNoteApi`、`Tests/` | `agent-test.ps1` |
+| `Services/Markdown/`、插入窗口的 Markdown 模式 | `agent-test.ps1`（用例在 `Tests/MarkdownRegression.cs`）；改了界面再跑 `--render-ui` |
 | `Mcp/`、`Services/Mcp/` | `mcp-test.ps1`；改发布方式时再用 `publish-mcp.ps1` 的输出跑一次 `mcp-test.ps1 -McpExe <发布的 EXE>` |
 | `install.ps1`、`uninstall.ps1`、`Tools/addin-surrogate.ps1` | `addin-surrogate-test.ps1`，无需构建，分别用 `powershell` 和 `pwsh` 运行 |
 | 共享渲染、页面编辑、构建配置 | 全部脚本 |

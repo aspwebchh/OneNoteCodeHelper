@@ -602,7 +602,7 @@
                            FontSize="12"
                            Foreground="{StaticResource Muted}"
                            TextTrimming="CharacterEllipsis"
-                           Text="粘贴代码，确认预览后插入到当前页末尾" />
+                           Text="粘贴代码或 Markdown，确认预览后插入到当前页末尾" />
             </StackPanel>
         </Grid>
 
@@ -612,6 +612,7 @@
                 <TextBlock Text="语言" Margin="0,0,8,0" Style="{StaticResource FieldLabel}" />
                 <ComboBox x:Name="LanguageBox"
                           Width="150"
+                          ToolTip="选「Markdown」时，把 Markdown 转成标题、列表、表格和代码框插入，不当成一段代码。"
                           Style="{StaticResource Picker}"
                           SelectionChanged="OnOptionChanged" />
 
@@ -660,7 +661,7 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="代码" Style="{StaticResource SectionLabel}" />
+                        <TextBlock x:Name="SourceLabel" Text="代码" Style="{StaticResource SectionLabel}" />
                         <!-- 自动识别时显示认出来的语言 -->
                         <TextBlock x:Name="DetectHint"
                                    Margin="8,0,0,0"

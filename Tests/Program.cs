@@ -44,6 +44,7 @@ internal static partial class Program
             return 0;
         }
         TestPageTitles();
+        TestMarkdown();
         Test("HTML entities, whitespace, links and multiple runs survive formatting", () =>
         {
             var oe = Paragraph("a", "&nbsp;A&amp;B <b>重点</b><br><a href='https://example.com'>链接</a>", "中文😀");
@@ -1257,7 +1258,7 @@ internal static partial class Program
         });
         Test("Insert code window has its header icon and previews the pasted code", () =>
         {
-            var window = new OneNoteCodeHelper.Views.InsertCodeWindow(new PageEditor(null), new AddInSettings { LanguageId = "python" }, IntPtr.Zero);
+            var window = new OneNoteCodeHelper.Views.InsertCodeWindow(new PageEditor(null), new AddInSettings { LanguageId = "python" }, IntPtr.Zero, new AgentOptions());
             try
             {
                 True(window.AppIcon.Source != null);

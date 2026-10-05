@@ -52,6 +52,12 @@ namespace OneNoteCodeHelper.Services
         public bool ShowBorders { get; set; }
 
         /// <summary>
+        /// 「插入代码」窗口上次选的是不是「Markdown」。和 <see cref="LanguageId"/> 分开记：
+        /// 语言是功能区「高亮选中」共用的，Markdown 只在插入窗口里出现。
+        /// </summary>
+        public bool InsertMarkdown { get; set; }
+
+        /// <summary>
         /// Agent 窗口「功能」下拉选的是哪一项：<see cref="AiConfigStore.AgentFunctionName"/>，
         /// 或 ai-settings.xml 里 Function 的 name。旧版本存的 AiFunction 元素不再读取，升级后默认回到 Agent。
         /// </summary>
@@ -77,6 +83,7 @@ namespace OneNoteCodeHelper.Services
                 TabWidth = TabWidth,
                 CodeBlockWidth = CodeBlockWidth,
                 ShowBorders = ShowBorders,
+                InsertMarkdown = InsertMarkdown,
                 AgentFunction = AgentFunction,
                 AiModel = AiModel,
                 AiEffort = AiEffort

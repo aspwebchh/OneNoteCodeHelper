@@ -93,7 +93,8 @@ namespace OneNoteCodeHelper.Services.Mcp
             }
             catch (Exception)
             {
-                AddInLog.Info("MCP settings state=default");
+                // MCP 和「插入代码」窗口的 Markdown 都从这里取，日志不写调用方。
+                AddInLog.Info("读取 Agent 设置失败，使用默认设置。");
                 return new AgentOptions();
             }
         }

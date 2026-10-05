@@ -547,6 +547,34 @@ namespace OneNoteCodeHelper.Services.Agent
         internal static readonly string[] Colors = { "#1F4E79", "#365F91", "#222222", "#666666" };
         internal static readonly string[] Fonts = { "Microsoft YaHei", "Calibri", "Arial" };
 
+        /// <summary>插入 Markdown 的 ### 用的三级标题。不在 <see cref="Ids"/> 里，Agent 工具不提供。</summary>
+        internal const string Heading3 = "heading3";
+        private static readonly string[] AllIds = { "page_title", "heading1", "heading2", "body", "quote", Heading3 };
+
+        /// <summary>预设的外观：字号（磅）、文字颜色、是否加粗、段前段后（磅）。套预设和插入窗口的预览共用。</summary>
+        internal struct Look
+        {
+            internal double Size;
+            internal string Color;
+            internal bool Bold;
+            internal double SpaceBefore;
+            internal double SpaceAfter;
+        }
+
+        internal static Look Appearance(string preset)
+        {
+            var index = Array.IndexOf(AllIds, preset);
+            if (index < 0) throw new AiException("未知样式。");
+            return new Look
+            {
+                Size = new[] { 20d, 16, 13.5, 11, 10.5, 12 }[index],
+                Color = new[] { Colors[0], Colors[0], Colors[1], Colors[2], Colors[3], Colors[1] }[index],
+                Bold = index <= 2 || preset == Heading3,
+                SpaceBefore = new[] { 0d, 12, 8, 0, 4, 6 }[index],
+                SpaceAfter = new[] { 12d, 6, 4, 4, 4, 2 }[index]
+            };
+        }
+
         /// <summary>
         /// 清除格式专用：在本段文字上显式覆盖继承格式，不改变下级段落。ClearInline 已把需保留的 emoji、符号字体移进 span。
         /// 与普通套预设分开，避免改变 set_paragraph_style 保留局部强调的行为；空 T 也要写入重置值。
@@ -562,13 +590,13 @@ namespace OneNoteCodeHelper.Services.Agent
 
         internal static XElement Definition(string role, AgentOptions options)
         {
-            var index = Array.IndexOf(Ids, role);
-            var name = role == "heading1" ? "h1" : role == "heading2" ? "h2" : "p";
+            var look = Appearance(role);
+            var name = role == "heading1" ? "h1" : role == "heading2" ? "h2" : role == Heading3 ? "h3" : "p";
             return new XElement(OneNoteApi.One + "QuickStyleDef", new XAttribute("name", name),
-                new XAttribute("font", options.FontFamily), new XAttribute("fontSize", new[] { 20d, 16, 13.5, 11, 10.5 }[index]),
+                new XAttribute("font", options.FontFamily), new XAttribute("fontSize", look.Size),
                 // 基础色由段落/文字补丁设置。把颜色放在 QuickStyleDef 会使 OneNote 给链接也补上正文色。
                 new XAttribute("fontColor", "automatic"),
-                new XAttribute("highlightColor", "automatic"), new XAttribute("bold", index <= 2 ? "true" : "false"),
+                new XAttribute("highlightColor", "automatic"), new XAttribute("bold", look.Bold ? "true" : "false"),
                 new XAttribute("spaceBefore", "0"), new XAttribute("spaceAfter", "0"));
         }
 
@@ -601,17 +629,14 @@ namespace OneNoteCodeHelper.Services.Agent
         }
         internal static void Apply(XElement oe, string preset, IDictionary<string, object> overrides, AgentOptions options, bool? hasLayoutChildren = null)
         {
-            var index = Array.IndexOf(Ids, preset);
-            if (index < 0) throw new AiException("未知样式。");
-            var size = new[] { 20d, 16, 13.5, 11, 10.5 }[index];
-            var color = new[] { Colors[0], Colors[0], Colors[1], Colors[2], Colors[3] }[index];
+            var look = Appearance(preset);
             var css = Css.Read((string)oe.Attribute("style"));
             css["font-family"] = options.FontFamily;
-            css["font-size"] = size.ToString(CultureInfo.InvariantCulture) + "pt";
-            css["color"] = color;
+            css["font-size"] = look.Size.ToString(CultureInfo.InvariantCulture) + "pt";
+            css["color"] = look.Color;
             oe.SetAttributeValue("alignment", "left");
-            oe.SetAttributeValue("spaceBefore", new[] { 0, 12, 8, 0, 4 }[index]);
-            oe.SetAttributeValue("spaceAfter", new[] { 12, 6, 4, 4, 4 }[index]);
+            oe.SetAttributeValue("spaceBefore", look.SpaceBefore.ToString(CultureInfo.InvariantCulture));
+            oe.SetAttributeValue("spaceAfter", look.SpaceAfter.ToString(CultureInfo.InvariantCulture));
             foreach (var item in overrides)
             {
                 switch (item.Key)
@@ -641,7 +666,7 @@ namespace OneNoteCodeHelper.Services.Agent
             }
             var rich = new AgentRichText(oe);
             rich.Format(0, rich.Text.Length, remove, true);
-            if (index <= 2)
+            if (look.Bold)
             {
                 rich = new AgentRichText(oe);
                 rich.Format(0, rich.Text.Length, new Dictionary<string, string> { ["font-weight"] = "bold" });

@@ -15,7 +15,8 @@ internal static class WindowPreview
     // 只渲染内存中的窗口内容，不启动 OneNote、不调用接口、不显示原生窗口。
     // 出几张图：Agent 自定义排版、选了第一个文字功能；模拟处理中：Agent 第 3 轮（前两轮摘录留着）、Agent 刚开始还没有输出、
     // 文字功能（思考框占满）、思考内容超出思考框（滚到最下面、顶上渐隐）；Agent 做完（步骤和结果）。都按窗口默认大小渲染，几张应一样高。
-    // 另外是 AI 配置窗口的四页，以及配置文件读不了、保存前校验不过时的样子；最后是插入代码窗口，空的和填好代码的各一张。
+    // 另外是 AI 配置窗口的四页，以及配置文件读不了、保存前校验不过时的样子；最后是插入代码窗口：空的、填好代码的，
+    // Markdown 的预览，以及自动识别时提示改选 Markdown 的各一张。
     internal static int Render(string directory)
     {
         Directory.CreateDirectory(directory);
@@ -61,6 +62,20 @@ internal static class WindowPreview
             window.CodeBox.Text = InsertSample;
             window.UpdatePreview();
         });
+        // Markdown：标题、列表、待办、引用、表格和代码框都在预览里。
+        RenderInsert(directory, "insert-code-window-markdown.png", new AddInSettings { InsertMarkdown = true }, window =>
+        {
+            window.CodeBox.Text = MarkdownSample;
+            window.UpdatePreview(true);
+        });
+        // 自动识别时粘了 Markdown：提示可以改选 Markdown。
+        RenderInsert(directory, "insert-code-window-markdown-hint.png", new AddInSettings(), window =>
+        {
+            window.CodeBox.Text = MarkdownSample;
+            window.UpdatePreview();
+            System.Threading.Thread.Sleep(500);
+            DoEvents();
+        });
         return 0;
     }
 
@@ -99,10 +114,38 @@ internal static class WindowPreview
         "    settings = load_settings(Path(\"settings.json\"))\n" +
         "    print(Highlighter(settings).render(\"print('你好')\"))\n";
 
+    private const string MarkdownSample =
+        "# 部署说明\n" +
+        "\n" +
+        "按下面的步骤在测试机上安装，**先备份配置**，详见 [安装文档](https://example.com/install)。\n" +
+        "\n" +
+        "## 准备\n" +
+        "\n" +
+        "1. 安装 .NET Framework 4.8\n" +
+        "2. 关闭 OneNote\n" +
+        "   - 等待 `dllhost.exe` 退出\n" +
+        "3. 运行安装脚本\n" +
+        "\n" +
+        "- [x] 已备份 `settings.xml`\n" +
+        "- [ ] 通知同事 ~~周五~~ 周四升级\n" +
+        "\n" +
+        "> 注意：安装需要管理员权限。\n" +
+        "\n" +
+        "```powershell\n" +
+        "powershell -ExecutionPolicy Bypass -File install.ps1\n" +
+        "Get-Process dllhost | Where-Object { $_.Id -gt 0 }\n" +
+        "```\n" +
+        "\n" +
+        "| 参数 | 说明 | 默认 |\n" +
+        "| --- | --- | :---: |\n" +
+        "| `-SkipBuild` | 跳过构建 | 否 |\n" +
+        "| `-Force` | 强制结束进程 | 否 |\n";
+
     /// <summary>插入代码窗口。插入之前不会用到 PageEditor，传一个连不上 OneNote 的就行。</summary>
     private static void RenderInsert(string directory, string fileName, AddInSettings settings, Action<InsertCodeWindow> setup)
     {
-        var window = new InsertCodeWindow(new PageEditor(null), settings, IntPtr.Zero);
+        // 正文字体用默认的 Agent 设置，不读本机的 ai-settings.xml。
+        var window = new InsertCodeWindow(new PageEditor(null), settings, IntPtr.Zero, new AgentOptions());
         setup?.Invoke(window);
         Snap(window, directory, fileName);
         window.Close();
@@ -190,6 +233,15 @@ internal static class WindowPreview
         setup?.Invoke(window);
         Snap(window, directory, fileName);
         window.Close();
+    }
+
+    /// <summary>处理完界面线程上排着的回调，比如后台识别完成后回来刷新预览。</summary>
+    private static void DoEvents()
+    {
+        var frame = new System.Windows.Threading.DispatcherFrame();
+        System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.Background, new Action(() => frame.Continue = false));
+        System.Windows.Threading.Dispatcher.PushFrame(frame);
     }
 
     private static void Snap(System.Windows.Window window, string directory, string fileName)

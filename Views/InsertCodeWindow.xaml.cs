@@ -11,6 +11,9 @@ using OneNoteCodeHelper.Highlighting;
 using OneNoteCodeHelper.Highlighting.Themes;
 using OneNoteCodeHelper.Interop;
 using OneNoteCodeHelper.Services;
+using OneNoteCodeHelper.Services.Agent;
+using OneNoteCodeHelper.Services.Markdown;
+using OneNoteCodeHelper.Services.Mcp;
 
 namespace OneNoteCodeHelper.Views
 {
@@ -21,14 +24,18 @@ namespace OneNoteCodeHelper.Views
     /// </summary>
     public partial class InsertCodeWindow : Window
     {
-        /// <summary>下拉里代表「自动识别」的那一项。</summary>
+        /// <summary>
+        /// 语言下拉的一项：一种语言、「自动识别」（Language 为 null），或者「Markdown」（IsMarkdown）。
+        /// Markdown 不是 <see cref="LanguageRegistry"/> 里的语言：它转出来的是标题、列表、表格和代码框，不是一个代码框。
+        /// </summary>
         private sealed class LanguageChoice
         {
-            internal LanguageChoice(string id, string label, ILanguage language)
+            internal LanguageChoice(string id, string label, ILanguage language, bool isMarkdown = false)
             {
                 Id = id;
                 Label = label;
                 Language = language;
+                IsMarkdown = isMarkdown;
             }
 
             internal string Id { get; }
@@ -37,8 +44,17 @@ namespace OneNoteCodeHelper.Views
 
             internal ILanguage Language { get; }
 
+            internal bool IsMarkdown { get; }
+
             public override string ToString() => Label;
         }
+
+        private const string MarkdownChoiceId = "markdown-format";
+
+        private const string MarkdownChoiceLabel = "Markdown";
+
+        /// <summary>Markdown 预览最多画这么多块，理由同 <see cref="PreviewLineLimit"/>。</summary>
+        private const int PreviewBlockLimit = 300;
 
         /// <summary>
         /// 字体下拉的备选。OneNote 不认 CSS 字体栈（实测只取第一个名字），
@@ -64,12 +80,15 @@ namespace OneNoteCodeHelper.Views
 
         private readonly PageEditor _editor;
 
+        /// <summary>Markdown 转成的正文用 Agent 配置里的字体，和 Agent 排版、MCP 导入一致。</summary>
+        private readonly AgentOptions _options;
+
         private readonly DispatcherTimer _previewTimer;
 
         /// <summary>每发起一次刷新加一。后台识别完回来时编号已经变了，说明期间又改过，结果作废。</summary>
         private int _previewVersion;
 
-        internal InsertCodeWindow(PageEditor editor, AddInSettings settings, IntPtr ownerHandle)
+        internal InsertCodeWindow(PageEditor editor, AddInSettings settings, IntPtr ownerHandle, AgentOptions options = null)
         {
             _previewTimer = new DispatcherTimer { Interval = PreviewDelay };
             _previewTimer.Tick += (_, __) => UpdatePreview();
@@ -78,6 +97,7 @@ namespace OneNoteCodeHelper.Views
             InitializeComponent();
 
             _editor = editor;
+            _options = options ?? McpEditService.LoadConfiguredOptions();
             Settings = settings.Clone();
 
             // 这两个必须最先设：下面给各个下拉赋初值会触发 OnOptionChanged，那时复选框若还是默认的
@@ -114,8 +134,9 @@ namespace OneNoteCodeHelper.Views
             var languageChoices = BuildLanguageChoices();
             LanguageBox.ItemsSource = languageChoices;
             LanguageBox.DisplayMemberPath = nameof(LanguageChoice.Label);
-            LanguageBox.SelectedItem = languageChoices
-                .FirstOrDefault(c => string.Equals(c.Id, Settings.LanguageId, StringComparison.OrdinalIgnoreCase));
+            LanguageBox.SelectedItem = Settings.InsertMarkdown
+                ? languageChoices.First(c => c.IsMarkdown)
+                : languageChoices.FirstOrDefault(c => string.Equals(c.Id, Settings.LanguageId, StringComparison.OrdinalIgnoreCase));
 
             ThemeBox.ItemsSource = CodeThemes.All.ToList();
             ThemeBox.DisplayMemberPath = nameof(CodeTheme.DisplayName);
@@ -142,6 +163,7 @@ namespace OneNoteCodeHelper.Views
             };
 
             choices.AddRange(LanguageRegistry.All.Select(l => new LanguageChoice(l.Id, l.DisplayName, l)));
+            choices.Add(new LanguageChoice(MarkdownChoiceId, MarkdownChoiceLabel, null, true));
             return choices;
         }
 
@@ -157,11 +179,22 @@ namespace OneNoteCodeHelper.Views
             var themeChanged = false;
             var fontSizeChanged = false;
 
-            if (LanguageBox.SelectedItem is LanguageChoice choice && choice.Id != Settings.LanguageId)
+            if (LanguageBox.SelectedItem is LanguageChoice choice)
             {
-                Settings.LanguageId = choice.Id;
-                SettingsChanged = true;
-                needsRebuild = true;
+                // Markdown 单独记：LanguageId 是功能区「高亮选中」共用的，不能写成 Markdown。
+                if (choice.IsMarkdown != Settings.InsertMarkdown)
+                {
+                    Settings.InsertMarkdown = choice.IsMarkdown;
+                    SettingsChanged = true;
+                    needsRebuild = true;
+                }
+
+                if (!choice.IsMarkdown && choice.Id != Settings.LanguageId)
+                {
+                    Settings.LanguageId = choice.Id;
+                    SettingsChanged = true;
+                    needsRebuild = true;
+                }
             }
 
             if (ThemeBox.SelectedItem is CodeTheme theme && theme.Id != Settings.ThemeId)
@@ -213,7 +246,8 @@ namespace OneNoteCodeHelper.Views
                 needsRebuild = true;
             }
 
-            if (needsRebuild)
+            // Markdown 的预览里代码框只是其中几块，换主题、字号也整份重画。
+            if (needsRebuild || (IsMarkdownSelected() && (themeChanged || fontSizeChanged)))
             {
                 UpdatePreview();
             }
@@ -245,15 +279,51 @@ namespace OneNoteCodeHelper.Views
         /// 这样哪怕碰上识别很慢的输入，窗口也还能打字、能关。
         /// internal 是为了离屏预览（Tests/WindowPreview.cs）能填好代码直接出图，不用等计时器。
         /// </summary>
-        internal void UpdatePreview()
+        /// <param name="synchronous">Markdown 也在当前线程解析，离屏预览要立刻出图时用。</param>
+        internal void UpdatePreview(bool synchronous = false)
         {
             _previewTimer.Stop();
             var version = ++_previewVersion;
             var code = CodeBox.Text;
+            var markdown = IsMarkdownSelected();
+            SourceLabel.Text = markdown ? "Markdown" : "代码";
 
             if (string.IsNullOrWhiteSpace(code))
             {
-                ClearPreview("等待粘贴代码…");
+                ClearPreview(markdown ? "等待粘贴 Markdown…" : "等待粘贴代码…");
+                return;
+            }
+
+            if (markdown)
+            {
+                // 没写语言的围栏要自动识别，和下面一样放到后台，大段内容也不卡打字。
+                if (synchronous)
+                {
+                    ShowMarkdownPreview(MarkdownParser.Parse(code));
+                    return;
+                }
+
+                var ui = Dispatcher;
+                Task.Run(() =>
+                {
+                    MarkdownDocument doc = null;
+                    try
+                    {
+                        doc = MarkdownParser.Parse(code);
+                    }
+                    catch (Exception ex)
+                    {
+                        AddInLog.Warn("解析 Markdown 失败。", ex);
+                    }
+
+                    ui.BeginInvoke(new Action(() =>
+                    {
+                        if (version == _previewVersion)
+                        {
+                            ShowMarkdownPreview(doc);
+                        }
+                    }));
+                });
                 return;
             }
 
@@ -268,9 +338,11 @@ namespace OneNoteCodeHelper.Views
             Task.Run(() =>
             {
                 ILanguage detected = null;
+                var looksLikeMarkdown = false;
                 try
                 {
                     detected = LanguageRegistry.Detect(code);
+                    looksLikeMarkdown = MarkdownParser.LooksLikeMarkdown(code);
                 }
                 catch (Exception ex)
                 {
@@ -281,24 +353,80 @@ namespace OneNoteCodeHelper.Views
                 {
                     if (version == _previewVersion)
                     {
-                        ShowPreview(code, detected);
+                        ShowPreview(code, detected, looksLikeMarkdown);
                     }
                 }));
             });
         }
 
-        private void ShowPreview(string code, ILanguage language)
+        private void ShowMarkdownPreview(MarkdownDocument doc)
+        {
+            try
+            {
+                if (doc == null)
+                {
+                    ClearPreview("解析 Markdown 失败，详情见日志。");
+                    return;
+                }
+
+                if (doc.LimitError != null || doc.Blocks.Count == 0)
+                {
+                    ClearPreview(doc.LimitError ?? "没有要插入的内容。");
+                    return;
+                }
+
+                DetectHint.Text = string.Empty;
+                Preview.Document = MarkdownPreviewRenderer.Build(doc, Settings, _options, PreviewBlockLimit);
+
+                var status = $"将转换为 {doc.TextCount} 段文字、{doc.TableCount} 个表格、{doc.CodeCount} 个代码框";
+                if (doc.WarningCount > 0)
+                {
+                    status += $"；{DescribeWarnings(doc)}按原文保留";
+                }
+
+                if (doc.Blocks.Count > PreviewBlockLimit)
+                {
+                    status += $"。预览只显示前 {PreviewBlockLimit} 块，插入的是全部";
+                }
+
+                SetStatus(status + "，插入到当前页末尾。");
+                InsertButton.IsEnabled = true;
+            }
+            catch (Exception ex)
+            {
+                AddInLog.Warn("生成 Markdown 预览失败。", ex);
+                SetStatus("生成预览失败：" + ex.Message);
+                InsertButton.IsEnabled = false;
+            }
+        }
+
+        private static string DescribeWarnings(MarkdownDocument doc)
+        {
+            var names = new Dictionary<string, string>
+            {
+                ["html"] = "HTML 标签",
+                ["image"] = "图片（不下载，留作链接）",
+                ["link"] = "相对地址等链接（只留文字）"
+            };
+            return string.Join("、", doc.Warnings.Select(w => $"{(names.TryGetValue(w.Key, out var name) ? name : w.Key)} {w.Value} 处"));
+        }
+
+        private void ShowPreview(string code, ILanguage language, bool looksLikeMarkdown = false)
         {
             // 预览失败不该弹窗打断打字，出错就把原因写到状态栏。
             try
             {
                 if (language == null)
                 {
-                    ClearPreview("无法自动判断这段代码的语言，请在左上角手动选择语言。");
+                    ClearPreview(looksLikeMarkdown
+                        ? $"看起来是 Markdown：要转成笔记格式，在左上角「语言」里选「{MarkdownChoiceLabel}」。"
+                        : "无法自动判断这段代码的语言，请在左上角手动选择语言。");
                     return;
                 }
 
-                DetectHint.Text = IsAutoSelected() ? $"已识别为 {language.DisplayName}" : string.Empty;
+                DetectHint.Text = !IsAutoSelected() ? string.Empty
+                    : looksLikeMarkdown ? $"已识别为 {language.DisplayName}，像是 Markdown，可改选「{MarkdownChoiceLabel}」"
+                    : $"已识别为 {language.DisplayName}";
 
                 // 和插入时一样去掉末尾空白，预览的行数才和插入后对得上
                 code = code.TrimEnd();
@@ -383,13 +511,19 @@ namespace OneNoteCodeHelper.Views
 
         private bool IsAutoSelected()
         {
-            return LanguageBox.SelectedItem is LanguageChoice choice && choice.Language == null;
+            return LanguageBox.SelectedItem is LanguageChoice choice && choice.Language == null && !choice.IsMarkdown;
+        }
+
+        private bool IsMarkdownSelected()
+        {
+            return LanguageBox.SelectedItem is LanguageChoice choice && choice.IsMarkdown;
         }
 
         private void OnInsert(object sender, RoutedEventArgs e)
         {
-            var language = ResolveLanguage();
-            if (language == null)
+            var markdown = IsMarkdownSelected();
+            var language = markdown ? null : ResolveLanguage();
+            if (!markdown && language == null)
             {
                 SetStatus("请先选择语言。");
                 return;
@@ -398,11 +532,19 @@ namespace OneNoteCodeHelper.Views
             try
             {
                 InsertButton.IsEnabled = false;
-                var result = _editor.InsertCode(CodeBox.Text, language, Settings);
+                var verified = true;
+                var result = markdown
+                    ? _editor.InsertMarkdown(CodeBox.Text, Settings, _options, out verified)
+                    : _editor.InsertCode(CodeBox.Text, language, Settings);
 
                 if (result.Success)
                 {
                     AddInLog.Info(result.Message);
+                    if (!verified)
+                    {
+                        MessageBox.Show(this, result.Message, "OneNote 代码高亮", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+
                     DialogResult = true;
                     Close();
                     return;

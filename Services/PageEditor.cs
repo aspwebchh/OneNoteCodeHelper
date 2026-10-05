@@ -314,6 +314,27 @@ namespace OneNoteCodeHelper.Services
         }
 
         /// <summary>
+        /// 把 Markdown 转成笔记格式，插到当前页末尾的新文本框里。代码框的主题、字体、字号、边框取 settings，
+        /// 正文字体取 Agent 配置。verified 为 false 时已经提交，但回读没有找到插入的内容。
+        /// </summary>
+        internal EditResult InsertMarkdown(string markdown, AddInSettings settings, AgentOptions options, out bool verified)
+        {
+            verified = false;
+            if (string.IsNullOrWhiteSpace(markdown))
+            {
+                return EditResult.Fail("没有要插入的内容。");
+            }
+
+            var pageId = _api.GetCurrentPageId();
+            if (string.IsNullOrEmpty(pageId))
+            {
+                return EditResult.Fail("找不到当前页面。请先在 OneNote 里打开一个页面再试。");
+            }
+
+            return Markdown.MarkdownWriter.Insert(_api, pageId, markdown, settings, options, out verified);
+        }
+
+        /// <summary>
         /// 读出文字功能要处理的段落：selectedIds 为 null 时取整页（标题加所有文本框），否则只取这些段落。
         /// 代码段落、拼不回原格式的段落、空段落都不取。selectedBlankLines 是选区里的空行，只在处理选区时用到。
         /// 选区在 Agent 窗口打开时就固定了，所以由调用方传进来，不读 OneNote 当前的选区。

@@ -213,7 +213,7 @@ namespace OneNoteCodeHelper.Services
         /// 2. HTML 会折叠连续空白：行首缩进全部转成 &amp;nbsp;，行内连续空格保留 n-1 个硬空格
         ///    再跟一个普通空格，这样既保住对齐又给长行留了换行机会。
         /// </summary>
-        private static string EncodeText(string text, ref bool atLineStart)
+        internal static string EncodeText(string text, ref bool atLineStart)
         {
             var builder = new StringBuilder(text.Length);
             var i = 0;

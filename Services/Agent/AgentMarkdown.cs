@@ -168,7 +168,22 @@ namespace OneNoteCodeHelper.Services.Agent
                 Take(m.Index + m.Length - ticks, ticks, "inline_code");
                 for (var i = m.Index; i < m.Index + m.Length; i++) masked[i] = '\0';
             }
-            if (!kinds.Contains("emphasis")) return;
+            if (kinds.Contains("emphasis")) Emphasis(masked, p, offset, format, result);
+        }
+
+        /// <summary>
+        /// 插入 Markdown 用的行内强调分析：masked 是一行行内文字，行内代码、链接等不参与配对的字已换成 \0。
+        /// 配对规则与 strip_markdown 相同，结果里只有强调符号（Marks）和要加的格式（Formats）。
+        /// </summary>
+        internal static Result InlineEmphasis(char[] masked)
+        {
+            var result = new Result();
+            Emphasis(masked, 0, 0, true, result);
+            return result;
+        }
+
+        private static void Emphasis(char[] masked, int p, int offset, bool format, Result result)
+        {
             // 用栈配对，连续的结尾符号可以同时关闭内外层（**粗体里有 *斜体***）。
             var open = "*_~".ToDictionary(c => c, c => new EmphasisOpenings());
             for (var i = p; i < masked.Length;)
